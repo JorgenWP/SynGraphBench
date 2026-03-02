@@ -22,7 +22,6 @@ conda activate GADBench
 # If your use a different CUDA version, please refer to the PyTorch and DGL websites for the appropriate versions.
 conda install "numpy<2"
 conda install pytorch==1.13.1 pytorch-cuda=11.7 -c pytorch -c nvidia
-pip install torchdata==0.5.1
 conda install -c dglteam/label/cu117 dgl=1.1.2
 conda install "mkl<2024.1" "intel-openmp<2024.1"
 
