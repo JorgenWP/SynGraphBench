@@ -58,7 +58,7 @@ for model in models:
             continue
         time_cost = 0
         train_config = {
-            'device': 'cuda',
+            'device': 'cuda' if torch.cuda.is_available() else 'cpu',
             'epochs': 200,
             'patience': 50,
             'metric': 'AUPRC',
