@@ -311,7 +311,7 @@ class XGBoostDetector(BaseDetector):
         super().__init__(train_config, model_config, data)
         import xgboost as xgb
         eval_metric = roc_auc_score if train_config['metric'] == "AUROC" else average_precision_score
-        self.model = xgb.XGBClassifier(tree_method='gpu_hist', eval_metric=eval_metric, **model_config)
+        self.model = xgb.XGBClassifier(tree_method='hist', eval_metric=eval_metric, **model_config)
 
     def train(self):
         train_X = self.source_graph.ndata['feature'][self.train_mask].cpu().numpy()
@@ -336,7 +336,7 @@ class XGBNADetector(BaseDetector):
         super().__init__(train_config, model_config, data)
         import xgboost as xgb
         eval_metric = roc_auc_score if train_config['metric'] == "AUROC" else average_precision_score
-        self.model = xgb.XGBClassifier(tree_method='gpu_hist', eval_metric=eval_metric, **model_config)
+        self.model = xgb.XGBClassifier(tree_method='hist', eval_metric=eval_metric, **model_config)
         self.aggregate = dglnn.GINConv(None, activation=None, init_eps=0,
                                  aggregator_type='mean').to(self.train_config['device'])
 
@@ -373,7 +373,7 @@ class XGBGraphDetector(BaseDetector):
         super().__init__(train_config, model_config, data)
         import xgboost as xgb
         eval_metric = roc_auc_score if train_config['metric'] == "AUROC" else average_precision_score
-        self.model = xgb.XGBClassifier(tree_method='gpu_hist', eval_metric=eval_metric, verbose=2, **model_config)
+        self.model = xgb.XGBClassifier(tree_method='hist', eval_metric=eval_metric, verbose=2, **model_config)
         gnn = GIN_noparam(**model_config).to(self.source_graph.device)
         new_feat = gnn(self.source_graph)
         if self.train_config['inductive'] == True:
