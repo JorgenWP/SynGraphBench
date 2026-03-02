@@ -15,17 +15,18 @@ Before you begin, ensure that you have Anaconda or Miniconda installed on your s
 
 ```shell
 # Create and activate a new Conda environment named 'GADBench'
-conda create -n GADBench
+conda create -n GADBench python=3.10
 conda activate GADBench
 
 # Install Pytorch and DGL with CUDA 11.7 support
 # If your use a different CUDA version, please refer to the PyTorch and DGL websites for the appropriate versions.
-conda install numpy
+conda install numpy<2
 conda install pytorch==1.13.1 pytorch-cuda=11.7 -c pytorch -c nvidia
-conda install -c dglteam/label/cu117 dgl
+pip install torchdata==0.5.1
+conda install -c dglteam/label/cu117 dgl=1.1.2
+conda install "mkl<2024.1" "intel-openmp<2024.1"
 
 # Install additional dependencies
-conda install pip
 pip install xgboost pyod scikit-learn sympy pandas catboost bidict openpyxl
 ```
 
