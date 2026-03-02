@@ -20,7 +20,7 @@ conda activate GADBench
 
 # Install Pytorch and DGL with CUDA 11.7 support
 # If your use a different CUDA version, please refer to the PyTorch and DGL websites for the appropriate versions.
-conda install numpy<2
+conda install "numpy<2"
 conda install pytorch==1.13.1 pytorch-cuda=11.7 -c pytorch -c nvidia
 pip install torchdata==0.5.1
 conda install -c dglteam/label/cu117 dgl=1.1.2
