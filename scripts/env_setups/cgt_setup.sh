@@ -1,9 +1,10 @@
 #!/bin/bash
 
 set -e
+set -x
 
-ENV_NAME="cgt"
-CGT_DIR="../../CGT"
+ENV_NAME="cgt_test"
+CGT_DIR="../CGT"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 
