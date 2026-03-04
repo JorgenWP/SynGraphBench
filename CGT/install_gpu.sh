@@ -1,11 +1,11 @@
 #!/bin/bash
 
 # 1. Install PyTorch 2.3.1 (Stable + CUDA 12.1)
-conda install pytorch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 pytorch-cuda=12.1 -c pytorch -c nvidia
+conda install pytorch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 pytorch-cuda=12.1 -c pytorch -c nvidia -y
 
 # 2. Install DGL (Deep Graph Library)
 # We point to the CUDA 12.1 repository.
-conda install -c dglteam/label/th23_cu121 dgl
+conda install -c dglteam/label/th23_cu121 dgl -y
 
 # 3. Install PyTorch Geometric (PyG)
 # Modern PyG installs cleanly with pip.

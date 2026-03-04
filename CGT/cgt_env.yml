@@ -1,4 +1,4 @@
-name: cgt_modern
+name: cgt
 channels:
   - defaults
 dependencies:
