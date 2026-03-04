@@ -1,0 +1,7 @@
+name: cgt_modern
+channels:
+  - defaults
+dependencies:
+  - python=3.11                 # <--- The latest stable standard for AI
+  - "mkl<2025.0.0"
+  - pip
