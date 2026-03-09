@@ -87,9 +87,69 @@ def load_ogbn(args):
     return graph, node_feat, label, feat_size, label_size
 
 
+def load_dgl_graph(args):
+    """Load a DGL binary graph file (GADBench format) and convert to CGT format."""
+    from dgl.data.utils import load_graphs
+
+    graph_path = osp.join(args.data_dir, args.dataset)
+    graph = load_graphs(graph_path)[0][0]
+
+    # Extract features and labels
+    features = graph.ndata['feature'].numpy().astype(np.float32)
+    labels = graph.ndata['label'].numpy().astype(np.int64)
+
+    # Normalize features
+    features = normalize(features, axis=1, norm='l2')
+
+    # Build adjacency list from DGL edges
+    src, dst = graph.edges()
+    src, dst = src.numpy(), dst.numpy()
+    num_nodes = graph.num_nodes()
+    adj_list = [[] for _ in range(num_nodes)]
+    for s, d in zip(src, dst):
+        adj_list[s].append(int(d))
+    # Ensure undirected
+    for s, d in zip(dst, src):
+        if int(d) not in adj_list[s]:
+            adj_list[s].append(int(d))
+
+    feat_size = features.shape[1]
+    labels = labels - labels.min()
+    label_size = int(labels.max() - labels.min() + 1)
+
+    return adj_list, features, labels, feat_size, label_size
+
+
+def split_ids_from_dgl(args, semi_supervised=False, trial_id=0):
+    """Extract pre-defined train/val/test splits from a DGL graph (GADBench format)."""
+    from dgl.data.utils import load_graphs
+
+    graph_path = osp.join(args.data_dir, args.dataset)
+    graph = load_graphs(graph_path)[0][0]
+
+    if semi_supervised:
+        trial_id += 10
+
+    train_mask = graph.ndata['train_masks'][:, trial_id].numpy().astype(bool)
+    val_mask = graph.ndata['val_masks'][:, trial_id].numpy().astype(bool)
+    test_mask = graph.ndata['test_masks'][:, trial_id].numpy().astype(bool)
+
+    ids = {
+        'train': np.where(train_mask)[0].tolist(),
+        'val': np.where(val_mask)[0].tolist(),
+        'test': np.where(test_mask)[0].tolist(),
+    }
+    return ids
+
+
 def load_graph(args):
     if args.dataset in ("ogbn-arxiv", "ogbn-products"):
         return load_ogbn(args)
+
+    # Check for DGL binary graph file (GADBench format)
+    dgl_path = osp.join(args.data_dir, args.dataset)
+    if osp.isfile(dgl_path) and not dgl_path.endswith('.npz'):
+        return load_dgl_graph(args)
 
     dataset = args.data_dir + "/" + args.dataset + ".npz"
     with np.load(dataset, allow_pickle = True) as loader:

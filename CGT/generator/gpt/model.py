@@ -245,8 +245,8 @@ class XLNet(nn.Module):
 
         loss = None
         if targets is not None:
-            logits = logits.view(-1, logits.size(-1))
-            targets = targets.view(-1)
+            logits = logits.reshape(-1, logits.size(-1))
+            targets = targets.reshape(-1)
             loss = self.criterion(logits, targets)
 
         return logits, loss

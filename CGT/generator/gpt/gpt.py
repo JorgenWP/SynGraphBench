@@ -128,4 +128,40 @@ def run(args, graphs, feats, labels, ids):
     return train_dataset, val_dataset, test_dataset
 
 
+def train_and_generate(args, graphs, feats, labels, ids):
+    """
+    Train CGT on train+val nodes and generate synthetic train/val datasets.
+    Args:
+        args: arguments
+        graphs: adjacency structure (list or matrix)
+        feats: feature matrix
+        labels: label array
+        ids: dict with 'train', 'val', 'test' node id lists
+    Returns:
+        dict with generated sequences, labels, and cluster centers
+    """
+    save_dir = 'generator/gpt/save'
+    if not os.path.isdir(save_dir):
+        os.makedirs(save_dir)
+
+    # Quantize features into cluster IDs
+    cluster_ids, cluster_centers = cluster_feats(args, feats)
+
+    # Train CGT on train+val nodes
+    target_ids = ids["train"] + ids["val"]
+    model = train(args, graphs, cluster_ids, labels, target_ids, split="train")
+
+    # Generate synthetic cluster ID sequences for train and val
+    gen_train_ids = generate(args, model, labels[ids["train"]], ids["train"], split="train")
+    gen_val_ids = generate(args, model, labels[ids["val"]], ids["val"], split="train")
+
+    return {
+        'gen_train_ids': gen_train_ids,
+        'gen_val_ids': gen_val_ids,
+        'train_labels': labels[ids["train"]],
+        'val_labels': labels[ids["val"]],
+        'cluster_centers': cluster_centers,
+    }
+
+
 
