@@ -1,6 +1,6 @@
 ---
 name: project-overview
-description: Describe what this skill does and when to use it. Include keywords that help agents identify relevant tasks.
+description: A comprehensive overview of the SynGraphBench project, detailing its structure, core components, and execution flow for developers and agents.
 ---
 
 # SynGraphBench - Developer & Agent Skill Guide
