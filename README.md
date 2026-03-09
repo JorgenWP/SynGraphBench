@@ -40,7 +40,7 @@ SynGraphBench/
 │       ├── cgt.sh
 │       └── bigg.sh
 ├── datasets/
-│   ├── real/
+│   ├── original/
 │   └── synthetic/
 ├── GADBench/
 ├── CGT/
@@ -80,3 +80,6 @@ bash env_setups/bigg.sh
 ### Running the Pipeline
 
 ...
+
+## AI Agent Instructions
+If you are an AI coding assistant or agent working on this repository, please read the [SKILL.md](./SKILL.md) file first. It contains critical instructions on how to navigate the sub-repositories, handle dependencies, and execute the benchmarking scripts.
