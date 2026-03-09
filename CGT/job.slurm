@@ -27,10 +27,10 @@ module purge
 module load Anaconda3/2024.02-1
 
 # Set up the conda environment
-conda env create -f cgt_modern_env.yml
+# conda env create -f cgt_modern_env.yml
 conda activate cgt_modern
-bash install_gpu.sh
+# bash install_gpu.sh
 
 
 # Run the project script
-bash run.sh
+bash ../scripts/train/train_cgt.sh
