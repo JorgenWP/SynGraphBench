@@ -3,7 +3,7 @@
 set -e
 set -x
 
-ENV_NAME="cgt_test"
+ENV_NAME="CGT"
 CGT_DIR="../CGT"
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
