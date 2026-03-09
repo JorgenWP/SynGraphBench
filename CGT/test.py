@@ -56,6 +56,8 @@ def main():
     args = get_args()
     args.gpt_train_name = args.task_name + '_' + args.dataset + datetime.now().strftime("_%Y%m%d_%H%M%S")
 
+    print(f"--- Evaluating CGT on {args.task_name} task with {args.dataset} dataset ---")
+
     # Load the original graph datasets
     adj, feat, label, feat_size, label_size = load_graph(args)
     ids = split_ids(args, feat.shape[0])
@@ -71,7 +73,7 @@ def main():
         print(f"\n--- Trial {t+1} ---")
 
         # Prepare duplicate-encoded computation graphs
-        print("Preparing datasets...")
+        print("Preparing train/val/test datasets...")
         train_set = Dataset(args, "train", adj, feat, label, ids)
         val_set = Dataset(args, "val", adj, feat, label, ids)
         test_set = Dataset(args, "test", adj, feat, label, ids)
@@ -100,7 +102,7 @@ def main():
     test_acc_avg = np.average(acc_mic_list, axis=2)
     test_acc_std = np.std(acc_mic_list, axis=2)
 
-    print("\n--- Final results ---")
+    print("\n Final results:")
     print('Task: ' + args.task_name + ', Dataset: ' + args.dataset)
     for model_name in args.model_list:
         print(model_name, end=', ')
