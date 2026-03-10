@@ -27,7 +27,7 @@ module purge
 module load Anaconda3/2024.02-1
 
 # Set up the conda environment
-conda activate cgt_modern
+conda activate CGT
 
 
 # Run the project script
