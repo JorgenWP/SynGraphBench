@@ -55,6 +55,7 @@ def main():
 
     torch.save({
         **result,
+        'ids': ids,
         'feat_size': feat_size,
         'label_size': label_size,
         'subgraph_step_num': args.subgraph_step_num,
