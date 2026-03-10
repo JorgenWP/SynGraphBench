@@ -4,7 +4,10 @@ set -e
 set -x
 
 ENV_NAME="CGT"
-CGT_DIR="../CGT"
+CGT_DIR="CGT/"
+
+# Navigate to project root
+cd "$(dirname "$0")/../.."
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 
