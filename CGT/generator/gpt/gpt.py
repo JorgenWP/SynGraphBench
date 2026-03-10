@@ -10,6 +10,7 @@ from generator.gpt.trainer import Trainer, TrainerConfig
 from generator.gpt.utils import sample
 from generator.cluster import cluster_feats
 
+save_dir = '../CGT/generator/gpt/save'
 
 def train(args, adjs, cluster_ids, labels, ids, split):
     """
@@ -44,7 +45,7 @@ def train(args, adjs, cluster_ids, labels, ids, split):
     tconf = TrainerConfig(batch_size=args.gpt_batch_size, block_size=dataset.block_size, short_seq_num=dataset.short_seq_num,
                         max_epochs=args.gpt_epochs, learning_rate=args.gpt_lr, betas = (0.9, 0.95), weight_decay=args.gpt_weight_decay,
                         lr_decay=True, warmup_tokens=tokens_per_epoch, final_tokens=final_tokens,
-                        ckpt_path='generator/gpt/save/{}_{}.pt'.format(args.gpt_train_name, split))
+                        ckpt_path='{}/{}_{}.pt'.format(save_dir, args.gpt_train_name, split))
 
     start_time = perf_counter()
     trainer = Trainer(args, tconf, model, data_loader)
@@ -67,7 +68,7 @@ def generate(args, model, labels, ids, split):
     start_time = perf_counter()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    checkpoint = torch.load('generator/gpt/save/{}_{}.pt'.format(args.gpt_train_name, split))
+    checkpoint = torch.load('{}/{}_{}.pt'.format(save_dir, args.gpt_train_name, split))
     model.load_state_dict(checkpoint)
     model.eval()
 
@@ -100,7 +101,6 @@ def run(args, graphs, feats, labels, ids):
         ids: a list of node ids
     """
     # Create save directory
-    save_dir = 'generator/gpt/save'
     if not os.path.isdir(save_dir):
         os.makedirs(save_dir)
 
@@ -140,7 +140,6 @@ def train_and_generate(args, graphs, feats, labels, ids):
     Returns:
         dict with generated sequences, labels, and cluster centers
     """
-    save_dir = 'generator/gpt/save'
     if not os.path.isdir(save_dir):
         os.makedirs(save_dir)
 
