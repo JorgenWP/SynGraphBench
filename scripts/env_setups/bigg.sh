@@ -15,11 +15,15 @@ conda install -y -c conda-forge gcc_linux-64 gxx_linux-64
 
 conda install -y pytorch=2.4.1 torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
 
+conda install -c dglteam/label/th24_cu121 dgl -y
+
 conda install -y numpy scipy networkx tqdm -c conda-forge
+
+conda install -y numpy scipy networkx tqdm pandas pydantic packaging -c conda-forge
 
 pip install pyemd
 
-pip install torch-scatter -f https://data.pyg.org/whl/torch-2.4.0+cu121.html
+pip install torch-scatter -f https://data.pyg.org/whl/torch-2.4.1+cu121.html
 
 TREE_CLIB_DIR="../bigg/bigg/model/tree_clib"
 
