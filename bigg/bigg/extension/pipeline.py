@@ -29,7 +29,7 @@ def main():
 
     #Load dataset
     DATASET = cmd_args.data_dir
-    graphs_dgl, _ = dgl.load_graphs('../datasets/' + DATASET)
+    graphs_dgl, _ = dgl.load_graphs('../datasets/original/' + DATASET)
     graph = graphs_dgl[0]
 
     #Get features and labels
@@ -125,7 +125,7 @@ def main():
 
     gen_dgl.ndata['label'] = gen_labels.squeeze().long().cpu()
 
-    dgl.save_graphs(DATASET + '_synthetic', [gen_dgl])
+    dgl.save_graphs('../datasets/synthetic/' + DATASET, [gen_dgl])
 
 
 if __name__ == '__main__':
