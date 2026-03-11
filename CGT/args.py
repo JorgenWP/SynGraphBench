@@ -169,3 +169,58 @@ def get_args():
     parser = get_parser()
     args, _ = parser.parse_known_args()
     return args
+
+
+def print_args(args):
+    print("\nArguments:")
+    print(f"  Checkpoint:       {args.gpt_train_name}")
+    print(f"  Device:           {'cuda' if torch.cuda.is_available() else 'cpu'}")
+    print(f"  Data dir:         {args.data_dir}")
+
+    print(f"\n  [Clustering]")
+    print(f"  cluster_num:      {args.cluster_num}")
+    print(f"  cluster_size:     {args.cluster_size}")
+    print(f"  cluster_samples:  {args.cluster_sample_num}")
+    print(f"  dp_feature:       {args.dp_feature}")
+
+    print(f"\n  [Computation Graph]")
+    print(f"  subgraph_step:    {args.subgraph_step_num}")
+    print(f"  subgraph_sample:  {args.subgraph_sample_num}")
+    print(f"  noise_num:        {args.noise_num}")
+    print(f"  self_connection:  {args.self_connection}")
+    print(f"  org_code:         {args.org_code}")
+
+    print(f"\n  [Model]")
+    print(f"  gpt_model:        {args.gpt_model}")
+    print(f"  gpt_epochs:       {args.gpt_epochs}")
+    print(f"  gpt_batch_size:   {args.gpt_batch_size}")
+    print(f"  gpt_lr:           {args.gpt_lr}")
+    print(f"  gpt_layers:       {args.gpt_layers}")
+    print(f"  gpt_heads:        {args.gpt_heads}")
+    print(f"  gpt_hidden_dim:   {args.gpt_hidden_dim}")
+    print(f"  gpt_dropout:      {args.gpt_dropout}")
+    print(f"  gpt_weight_decay: {args.gpt_weight_decay}")
+    print(f"  gpt_early_stop:   {args.gpt_early_stopping}")
+    print(f"  gpt_temperature:  {args.gpt_softmax_temperature}")
+
+    print(f"\n  [CGT Options]")
+    print(f"  label_wise:       {args.label_wise}")
+    print(f"  gpt_label_con:    {args.gpt_label_con}")
+    print(f"  gpt_start_id:     {args.gpt_start_id}")
+    print(f"  gpt_long_seq:     {args.gpt_long_seq}")
+    print(f"  gpt_inv_pos:      {args.gpt_inv_pos}")
+
+
+def print_non_default_args(args):
+    """Print all arguments that differ from their parser defaults."""
+    defaults = vars(get_parser().parse_args([]))
+    current = vars(args)
+    changed = {k: v for k, v in current.items()
+                if k in defaults and v != defaults[k]}
+    if changed:
+        print("\nNon-default arguments:")
+        for k, v in sorted(changed.items()):
+            print(f"  {k}: {v}  (default: {defaults[k]})")
+    else:
+        print("\nAll arguments at default values.")
+    print()

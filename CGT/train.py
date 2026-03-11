@@ -10,25 +10,10 @@ import torch
 from datetime import datetime
 from time import perf_counter
 
-from args import get_args, get_parser
+from args import get_args, get_parser, print_args, print_non_default_args
 from task.utils.utils import load_graph, split_ids, split_ids_from_dgl
 
 import generator.gpt.gpt as gpt
-
-
-def print_non_default_args(args):
-    """Print all arguments that differ from their parser defaults."""
-    defaults = vars(get_parser().parse_args([]))
-    current = vars(args)
-    changed = {k: v for k, v in current.items()
-                if k in defaults and v != defaults[k]}
-    if changed:
-        print("\nNon-default arguments:")
-        for k, v in sorted(changed.items()):
-            print(f"  {k}: {v}  (default: {defaults[k]})")
-    else:
-        print("\nAll arguments at default values.")
-    print()
 
 
 def is_dgl_dataset(args):
@@ -40,9 +25,16 @@ def is_dgl_dataset(args):
 
 def main():
     args = get_args()
-    args.gpt_train_name = args.task_name + '_' + args.dataset + datetime.now().strftime("_%Y%m%d_%H%M%S")
+    args.gpt_train_name = (
+        f"{args.dataset}_{args.gpt_model}"
+        f"_e{args.gpt_epochs}_l{args.gpt_layers}_h{args.gpt_heads}"
+        f"_c{args.cluster_num}_s{args.subgraph_step_num}x{args.subgraph_sample_num}"
+    )
 
     print(f"--- Training CGT on {args.dataset} dataset ---")
+
+    print_args(args)
+
     print_non_default_args(args)
 
     # Load graph dataset
