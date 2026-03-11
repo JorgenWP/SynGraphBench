@@ -5,10 +5,14 @@ set -e
 ENV_NAME="bigg"
 PYTHON_VERSION="3.9"
 
-conda create -y -n $ENV_NAME python=$PYTHON_VERSION
+# Navigate to project root
+cd "$(dirname "$0")/../.."
 
 # Initialize conda in the script so 'conda activate' works
 source "$(conda info --base)/etc/profile.d/conda.sh"
+
+conda create -y -n $ENV_NAME python=$PYTHON_VERSION
+
 conda activate $ENV_NAME
 
 conda install -y -c conda-forge gcc_linux-64 gxx_linux-64
@@ -25,7 +29,7 @@ pip install pyemd
 
 pip install torch-scatter -f https://data.pyg.org/whl/torch-2.4.1+cu121.html
 
-TREE_CLIB_DIR="../bigg/bigg/model/tree_clib"
+TREE_CLIB_DIR="bigg/bigg/model/tree_clib"
 
 if [ ! -d "$TREE_CLIB_DIR/build" ]; then
     echo "Build directory not found. Compiling tree_clib C++ extension..."
