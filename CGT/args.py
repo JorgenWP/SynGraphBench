@@ -1,10 +1,9 @@
 import argparse
 import torch
 
-def get_args():
-    """Argument parser from command line"""
+def get_parser():
+    """Return the argument parser with all defaults."""
     parser = argparse.ArgumentParser()
-    # GNN training-related hyperparameters
     parser.add_argument('--epochs', type=int, default=200,
                         help='Number of epochs to train.')
     parser.add_argument('--batch_size', type=int, default=64,
@@ -162,6 +161,11 @@ def get_args():
     parser.set_defaults(save_cluster_graph=False)
     parser.set_defaults(save_synthetic_graph=False)
 
+    return parser
 
+
+def get_args():
+    """Parse command line arguments."""
+    parser = get_parser()
     args, _ = parser.parse_known_args()
     return args
