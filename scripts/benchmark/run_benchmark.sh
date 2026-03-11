@@ -29,4 +29,6 @@ echo ""
 python scripts/benchmark/benchmark.py \
     --datasets "$DATASETS" \
     --models "$MODELS" \
-    --trials "$TRIALS"
+    --trials "$TRIALS" \
+    --synthetic_model cgt \
+    --synthetic_type cgt
