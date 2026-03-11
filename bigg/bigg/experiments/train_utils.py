@@ -52,6 +52,9 @@ def sqrtn_forward_backward(model,
     if blksize < 0 or blksize > num_nodes:
         blksize = num_nodes
 
+    # Extract node_feats from kwargs so we can slice per chunk
+    full_node_feats = kwargs.pop('node_feats', None)
+
     prev_states = init_states
     cache_stages = list(range(0, num_nodes, blksize))
 
@@ -60,11 +63,14 @@ def sqrtn_forward_backward(model,
         node_st = list_node_starts[0] + st_delta
         with torch.no_grad():
             cur_num = num_nodes - node_st if node_st + blksize > num_nodes else blksize
+            chunk_kwargs = dict(kwargs)
+            if full_node_feats is not None:
+                chunk_kwargs['node_feats'] = full_node_feats[st_delta:st_delta + cur_num]
             _, new_states = model.forward_row_summaries(graph_ids,
                                                         list_node_starts=[node_st],
                                                         num_nodes=cur_num,
                                                         prev_rowsum_states=prev_states,
-                                                        **kwargs)
+                                                        **chunk_kwargs)
             prev_states = new_states
             list_caches.append(new_states)
 
@@ -77,11 +83,14 @@ def sqrtn_forward_backward(model,
         if prev_states[0] is not None:
             for x in prev_states:
                 x.requires_grad = True
+        chunk_kwargs = dict(kwargs)
+        if full_node_feats is not None:
+            chunk_kwargs['node_feats'] = full_node_feats[st_delta:st_delta + cur_num]
         ll, cur_states = model.forward_train(graph_ids,
                                              list_node_starts=[node_st],
                                              num_nodes=cur_num,
                                              prev_rowsum_states=prev_states,
-                                             **kwargs)
+                                             **chunk_kwargs)
         tot_ll += ll.item()
         loss = -ll * loss_scale
         if top_grad is not None:
