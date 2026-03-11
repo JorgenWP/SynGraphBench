@@ -42,7 +42,7 @@ from utils import Dataset as GADBenchDataset, model_detector_dict
 from bench_utils import (
     parse_args, find_synthetic_path,
     load_cgt_synthetic_data, build_cgt_datasets,
-    print_comparison,
+    build_original_cg_datasets, print_comparison,
 )
 from models.anomaly_detection.cgt_detector import CompGraphDetector, CG_SUPPORTED_MODELS
 
@@ -150,33 +150,15 @@ def evaluate_models(dataset_name, models, data_dir,
     return results
 
 
-def evaluate_models_cgt(dataset_name, models, data_dir,
-                        trials, epochs, patience, syn_path,
-                        batch_size=256):
-    """Evaluate GNN models trained on CGT synthetic computation graphs.
-
-    Trains GADBench GNNs (GCN, GIN, GraphSAGE) on batched synthetic
-    computation graph trees, then tests on computation graphs built
-    from the original test nodes.
-    """
+def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
+                   feat_dim, source_label, trials, epochs, patience,
+                   batch_size):
+    """Run CompGraphDetector trials for a set of models on given CG datasets."""
     results = []
-
-    # Load data once per dataset
-    data = GADBenchDataset(dataset_name, prefix=data_dir + '/')
-    syn_data = load_cgt_synthetic_data(syn_path)
-    syn_train, syn_val, test_ds = build_cgt_datasets(data.graph, syn_data)
-
-    feat_dim = data.graph.ndata['feature'].shape[1]
-
-    cg_models = [m for m in models if m in CG_SUPPORTED_MODELS]
-    skipped = [m for m in models if m not in CG_SUPPORTED_MODELS]
-    if skipped:
-        print(f"  NOTE: {skipped} not supported in computation graph mode. "
-              f"Skipping.")
 
     for model_name in cg_models:
         print(f"\n{'='*60}")
-        print(f"  SYNTHETIC-CGT | {dataset_name} | {model_name}")
+        print(f"  {source_label.upper()} | {dataset_name} | {model_name}")
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
@@ -207,7 +189,7 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
 
             print(f"  Trial {t}, seed={seed}")
             detector = CompGraphDetector(
-                train_config, model_config, syn_train, syn_val, test_ds)
+                train_config, model_config, train_ds, val_ds, test_ds)
 
             st = time.time()
             test_score = detector.train()
@@ -226,7 +208,7 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
 
         if auc_list:
             results.append({
-                'source': 'synthetic-cgt',
+                'source': source_label,
                 'dataset': dataset_name,
                 'model': model_name,
                 'AUROC_mean': np.mean(auc_list),
@@ -237,6 +219,47 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
                 'RecK_std': np.std(rec_list),
                 'time_per_trial': time_cost / len(auc_list),
             })
+
+    return results
+
+
+def evaluate_models_cgt(dataset_name, models, data_dir,
+                        trials, epochs, patience, syn_path,
+                        batch_size=256):
+    """Evaluate GNN models on CGT computation graphs.
+
+    Runs two comparisons:
+      1. Original-CG: train/val/test all built as computation graphs
+         from the original graph (baseline for the CG format).
+      2. Synthetic-CGT: train/val from CGT-generated cluster-center
+         sequences, test from original graph computation graphs.
+    """
+    results = []
+
+    # Load data once per dataset
+    data = GADBenchDataset(dataset_name, prefix=data_dir + '/')
+    syn_data = load_cgt_synthetic_data(syn_path)
+
+    feat_dim = data.graph.ndata['feature'].shape[1]
+
+    cg_models = [m for m in models if m in CG_SUPPORTED_MODELS]
+    skipped = [m for m in models if m not in CG_SUPPORTED_MODELS]
+    if skipped:
+        print(f"  NOTE: {skipped} not supported in computation graph mode. "
+              f"Skipping.")
+
+    # --- Original data as computation graphs (CG baseline) ---
+    orig_train, orig_val, orig_test = build_original_cg_datasets(
+        data.graph, syn_data)
+    results.extend(_run_cg_trials(
+        dataset_name, cg_models, orig_train, orig_val, orig_test,
+        feat_dim, 'original-cg', trials, epochs, patience, batch_size))
+
+    # --- CGT synthetic computation graphs ---
+    syn_train, syn_val, test_ds = build_cgt_datasets(data.graph, syn_data)
+    results.extend(_run_cg_trials(
+        dataset_name, cg_models, syn_train, syn_val, test_ds,
+        feat_dim, 'synthetic-cgt', trials, epochs, patience, batch_size))
 
     del data
     return results
@@ -267,6 +290,7 @@ def main():
     print(f"  Models:         {models}")
     print(f"  Trials:         {args.trials}")
     print(f"  Synthetic type: {args.synthetic_type}")
+    print(f"  Synthetic model:{' ' + args.synthetic_model if args.synthetic_model else ' auto'}")    
     print(f"  Data dir:       {args.data_dir}")
     print(f"  Synthetic dir:  {args.synthetic_dir}")
     print(f"  Output dir:     {args.output_dir}")
@@ -293,7 +317,8 @@ def main():
 
     for dataset_name in datasets:
         syn_path, resolved_type = find_synthetic_path(
-            args.synthetic_dir, dataset_name, args.synthetic_type)
+            args.synthetic_dir, dataset_name, args.synthetic_type,
+            args.synthetic_model)
         if syn_path is None:
             print(f"\n  Skipping {dataset_name}: no synthetic data found in "
                   f"{args.synthetic_dir}")

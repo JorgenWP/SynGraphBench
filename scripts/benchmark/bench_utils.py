@@ -45,17 +45,35 @@ def parse_args():
                         help='Early stopping patience')
     parser.add_argument('--batch_size', type=int, default=256,
                         help='Batch size for computation graph mode (CGT)')
+    parser.add_argument('--synthetic_model', type=str, default=None,
+                        help='Generator model prefix for synthetic filenames '
+                             '(e.g. "cgt" looks for cgt_<dataset>.pt, '
+                             '"bigg" looks for bigg_<dataset>). '
+                             'If not set, falls back to <dataset>.pt / <dataset>.')
     return parser.parse_args()
 
 
-def find_synthetic_path(synthetic_dir, dataset_name, synthetic_type):
+def find_synthetic_path(synthetic_dir, dataset_name, synthetic_type,
+                        synthetic_model=None):
     """Locate the synthetic data file and resolve its type.
 
+    Naming convention:
+        With --synthetic_model <model>:
+            CGT:   <synthetic_dir>/<model>_<dataset>.pt
+            Graph: <synthetic_dir>/<model>_<dataset>
+        Without (legacy fallback):
+            CGT:   <synthetic_dir>/<dataset>.pt
+            Graph: <synthetic_dir>/<dataset>
+
     Returns (path, resolved_type) or (None, None) if not found.
-    resolved_type is 'graph' for full DGL graphs, 'cgt' for CGT .pt files.
     """
-    cgt_path = os.path.join(synthetic_dir, f'{dataset_name}.pt')
-    graph_path = os.path.join(synthetic_dir, dataset_name)
+    if synthetic_model:
+        prefix = f'{synthetic_model}_{dataset_name}'
+    else:
+        prefix = dataset_name
+
+    cgt_path = os.path.join(synthetic_dir, f'{prefix}.pt')
+    graph_path = os.path.join(synthetic_dir, prefix)
 
     if synthetic_type == 'cgt':
         return (cgt_path, 'cgt') if os.path.exists(cgt_path) else (None, None)
@@ -176,6 +194,15 @@ def print_comparison(all_results, datasets, models):
             print()
 
 
+def _extract_cg_params(syn_data):
+    """Extract computation graph tree parameters from CGT .pt data."""
+    step_num = syn_data['subgraph_step_num']
+    sample_num = syn_data['subgraph_sample_num']
+    noise_num = syn_data.get('noise_num', 0)
+    self_conn = syn_data.get('self_connection', False)
+    return step_num, sample_num, noise_num, self_conn
+
+
 def build_cgt_datasets(original_graph, syn_data):
     """Build CGT computation graph datasets for synthetic training.
 
@@ -184,11 +211,7 @@ def build_cgt_datasets(original_graph, syn_data):
         syn_val: SyntheticCompGraphDataset for val nodes
         test_ds: OriginalCompGraphDataset for test nodes (original features)
     """
-    # Extract CGT hyperparams
-    step_num = syn_data['subgraph_step_num']
-    sample_num = syn_data['subgraph_sample_num']
-    noise_num = syn_data.get('noise_num', 0)
-    self_conn = syn_data.get('self_connection', False)
+    step_num, sample_num, noise_num, self_conn = _extract_cg_params(syn_data)
     total_sample = sample_num + noise_num
 
     # Get node IDs from saved splits
@@ -222,3 +245,41 @@ def build_cgt_datasets(original_graph, syn_data):
           f"(step={step_num}, sample={sample_num}, noise={noise_num})")
 
     return syn_train, syn_val, test_ds
+
+
+def build_original_cg_datasets(original_graph, syn_data):
+    """Build computation graph datasets from original data for all splits.
+
+    Uses the same tree structure (step_num, sample_num, etc.) from the CGT
+    .pt file, but with original features for train/val/test.
+
+    Returns:
+        train_ds, val_ds, test_ds: OriginalCompGraphDataset for each split
+    """
+    step_num, sample_num, noise_num, self_conn = _extract_cg_params(syn_data)
+
+    ids = syn_data['ids']
+    train_ids = ids['train']
+    val_ids = ids['val']
+    test_ids = ids['test']
+
+    adj_list = dgl_to_adj_list(original_graph)
+    features = original_graph.ndata['feature'].cpu().numpy().astype(np.float32)
+    labels = original_graph.ndata['label'].cpu().numpy().astype(np.int64)
+
+    train_ds = OriginalCompGraphDataset(
+        adj_list, features, labels, train_ids,
+        step_num, sample_num, noise_num, self_conn)
+    val_ds = OriginalCompGraphDataset(
+        adj_list, features, labels, val_ids,
+        step_num, sample_num, noise_num, self_conn)
+    test_ds = OriginalCompGraphDataset(
+        adj_list, features, labels, test_ids,
+        step_num, sample_num, noise_num, self_conn)
+
+    print(f"  Original CG datasets: train={len(train_ds)}, val={len(val_ds)}, "
+          f"test={len(test_ds)} | "
+          f"tree_nodes={test_ds.tree_adj.shape[0]} "
+          f"(step={step_num}, sample={sample_num}, noise={noise_num})")
+
+    return train_ds, val_ds, test_ds
