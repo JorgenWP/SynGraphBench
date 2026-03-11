@@ -3,7 +3,7 @@
 # run_pipeline.sh
 cd "$(dirname "$0")/../../bigg"
 
-DATASET="tolokers"
+DATASET="original/tolokers"
 BLKSIZE=-1
 BSIZE=1
 EPOCHS=50
