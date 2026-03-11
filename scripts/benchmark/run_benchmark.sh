@@ -16,10 +16,6 @@ TRIALS="${3:-1}"
 # Navigate to project root
 cd "$(dirname "$0")/../.."
 
-# Activate GADBench environment 
-eval "$(conda shell.bash hook)"
-conda activate GADBench
-
 echo "=== GNN Evaluation: Original vs Synthetic ==="
 echo "Datasets: $DATASETS"
 echo "Models:   $MODELS"
