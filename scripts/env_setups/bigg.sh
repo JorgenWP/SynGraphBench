@@ -36,8 +36,23 @@ if [ ! -d "$TREE_CLIB_DIR/build" ]; then
     # Automate the Makefile fix: replace the old GPU architectures with modern ones
     sed -i 's/CUDA_ARCH := -gencode arch=compute_60,code=sm_60 -gencode arch=compute_70,code=sm_70/CUDA_ARCH := -gencode arch=compute_60,code=sm_60 -gencode arch=compute_70,code=sm_70 -gencode arch=compute_75,code=sm_75 -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89/g' Makefile
 
-    # Compile using the CUDA_HOME path that we verified works on your system
-    make clean && make CUDA_HOME=/usr
+    # Auto-detect CUDA_HOME if not already set
+    if [ -z "$CUDA_HOME" ]; then
+        if [ -n "$CUDA_PATH" ]; then
+            CUDA_HOME="$CUDA_PATH"
+        elif [ -d "/usr/local/cuda" ]; then
+            CUDA_HOME="/usr/local/cuda"
+        elif command -v nvcc &> /dev/null; then
+            CUDA_HOME="$(dirname "$(dirname "$(which nvcc)")")"
+        else
+            echo "Error: Could not find CUDA installation. Set CUDA_HOME manually."
+            exit 1
+        fi
+    fi
+    echo "Using CUDA_HOME=$CUDA_HOME"
+
+    # Compile using the detected CUDA_HOME
+    make clean && make CUDA_HOME="$CUDA_HOME"
 
     # Return to the original directory
     cd -
