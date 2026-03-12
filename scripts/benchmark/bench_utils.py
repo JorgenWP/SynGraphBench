@@ -29,12 +29,11 @@ def parse_args():
                         help='Path to synthetic datasets (default: datasets/synthetic)')
     parser.add_argument('--output_dir', type=str, default=None,
                         help='Directory to save results (default: results/evaluate)')
-    parser.add_argument('--synthetic_type', type=str, default='auto',
-                        choices=['auto', 'graph', 'cgt'],
+    parser.add_argument('--synthetic_type', type=str, default='cgt',
+                        choices=['graph', 'cgt'],
                         help='Type of synthetic data: '
                              '"graph" = full DGL graph (BiGG, etc.), '
-                             '"cgt" = CGT computation graph sequences (.pt), '
-                             '"auto" = detect from file extension')
+                             '"cgt" = CGT computation graph sequences (.pt)')
     parser.add_argument('--semi_supervised', type=int, default=0,
                         help='Use semi-supervised split (0 or 1)')
     parser.add_argument('--trial_id', type=int, default=0,
@@ -51,41 +50,6 @@ def parse_args():
                              '"bigg" looks for bigg_<dataset>). '
                              'If not set, falls back to <dataset>.pt / <dataset>.')
     return parser.parse_args()
-
-
-def find_synthetic_path(synthetic_dir, dataset_name, synthetic_type,
-                        synthetic_model=None):
-    """Locate the synthetic data file and resolve its type.
-
-    Naming convention:
-        With --synthetic_model <model>:
-            CGT:   <synthetic_dir>/<model>_<dataset>.pt
-            Graph: <synthetic_dir>/<model>_<dataset>
-        Without (legacy fallback):
-            CGT:   <synthetic_dir>/<dataset>.pt
-            Graph: <synthetic_dir>/<dataset>
-
-    Returns (path, resolved_type) or (None, None) if not found.
-    """
-    if synthetic_model:
-        prefix = f'{synthetic_model}_{dataset_name}'
-    else:
-        prefix = dataset_name
-
-    cgt_path = os.path.join(synthetic_dir, f'{prefix}.pt')
-    graph_path = os.path.join(synthetic_dir, prefix)
-
-    if synthetic_type == 'cgt':
-        return (cgt_path, 'cgt') if os.path.exists(cgt_path) else (None, None)
-    if synthetic_type == 'graph':
-        return (graph_path, 'graph') if os.path.exists(graph_path) else (None, None)
-
-    # auto-detect: prefer full graph file (no extension), fall back to .pt
-    if os.path.isfile(graph_path) and not graph_path.endswith('.pt'):
-        return graph_path, 'graph'
-    if os.path.exists(cgt_path):
-        return cgt_path, 'cgt'
-    return None, None
 
 
 def load_cgt_synthetic_data(syn_path):

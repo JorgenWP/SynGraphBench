@@ -26,6 +26,8 @@ import numpy as np
 import torch
 import pandas as pd
 
+import dgl
+
 warnings.filterwarnings("ignore")
 
 # Resolve project paths
@@ -40,7 +42,7 @@ if _script_dir not in sys.path:
 
 from utils import Dataset as GADBenchDataset, model_detector_dict
 from bench_utils import (
-    parse_args, find_synthetic_path,
+    parse_args,
     load_cgt_synthetic_data, build_cgt_datasets,
     build_original_cg_datasets, print_comparison,
 )
@@ -101,6 +103,9 @@ def evaluate_models(dataset_name, models, data_dir,
             if synthetic_type == 'graph':
                 # Full synthetic graph (BiGG, etc.) — load directly
                 data = GADBenchDataset(dataset_name, prefix=synthetic_dir + '/')
+                # If the synthetic graph doesn't have self-loops, add them
+                # if (data.graph.in_degrees() == 0).any():
+                #     data.graph = dgl.add_self_loop(data.graph)
             else:
                 # Original data
                 data = GADBenchDataset(dataset_name, prefix=data_dir + '/')
@@ -316,31 +321,34 @@ def main():
     print("#" * 80)
 
     for dataset_name in datasets:
-        syn_path, resolved_type = find_synthetic_path(
-            args.synthetic_dir, dataset_name, args.synthetic_type,
-            args.synthetic_model)
-        if syn_path is None:
-            print(f"\n  Skipping {dataset_name}: no synthetic data found in "
-                  f"{args.synthetic_dir}")
+        # Determine synthetic data path based on type and model
+        prefix = f'{args.synthetic_model}_{dataset_name}' if args.synthetic_model else dataset_name
+        if args.synthetic_type == 'cgt':
+            syn_path = os.path.join(args.synthetic_dir, f'{prefix}.pt')
+        else:
+            syn_path = os.path.join(args.synthetic_dir, prefix)
+
+        if not os.path.exists(syn_path):
+            print(f"\n  Skipping {dataset_name}: {syn_path} not found")
             continue
 
-        print(f"\n  Found {resolved_type} synthetic data: {syn_path}")
+        print(f"\n  Found {args.synthetic_type} synthetic data: {syn_path}")
 
-        if resolved_type == 'cgt':
+        if args.synthetic_type == 'cgt':
             # CGT: use computation graph trees with GADBench GNNs
             results = evaluate_models_cgt(
-                dataset_name, models, args.data_dir,
+                'cgt_' + dataset_name, models, args.data_dir,
                 args.trials, args.epochs, args.patience,
                 syn_path, batch_size=args.batch_size)
         else:
             # Full graph (BiGG, etc.): use standard full-graph GNNs
             results = evaluate_models(
-                dataset_name, models, args.data_dir,
-                f'synthetic-{resolved_type}', args.trials,
+                f'{args.synthetic_model}_{dataset_name}', models, args.data_dir,
+                f'synthetic-{args.synthetic_type}', args.trials,
                 args.semi_supervised, args.trial_id,
                 args.epochs, args.patience,
                 synthetic_dir=args.synthetic_dir,
-                synthetic_type=resolved_type)
+                synthetic_type=args.synthetic_type)
         all_results.extend(results)
 
     # --- Save and display results ---
