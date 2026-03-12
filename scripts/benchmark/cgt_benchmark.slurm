@@ -9,8 +9,8 @@
 #SBATCH --nodes=2                   # Number of compute nodes
 #SBATCH --ntasks-per-node=2         # Number of tasks per node
 
-#SBATCH --output=output/cgt/benchmark/output.txt    # Specifying 'stdout'
-#SBATCH --error=output/cgt/benchmark/error.txt      # Specifying 'stderr'
+#SBATCH --output=output/cgt/benchmark/output.txt     # Specifying 'stdout'
+#SBATCH --error=output/cgt/benchmark/error.txt       # Specifying 'stderr'
 
 #SBATCH --mail-user=<email>@stud.ntnu.no         # The email to send notifications to
 #SBATCH --mail-type=ALL
@@ -29,6 +29,11 @@ module load Anaconda3/2024.02-1
 # Activate benchmark conda environment
 conda activate GADBench
 
+# Config
+SYNTHETIC_MODEL="cgt"
+DATASETS="tolokers"
+MODELS="GCN,GIN,GraphSAGE,XGBGraph"
+TRIALS="1"
 
-# Run the benchmark script
-bash scripts/benchmark/run_benchmark.sh
+# Run the benchmark script with CGT synthetic data
+bash scripts/benchmark/run_benchmark.sh "$DATASETS" "$MODELS" "$TRIALS" "$SYNTHETIC_MODEL"
