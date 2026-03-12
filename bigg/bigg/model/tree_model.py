@@ -135,7 +135,30 @@ def featured_batch_tree_lstm3(feat_dict, h_bot, c_bot, h_buf, c_buf, h_past, c_p
     elif h_buf is None:
         return featured_batch_tree_lstm2(edge_feats, is_rch, h_bot, c_bot, h_past, c_past, lambda i: fn_all_ids(i)[0, 1, 4, 5], cell, t_lch, t_rch, cell_node)
     else:
-        raise NotImplementedError  #TODO: handle model parallelism with features
+        new_ids = [list(fn_all_ids(0)), list(fn_all_ids(1))]
+        lch_isleaf, rch_isleaf = new_ids[0][0], new_ids[1][0]
+        new_ids[0][0] = new_ids[1][0] = None
+        is_leaf = [lch_isleaf, rch_isleaf]
+        if edge_feats is not None:
+            edge_feats = [edge_feats[~is_rch], edge_feats[is_rch]]
+        node_feats = [t_lch, t_rch]
+        h_list = []
+        c_list = []
+        for i in range(2):
+            leaf_check = is_leaf[i]
+            local_hbot, local_cbot = h_bot[leaf_check], c_bot[leaf_check]
+            if edge_feats is not None:
+                local_hbot, local_cbot = selective_update_hc(local_hbot, local_cbot, leaf_check, edge_feats[i])
+            if cell_node is not None:
+                local_hbot, local_cbot = cell_node(node_feats[i], (local_hbot, local_cbot))
+            bot_froms, bot_tos, prev_froms, prev_tos, past_froms, past_tos = new_ids[i]
+            h_vecs, c_vecs = hc_multi_select([bot_froms, prev_froms, past_froms],
+                                             [bot_tos, prev_tos, past_tos],
+                                             [local_hbot, h_buf, h_past],
+                                             [local_cbot, c_buf, c_past])
+            h_list.append(h_vecs)
+            c_list.append(c_vecs)
+        return cell((h_list[0], c_list[0]), (h_list[1], c_list[1]))
 
 
 class FenwickTree(nn.Module):
