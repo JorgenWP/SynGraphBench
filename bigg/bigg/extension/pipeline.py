@@ -125,7 +125,7 @@ def main():
 
     gen_dgl.ndata['label'] = gen_labels.squeeze().long().cpu()
 
-    dgl.save_graphs('../datasets/synthetic/' + DATASET, [gen_dgl])
+    dgl.save_graphs('../datasets/synthetic/' + 'bigg_' + DATASET, [gen_dgl])
 
 
 if __name__ == '__main__':
