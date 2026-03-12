@@ -119,13 +119,24 @@ def main():
     gen_cont_feats = pred_node_feats[:, :feat_dim]
     gen_labels = pred_node_feats[:, feat_dim:]
 
+    # Convert generated graph to DGL format
     gen_dgl = dgl.from_networkx(gen_nx)
 
+    # Add generated features and labels to the DGL graph
     gen_dgl.ndata['feature'] = gen_cont_feats.cpu()
-
     gen_dgl.ndata['label'] = gen_labels.squeeze().long().cpu()
 
-    dgl.save_graphs('../datasets/synthetic/' + 'bigg_' + DATASET, [gen_dgl])
+    # Add train/val/test split
+    num_nodes = gen_dgl.num_nodes()
+    num_splits = graph.ndata['train_masks'].shape[1] 
+
+    gen_dgl.ndata['train_masks'] = torch.ones(num_nodes, num_splits, dtype=torch.uint8)
+    gen_dgl.ndata['val_masks'] = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
+    gen_dgl.ndata['test_masks'] = torch.zeros(num_nodes, num_splits, dtype=torch.uint8) 
+
+    # Save generated graph
+    save_name = f'bigg_{DATASET}_blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}'
+    dgl.save_graphs('../datasets/synthetic/' + save_name, [gen_dgl])
 
 
 if __name__ == '__main__':
