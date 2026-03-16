@@ -337,7 +337,7 @@ def main():
         if args.synthetic_type == 'cgt':
             # CGT: use computation graph trees with GADBench GNNs
             results = evaluate_models_cgt(
-                'cgt_' + dataset_name, models, args.data_dir,
+                dataset_name, models, args.data_dir,
                 args.trials, args.epochs, args.patience,
                 syn_path, batch_size=args.batch_size)
         else:
