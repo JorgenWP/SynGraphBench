@@ -20,7 +20,9 @@ def main():
     pipeline_parser = argparse.ArgumentParser(allow_abbrev=False)
     pipeline_parser.add_argument('-model_type', type=str, default='conditional',
                                  choices=['conditional', 'independent'],
-                                 help = 'Choose feature generation model')
+                                 help='Choose feature generation model')
+    pipeline_parser.add_argument('-label_temp', type=float, default=1.0,
+                                 help='Sampling temperature for label generation (>1 boosts minority classes)')
     
     pipeline_args, _ = pipeline_parser.parse_known_args()
 
@@ -55,9 +57,11 @@ def main():
     cmd_args.max_num_nodes = graph_nx.number_of_nodes()
 
     if pipeline_args.model_type == 'conditional':
-        model = BiggWithConditionedFeats(cmd_args, feat_dim=feat_dim, num_classes=num_classes).to(cmd_args.device)
+        model = BiggWithConditionedFeats(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
+                                         label_temp=pipeline_args.label_temp).to(cmd_args.device)
     elif pipeline_args.model_type == 'independent':
-        model = BiggWithFeatsAndLabels(cmd_args, feat_dim=feat_dim, num_classes=num_classes).to(cmd_args.device)
+        model = BiggWithFeatsAndLabels(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
+                                       label_temp=pipeline_args.label_temp).to(cmd_args.device)
 
     optimizer = optim.Adam(model.parameters(), lr=cmd_args.learning_rate, weight_decay=1e-4)
 
@@ -70,7 +74,8 @@ def main():
     print('Start learn')
     for epoch in pbar:
         optimizer.zero_grad()
-        batch_node_feats = torch.cat([list_node_feats[i] for i in indices], dim = 0)
+        model.reset_loss_trackers()
+        batch_node_feats = torch.cat([list_node_feats[i] for i in indices], dim=0)
 
         # Gradient Checkpointing Logic
         if cmd_args.blksize < 0 or num_nodes <= cmd_args.blksize:
@@ -82,22 +87,26 @@ def main():
         else:
             # Chunked pass (for large graphs like Tolokers)
             # This calls .backward() internally for each chunk to save VRAM
-            ll, _ = sqrtn_forward_backward(model, 
-                                           graph_ids=indices, 
-                                           list_node_starts=[0], 
-                                           num_nodes=num_nodes, 
-                                           blksize=cmd_args.blksize, 
-                                           loss_scale=1.0/num_nodes, 
+            ll, _ = sqrtn_forward_backward(model,
+                                           graph_ids=indices,
+                                           list_node_starts=[0],
+                                           num_nodes=num_nodes,
+                                           blksize=cmd_args.blksize,
+                                           loss_scale=1.0/num_nodes,
                                            node_feats=batch_node_feats)
             loss_val = -ll / num_nodes
 
         if cmd_args.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm = cmd_args.grad_clip)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cmd_args.grad_clip)
 
         optimizer.step()
-        
-        # Update progress bar description
-        pbar.set_description(f"Loss: {loss_val:.4f}")
+
+        # Update progress bar with total loss and separate component losses (per node)
+        ll_cont_val = -model._ll_cont / num_nodes
+        ll_label_val = -model._ll_label / num_nodes
+        pbar.set_description(
+            f"Loss: {loss_val:.4f} | cont: {ll_cont_val:.4f} | label: {ll_label_val:.4f}"
+        )
 
     model.eval()
     print('Start generate')
