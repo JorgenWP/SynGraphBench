@@ -3,6 +3,7 @@ import os
 import numpy as np
 import torch
 import dgl
+from sklearn.preprocessing import normalize
 
 from data.comp_graph import (
     OriginalCompGraphDataset,
@@ -170,10 +171,15 @@ def _extract_cg_params(syn_data):
 def build_cgt_datasets(original_graph, syn_data):
     """Build CGT computation graph datasets for synthetic training.
 
+    Features are L2-normalized to match the space CGT uses internally
+    (CGT normalizes features before clustering, so cluster centers are in
+    L2-normalized space). Normalizing here ensures the test set's feature
+    distribution matches the synthetic train/val features.
+
     Returns:
         syn_train: SyntheticCompGraphDataset for train nodes
         syn_val: SyntheticCompGraphDataset for val nodes
-        test_ds: OriginalCompGraphDataset for test nodes (original features)
+        test_ds: OriginalCompGraphDataset for test nodes (L2-normalized features)
     """
     step_num, sample_num, noise_num, self_conn = _extract_cg_params(syn_data)
     total_sample = sample_num + noise_num
@@ -182,9 +188,11 @@ def build_cgt_datasets(original_graph, syn_data):
     ids = syn_data['ids']
     test_ids = ids['test']
 
-    # Build test set from original graph (real features + structure)
+    # Build test set from original graph (L2-normalized features to match
+    # the cluster center space used for synthetic train/val)
     adj_list = dgl_to_adj_list(original_graph)
     features = original_graph.ndata['feature'].cpu().numpy().astype(np.float32)
+    features = normalize(features, axis=1, norm='l2')
     labels = original_graph.ndata['label'].cpu().numpy().astype(np.int64)
 
     test_ds = OriginalCompGraphDataset(
@@ -215,7 +223,9 @@ def build_original_cg_datasets(original_graph, syn_data):
     """Build computation graph datasets from original data for all splits.
 
     Uses the same tree structure (step_num, sample_num, etc.) from the CGT
-    .pt file, but with original features for train/val/test.
+    .pt file, with L2-normalized features for train/val/test. Normalization
+    matches the feature space CGT operates in, making the original-CG baseline
+    directly comparable to the synthetic-CGT condition.
 
     Returns:
         train_ds, val_ds, test_ds: OriginalCompGraphDataset for each split
@@ -229,6 +239,7 @@ def build_original_cg_datasets(original_graph, syn_data):
 
     adj_list = dgl_to_adj_list(original_graph)
     features = original_graph.ndata['feature'].cpu().numpy().astype(np.float32)
+    features = normalize(features, axis=1, norm='l2')
     labels = original_graph.ndata['label'].cpu().numpy().astype(np.int64)
 
     train_ds = OriginalCompGraphDataset(
