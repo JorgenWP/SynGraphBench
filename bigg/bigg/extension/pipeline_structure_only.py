@@ -97,8 +97,10 @@ def main():
     gen_dgl.ndata['val_masks'] = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
     gen_dgl.ndata['test_masks'] = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
 
-    save_name = f'bigg_structure_{DATASET}_blksize_{cmd_args.blksize}'
-    save_path = '../datasets/synthetic/' + save_name
+    save_name = f'{DATASET}_structure_blksize_{cmd_args.blksize}'
+    save_dir = '../datasets/synthetic/bigg'
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, save_name)
     dgl.save_graphs(save_path, [gen_dgl])
     print(f'Saved generated graph to {save_path}')
 
