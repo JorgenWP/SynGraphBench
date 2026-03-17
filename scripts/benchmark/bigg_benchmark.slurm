@@ -30,10 +30,11 @@ module load Anaconda3/2024.02-1
 conda activate GADBench
 
 # Config
-SYNTHETIC_MODEL="bigg"
+GENERATOR="bigg"
 DATASETS="tolokers"
 MODELS="GCN,GIN,GraphSAGE,XGBGraph"
 TRIALS="1"
+SYNTHETIC_NAME=""   # Optional: set to a specific variant, e.g. "tolokers_blksize_1024_b_1"
 
 # Run the benchmark script with BiGG synthetic data
-bash scripts/benchmark/run_benchmark.sh "$DATASETS" "$MODELS" "$TRIALS" "$SYNTHETIC_MODEL"
+bash scripts/benchmark/run_benchmark.sh "$DATASETS" "$MODELS" "$TRIALS" "$GENERATOR" "$SYNTHETIC_NAME"

@@ -306,7 +306,8 @@ def main():
     print(f"  Datasets:       {datasets}")
     print(f"  Models:         {models}")
     print(f"  Synthetic type: {args.synthetic_type}")
-    print(f"  Synthetic model:{' ' + args.synthetic_model if args.synthetic_model else ' auto'}")
+    print(f"  Generator:      {args.generator}")
+    print(f"  Synthetic name: {args.synthetic_name if args.synthetic_name else '(use dataset name)'}")
     print(f"  Data dir:       {args.data_dir}")
     print(f"  Synthetic dir:  {args.synthetic_dir}")
     print(f"  Output dir:     {args.output_dir}")
@@ -345,12 +346,13 @@ def main():
     print("#" * 80)
 
     for dataset_name in datasets:
-        # Determine synthetic data path based on type and model
-        prefix = f'{args.synthetic_model}_{dataset_name}' if args.synthetic_model else dataset_name
-        if args.synthetic_type == 'cgt':
-            syn_path = os.path.join(args.synthetic_dir, f'{prefix}.pt')
+        # Resolve path: synthetic_dir/<generator>/<stem>[.pt]
+        gen_dir = os.path.join(args.synthetic_dir, args.generator)
+        stem = args.synthetic_name if args.synthetic_name else dataset_name
+        if args.synthetic_type == 'comp-graph':
+            syn_path = os.path.join(gen_dir, f'{stem}.pt')
         else:
-            syn_path = os.path.join(args.synthetic_dir, prefix)
+            syn_path = os.path.join(gen_dir, stem)
 
         if not os.path.exists(syn_path):
             print(f"\n  Skipping {dataset_name}: {syn_path} not found")
@@ -358,7 +360,7 @@ def main():
 
         print(f"\n  Found {args.synthetic_type} synthetic data: {syn_path}")
 
-        if args.synthetic_type == 'cgt':
+        if args.synthetic_type == 'comp-graph':
             # CGT: use computation graph trees with GADBench GNNs
             results = evaluate_models_cgt(
                 dataset_name, models, args.data_dir,
@@ -366,14 +368,16 @@ def main():
                 args.batch_size, args.lr, args.drop_rate,
                 args.h_feats, args.num_layers)
         else:
-            # Full graph (BiGG, etc.): use standard full-graph GNNs
+            # Full graph (BiGG, etc.): use standard full-graph GNNs.
+            # GADBenchDataset expects (dataset_name, prefix=<parent_dir>/), so
+            # pass the gen_dir as prefix and the stem as the dataset name.
             results = evaluate_models(
-                f'{args.synthetic_model}_{dataset_name}', models, args.data_dir,
+                stem, models, args.data_dir,
                 f'synthetic-{args.synthetic_type}', args.trials,
                 args.semi_supervised, args.trial_id,
                 args.epochs, args.patience,
                 args.lr, args.drop_rate, args.h_feats, args.num_layers,
-                synthetic_dir=args.synthetic_dir,
+                synthetic_dir=gen_dir,
                 synthetic_type=args.synthetic_type)
         all_results.extend(results)
 

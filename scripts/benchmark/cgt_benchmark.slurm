@@ -30,10 +30,11 @@ module load Anaconda3/2024.02-1
 conda activate GADBench
 
 # Config
-SYNTHETIC_MODEL="cgt"
+GENERATOR="cgt"
 DATASETS="tolokers"
 MODELS="GCN,GIN,GraphSAGE,XGBGraph"
 TRIALS="1"
+SYNTHETIC_NAME=""   # Optional: set to a specific variant, e.g. "reddit_eps0.1"
 
 # Run the benchmark script with CGT synthetic data
-bash scripts/benchmark/run_benchmark.sh "$DATASETS" "$MODELS" "$TRIALS" "$SYNTHETIC_MODEL"
+bash scripts/benchmark/run_benchmark.sh "$DATASETS" "$MODELS" "$TRIALS" "$GENERATOR" "$SYNTHETIC_NAME"

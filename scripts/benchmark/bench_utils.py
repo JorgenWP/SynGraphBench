@@ -31,16 +31,24 @@ def parse_args():
                             help='Path to synthetic datasets (default: datasets/synthetic)')
     data_group.add_argument('--output_dir', type=str, default=None,
                             help='Directory to save results (default: results/evaluate)')
-    data_group.add_argument('--synthetic_type', type=str, default='cgt',
-                            choices=['graph', 'cgt'],
-                            help='Type of synthetic data: '
-                                 '"graph" = full DGL graph (BiGG, etc.), '
-                                 '"cgt" = CGT computation graph sequences (.pt)')
-    data_group.add_argument('--synthetic_model', type=str, default=None,
-                            help='Generator model prefix for synthetic filenames '
-                                 '(e.g. "cgt" looks for cgt_<dataset>.pt, '
-                                 '"bigg" looks for bigg_<dataset>). '
-                                 'If not set, falls back to <dataset>.pt / <dataset>.')
+    data_group.add_argument('--synthetic_type', type=str, default='comp-graph',
+                            choices=['graph', 'comp-graph'],
+                            help='Format of the synthetic data, determines evaluation mode: '
+                                 '"graph" = full DGL graph, evaluated with whole-graph GNNs; '
+                                 '"comp-graph" = computation graph sequences (.pt), evaluated '
+                                 'with computation-graph GNNs.')
+    data_group.add_argument('--generator', type=str, default=None,
+                            help='Name of the generative model — used as the subfolder '
+                                 'under --synthetic_dir (e.g. "bigg", "cgt"). Required. '
+                                 'Resolved path: '
+                                 '<synthetic_dir>/<generator>/<synthetic_name or dataset>[.pt].')
+    data_group.add_argument('--synthetic_name', type=str, default=None,
+                            help='Exact filename stem within the generator subfolder. '
+                                 'Use this to select a specific variant when multiple '
+                                 'synthetic files exist for the same dataset. '
+                                 'If not set, falls back to <dataset>[.pt]. '
+                                 'Example: "--generator bigg --synthetic_name tolokers_blksize_1024_b_1" '
+                                 'resolves to synthetic/bigg/tolokers_blksize_1024_b_1.')
     data_group.add_argument('--semi_supervised', type=int, default=0,
                             help='Use semi-supervised split (0 or 1)')
     data_group.add_argument('--trial_id', type=int, default=0,
