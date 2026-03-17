@@ -22,7 +22,7 @@ cd "$(dirname "$0")/../../bigg"
 echo "=== BiGG Structure-Only Baseline ==="
 echo "Dataset:    $DATASET"
 echo "Block size: $BLKSIZE"
-echo "Batch size: $BATCH_SIZE"
+echo "Batch size: $BSIZE"
 echo "Epochs:     $EPOCHS"
 echo ""
 
@@ -33,7 +33,7 @@ python -m bigg.extension.pipeline_structure_only \
   -bits_compress 0 \
   -learning_rate 0.001 \
   -num_epochs "$EPOCHS" \
-  -batch_size "$BATCH_SIZE" \
+  -batch_size "$BSIZE" \
   -blksize "$BLKSIZE" \
   -seed 34 \
   -save_dir "../checkpoints/bigg_structure_${DATASET}"
