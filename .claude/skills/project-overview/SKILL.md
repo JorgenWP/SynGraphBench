@@ -62,12 +62,52 @@ SynGraphBench/
 │   ├── benchmark/          # Scripts and Python modules for benchmarking (run_benchmark.sh, benchmark.py)
 │   └── test/               # Quick test/example scripts (e.g., run_cgt_test.sh)
 ├── datasets/               # Data storage
-│   ├── original/           # Original datasets (e.g., reddit, cora, citeseer)
-│   └── synthetic/          # Generated datasets ready for downstream evaluation
-├── results/                # Evaluation outputs (e.g., CSVs)
+│   ├── original/           # Original datasets (e.g., reddit, tolokers, amazon)
+│   └── synthetic/          # Generated datasets, organised by generative model
+│       ├── cgt/            # CGT outputs: computation graph sequences (.pt files)
+│       │   └── <dataset>[_<variant>].pt  # e.g. reddit.pt, reddit_eps0.1.pt
+│       └── bigg/           # BiGG outputs: full DGL graphs (directories)
+│           └── <dataset>[_<variant>]/    # e.g. tolokers/, tolokers_blksize_1024_b_1/
+├── results/                # Evaluation outputs (e.g., CSVs, XLSX)
 ├── GADBench/               # Anomaly Detection Sub-repo
 ├── CGT/                    # Computation Graph Transformer Sub-repo
 └── bigg/                   # BiGG Sub-repo
+```
+
+### Synthetic Dataset Naming Convention
+
+Synthetic datasets are stored under `datasets/synthetic/<generator>/` where `<generator>` matches the tool that produced them (`cgt`, `bigg`, etc.). Files are named after the **dataset only** — the generator name is not repeated in the filename since the folder already encodes it.
+
+| Generator | Type | Example path |
+|-----------|------|--------------|
+| `cgt` | Computation graph (`.pt`) | `synthetic/cgt/reddit.pt` |
+| `cgt` | Computation graph — variant | `synthetic/cgt/reddit_eps0.1.pt` |
+| `bigg` | Full DGL graph (directory) | `synthetic/bigg/tolokers/` |
+| `bigg` | Full DGL graph — variant | `synthetic/bigg/tolokers_blksize_1024_b_1/` |
+
+### Benchmark CLI — Specifying Synthetic Data
+
+`scripts/benchmark/benchmark.py` uses three arguments to locate synthetic data:
+
+| Argument | Role | Values |
+|---|---|---|
+| `--synthetic_type` | Evaluation mode | `graph` (whole-graph GNNs) or `comp-graph` (computation-graph GNNs) |
+| `--generator` | Subfolder name | `bigg`, `cgt`, … |
+| `--synthetic_name` | Specific filename stem (optional) | e.g. `tolokers_blksize_1024_b_1` |
+
+Resolved path: `<synthetic_dir>/<generator>/<synthetic_name or dataset>[.pt]`
+
+**Examples:**
+```bash
+# CGT comp-graph: reads datasets/synthetic/cgt/reddit.pt
+python benchmark.py --datasets reddit --synthetic_type comp-graph --generator cgt
+
+# BiGG whole-graph (default name): reads datasets/synthetic/bigg/tolokers/
+python benchmark.py --datasets tolokers --synthetic_type graph --generator bigg
+
+# BiGG specific variant: reads datasets/synthetic/bigg/tolokers_blksize_1024_b_1/
+python benchmark.py --datasets tolokers --synthetic_type graph --generator bigg \
+    --synthetic_name tolokers_blksize_1024_b_1
 ```
 
 ## 4. Execution Flow & Script Usage
@@ -102,4 +142,4 @@ The project relies on a decoupled architecture where training, generation, and e
 
 1. **Changing GNN Hyperparameters?** Look in `CGT/args.py` or `GADBench/benchmark.py`.
 2. **Fixing C++ Compilation Errors?** Look at `scripts/env_setups/bigg.sh` and `bigg/bigg/model/tree_clib/Makefile`. Modern CUDA architectures are patched in via `sed` in the setup script.
-3. **Adding a New Dataset?** You must place it in `datasets/original/` (or `CGT/data/` if testing CGT directly) and ensure the loading utility functions in the respective sub-repo (e.g., `CGT/task/utils/utils.py` or `GADBench/benchmark.py`) are updated to parse it.
+3. **Adding a New Dataset?** Place the original in `datasets/original/`. Place synthetic outputs in `datasets/synthetic/<generator>/<dataset>[.pt]` (no generator prefix in the filename). Ensure the loading utilities in the relevant sub-repo (e.g., `CGT/task/utils/utils.py` or `GADBench/benchmark.py`) are updated to parse it.
