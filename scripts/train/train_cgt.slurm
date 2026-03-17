@@ -29,6 +29,14 @@ module load Anaconda3/2024.02-1
 # Activate CGT conda environment
 conda activate CGT
 
+# Arguments
+DATASET="reddit"
+GPT_EPOCHS=50
+CLUSTER_NUM=512
+CLUSTER_SIZE=1
+GPT_BATCH_SIZE=128
+CG_DEPTH=2
+CG_FANOUT=5
 
 # Run the CGT training and generation script
-bash scripts/train/train_cgt.sh
+bash scripts/train/train_cgt.sh "$DATASET" "$GPT_EPOCHS" "$CLUSTER_NUM" "$CLUSTER_SIZE" "$GPT_BATCH_SIZE" "$CG_DEPTH" "$CG_FANOUT"
