@@ -65,7 +65,8 @@ SynGraphBench/
 │   ├── original/           # Original datasets (e.g., reddit, tolokers, amazon)
 │   └── synthetic/          # Generated datasets, organised by generative model
 │       ├── cgt/            # CGT outputs: computation graph sequences (.pt files)
-│       │   └── <dataset>[_<variant>].pt  # e.g. reddit.pt, reddit_eps0.1.pt
+│       │   └── <dataset>_e<epochs>_k<clusters>_d<depth>_f<fanout>.pt
+│       │                           # e.g. reddit_e50_k512_d2_f5.pt
 │       └── bigg/           # BiGG outputs: full DGL graphs (directories)
 │           └── <dataset>[_<variant>]/    # e.g. tolokers/, tolokers_blksize_1024_b_1/
 ├── results/                # Evaluation outputs (e.g., CSVs, XLSX)
@@ -80,8 +81,7 @@ Synthetic datasets are stored under `datasets/synthetic/<generator>/` where `<ge
 
 | Generator | Type | Example path |
 |-----------|------|--------------|
-| `cgt` | Computation graph (`.pt`) | `synthetic/cgt/reddit.pt` |
-| `cgt` | Computation graph — variant | `synthetic/cgt/reddit_eps0.1.pt` |
+| `cgt` | Computation graph (`.pt`) | `synthetic/cgt/reddit_e50_k512_d2_f5.pt` |
 | `bigg` | Full DGL graph (directory) | `synthetic/bigg/tolokers/` |
 | `bigg` | Full DGL graph — variant | `synthetic/bigg/tolokers_blksize_1024_b_1/` |
 
