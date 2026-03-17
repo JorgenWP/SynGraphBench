@@ -63,7 +63,7 @@ def set_seed(seed=3407):
 
 def evaluate_models(dataset_name, models, data_dir,
                     data_source, trials, semi_supervised, trial_id,
-                    epochs, patience,
+                    epochs, patience, lr, drop_rate, h_feats, num_layers,
                     synthetic_dir=None, synthetic_type=None):
     """Train and evaluate all specified models on a single dataset.
 
@@ -113,7 +113,13 @@ def evaluate_models(dataset_name, models, data_dir,
             # Apply train/val/test split masks
             data.split(semi_supervised, trial_id)
 
-            model_config = {'model': model_name, 'lr': 0.01, 'drop_rate': 0}
+            model_config = {
+                'model': model_name,
+                'lr': lr,
+                'drop_rate': drop_rate,
+                'h_feats': h_feats,
+                'num_layers': num_layers,
+            }
             if dataset_name == 'tsocial':
                 model_config['h_feats'] = 16
 
@@ -157,7 +163,7 @@ def evaluate_models(dataset_name, models, data_dir,
 
 def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
                    feat_dim, source_label, trials, epochs, patience,
-                   batch_size):
+                   batch_size, lr, drop_rate, h_feats, num_layers):
     """Run CompGraphDetector trials for a set of models on given CG datasets."""
     results = []
 
@@ -185,8 +191,10 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
 
             model_config = {
                 'model': model_name,
-                'lr': 0.01,
-                'drop_rate': 0,
+                'lr': lr,
+                'drop_rate': drop_rate,
+                'h_feats': h_feats,
+                'num_layers': num_layers,
                 'in_feats': feat_dim,
             }
             if dataset_name == 'tsocial':
@@ -230,7 +238,7 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
 
 def evaluate_models_cgt(dataset_name, models, data_dir,
                         trials, epochs, patience, syn_path,
-                        batch_size=256):
+                        batch_size, lr, drop_rate, h_feats, num_layers):
     """Evaluate GNN models on CGT computation graphs.
 
     Runs two comparisons:
@@ -258,13 +266,15 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
         data.graph, syn_data)
     results.extend(_run_cg_trials(
         dataset_name, cg_models, orig_train, orig_val, orig_test,
-        feat_dim, 'original-cg', trials, epochs, patience, batch_size))
+        feat_dim, 'original-cg', trials, epochs, patience,
+        batch_size, lr, drop_rate, h_feats, num_layers))
 
     # --- CGT synthetic computation graphs ---
     syn_train, syn_val, test_ds = build_cgt_datasets(data.graph, syn_data)
     results.extend(_run_cg_trials(
         dataset_name, cg_models, syn_train, syn_val, test_ds,
-        feat_dim, 'synthetic-cgt', trials, epochs, patience, batch_size))
+        feat_dim, 'synthetic-cgt', trials, epochs, patience,
+        batch_size, lr, drop_rate, h_feats, num_layers))
 
     del data
     return results
@@ -290,16 +300,29 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
-    print("GNN Benchmark: Original vs Synthetic Data")
+    print("Arguments:")
+
+    print("\nData:")
     print(f"  Datasets:       {datasets}")
     print(f"  Models:         {models}")
-    print(f"  Trials:         {args.trials}")
     print(f"  Synthetic type: {args.synthetic_type}")
-    print(f"  Synthetic model:{' ' + args.synthetic_model if args.synthetic_model else ' auto'}")    
+    print(f"  Synthetic model:{' ' + args.synthetic_model if args.synthetic_model else ' auto'}")
     print(f"  Data dir:       {args.data_dir}")
     print(f"  Synthetic dir:  {args.synthetic_dir}")
     print(f"  Output dir:     {args.output_dir}")
     print(f"  Trial ID:       {args.trial_id}")
+
+    print("\nTraining:")
+    print(f"  Trials:         {args.trials}")
+    print(f"  Epochs:         {args.epochs}")
+    print(f"  Patience:       {args.patience}")
+    print(f"  Batch size:     {args.batch_size}  (CGT only)")
+
+    print("\nModel Architecture:")
+    print(f"  LR:             {args.lr}")
+    print(f"  Drop rate:      {args.drop_rate}")
+    print(f"  Hidden feats:   {args.h_feats}")
+    print(f"  Num layers:     {args.num_layers}  (must equal cg_depth in CGT .pt)")
 
     all_results = []
 
@@ -312,7 +335,8 @@ def main():
         results = evaluate_models(
             dataset_name, models, args.data_dir,
             'original', args.trials, args.semi_supervised, args.trial_id,
-            args.epochs, args.patience)
+            args.epochs, args.patience,
+            args.lr, args.drop_rate, args.h_feats, args.num_layers)
         all_results.extend(results)
 
     # --- Phase 2: Evaluate on synthetic data ---
@@ -338,8 +362,9 @@ def main():
             # CGT: use computation graph trees with GADBench GNNs
             results = evaluate_models_cgt(
                 dataset_name, models, args.data_dir,
-                args.trials, args.epochs, args.patience,
-                syn_path, batch_size=args.batch_size)
+                args.trials, args.epochs, args.patience, syn_path,
+                args.batch_size, args.lr, args.drop_rate,
+                args.h_feats, args.num_layers)
         else:
             # Full graph (BiGG, etc.): use standard full-graph GNNs
             results = evaluate_models(
@@ -347,6 +372,7 @@ def main():
                 f'synthetic-{args.synthetic_type}', args.trials,
                 args.semi_supervised, args.trial_id,
                 args.epochs, args.patience,
+                args.lr, args.drop_rate, args.h_feats, args.num_layers,
                 synthetic_dir=args.synthetic_dir,
                 synthetic_type=args.synthetic_type)
         all_results.extend(results)

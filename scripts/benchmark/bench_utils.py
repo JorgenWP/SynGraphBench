@@ -18,38 +18,67 @@ SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph']
 def parse_args():
     parser = argparse.ArgumentParser(
         description='Benchmark GNNs on original vs synthetic graph data')
-    parser.add_argument('--datasets', type=str, required=True,
-                        help='Comma-separated dataset names (e.g., "reddit,weibo,amazon")')
-    parser.add_argument('--models', type=str, default=','.join(SUPPORTED_MODELS),
-                        help='Comma-separated model names')
-    parser.add_argument('--trials', type=int, default=1,
-                        help='Number of evaluation trials per model/dataset')
-    parser.add_argument('--data_dir', type=str, default=None,
-                        help='Path to original datasets (default: datasets/original)')
-    parser.add_argument('--synthetic_dir', type=str, default=None,
-                        help='Path to synthetic datasets (default: datasets/synthetic)')
-    parser.add_argument('--output_dir', type=str, default=None,
-                        help='Directory to save results (default: results/evaluate)')
-    parser.add_argument('--synthetic_type', type=str, default='cgt',
-                        choices=['graph', 'cgt'],
-                        help='Type of synthetic data: '
-                             '"graph" = full DGL graph (BiGG, etc.), '
-                             '"cgt" = CGT computation graph sequences (.pt)')
-    parser.add_argument('--semi_supervised', type=int, default=0,
-                        help='Use semi-supervised split (0 or 1)')
-    parser.add_argument('--trial_id', type=int, default=0,
-                        help='Trial ID for mask split (must match CGT training)')
-    parser.add_argument('--epochs', type=int, default=200,
-                        help='Max training epochs')
-    parser.add_argument('--patience', type=int, default=50,
-                        help='Early stopping patience')
-    parser.add_argument('--batch_size', type=int, default=256,
-                        help='Batch size for computation graph mode (CGT)')
-    parser.add_argument('--synthetic_model', type=str, default=None,
-                        help='Generator model prefix for synthetic filenames '
-                             '(e.g. "cgt" looks for cgt_<dataset>.pt, '
-                             '"bigg" looks for bigg_<dataset>). '
-                             'If not set, falls back to <dataset>.pt / <dataset>.')
+
+    # --- Data ---
+    data_group = parser.add_argument_group('Data')
+    data_group.add_argument('--datasets', type=str, required=True,
+                            help='Comma-separated dataset names (e.g., "reddit,weibo,amazon")')
+    data_group.add_argument('--models', type=str, default=','.join(SUPPORTED_MODELS),
+                            help='Comma-separated model names')
+    data_group.add_argument('--data_dir', type=str, default=None,
+                            help='Path to original datasets (default: datasets/original)')
+    data_group.add_argument('--synthetic_dir', type=str, default=None,
+                            help='Path to synthetic datasets (default: datasets/synthetic)')
+    data_group.add_argument('--output_dir', type=str, default=None,
+                            help='Directory to save results (default: results/evaluate)')
+    data_group.add_argument('--synthetic_type', type=str, default='cgt',
+                            choices=['graph', 'cgt'],
+                            help='Type of synthetic data: '
+                                 '"graph" = full DGL graph (BiGG, etc.), '
+                                 '"cgt" = CGT computation graph sequences (.pt)')
+    data_group.add_argument('--synthetic_model', type=str, default=None,
+                            help='Generator model prefix for synthetic filenames '
+                                 '(e.g. "cgt" looks for cgt_<dataset>.pt, '
+                                 '"bigg" looks for bigg_<dataset>). '
+                                 'If not set, falls back to <dataset>.pt / <dataset>.')
+    data_group.add_argument('--semi_supervised', type=int, default=0,
+                            help='Use semi-supervised split (0 or 1)')
+    data_group.add_argument('--trial_id', type=int, default=0,
+                            help='Trial ID for mask split (must match CGT training)')
+
+    # --- Training ---
+    train_group = parser.add_argument_group('Training')
+    train_group.add_argument('--trials', type=int, default=1,
+                             help='Number of evaluation trials per model/dataset')
+    train_group.add_argument('--epochs', type=int, default=200,
+                             help='Max training epochs')
+    train_group.add_argument('--patience', type=int, default=50,
+                             help='Early stopping patience')
+    train_group.add_argument('--batch_size', type=int, default=256,
+                             help='Batch size for computation graph mode (CGT); '
+                                  'not used by whole-graph GNNs')
+
+    # --- Model architecture ---
+    # These must match between whole-graph and computation-graph GNNs for a fair comparison.
+    # num_layers controls the receptive field depth and must equal cg_depth used during
+    # CGT training (stored in the .pt file). lr, drop_rate, and h_feats must also be
+    # identical across both training modes.
+    model_group = parser.add_argument_group('Model architecture')
+    model_group.add_argument('--lr', type=float, default=0.01,
+                             help='Learning rate for Adam optimizer (applies to both '
+                                  'whole-graph and computation-graph GNNs)')
+    model_group.add_argument('--drop_rate', type=float, default=0.0,
+                             help='Dropout rate (applies to both whole-graph and '
+                                  'computation-graph GNNs)')
+    model_group.add_argument('--h_feats', type=int, default=32,
+                             help='Hidden feature dimension. Overridden to 16 for '
+                                  'tsocial regardless of this value.')
+    model_group.add_argument('--num_layers', type=int, default=2,
+                             help='Number of GNN layers / message-passing hops. '
+                                  'For a fair comparison with computation-graph GNNs '
+                                  'this must equal the cg_depth used during CGT training '
+                                  '(default: 2).')
+
     return parser.parse_args()
 
 
