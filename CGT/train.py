@@ -28,7 +28,7 @@ def main():
     args.gpt_train_name = (
         f"{args.dataset}_{args.gpt_model}"
         f"_e{args.gpt_epochs}_l{args.gpt_layers}_h{args.gpt_heads}"
-        f"_c{args.cluster_num}_s{args.subgraph_step_num}x{args.subgraph_sample_num}"
+        f"_c{args.cluster_num}_s{args.cg_depth}x{args.cg_fanout}"
     )
 
     print(f"--- Training CGT on {args.dataset} dataset ---")
@@ -66,8 +66,8 @@ def main():
         'ids': ids,
         'feat_size': feat_size,
         'label_size': label_size,
-        'subgraph_step_num': args.subgraph_step_num,
-        'subgraph_sample_num': args.subgraph_sample_num,
+        'cg_depth': args.cg_depth,
+        'cg_fanout': args.cg_fanout,
         'noise_num': args.noise_num,
         'self_connection': args.self_connection,
     }, save_path)

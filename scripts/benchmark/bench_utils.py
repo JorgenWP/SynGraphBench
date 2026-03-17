@@ -161,8 +161,8 @@ def print_comparison(all_results, datasets, models):
 
 def _extract_cg_params(syn_data):
     """Extract computation graph tree parameters from CGT .pt data."""
-    step_num = syn_data['subgraph_step_num']
-    sample_num = syn_data['subgraph_sample_num']
+    step_num = syn_data['cg_depth']
+    sample_num = syn_data['cg_fanout']
     noise_num = syn_data.get('noise_num', 0)
     self_conn = syn_data.get('self_connection', False)
     return step_num, sample_num, noise_num, self_conn

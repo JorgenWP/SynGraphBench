@@ -24,8 +24,8 @@ class Dataset(torch.utils.data.Dataset):
         self.empty_id = feats.shape[0]
         self.feats = np.concatenate((self.feats, np.zeros((1, feats.shape[1]))), axis=0)
 
-        self.step_num = args.subgraph_step_num
-        self.sample_num = args.subgraph_sample_num
+        self.step_num = args.cg_depth
+        self.sample_num = args.cg_fanout
         self.noise_num = args.noise_num
         self.self_connection = args.self_connection
         self.dup_adj = self.compute_dup_adj()

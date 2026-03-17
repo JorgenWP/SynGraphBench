@@ -21,8 +21,8 @@ class Dataset(torch.utils.data.Dataset):
         self.labels = labels
         self.ids = ids
 
-        self.step_num = args.subgraph_step_num
-        self.sample_num = args.subgraph_sample_num
+        self.step_num = args.cg_depth
+        self.sample_num = args.cg_fanout
         self.noise_num = args.noise_num
         self.total_sample_num = self.sample_num + self.noise_num
         self.short_seq_num = (self.sample_num + self.noise_num) ** self.step_num
@@ -115,8 +115,8 @@ class QuantizedDataset(torch.utils.data.Dataset):
         self.labels = labels
         self.cluster_centers = cluster_centers
 
-        self.step_num = args.subgraph_step_num
-        self.sample_num = args.subgraph_sample_num + args.noise_num
+        self.step_num = args.cg_depth
+        self.sample_num = args.cg_fanout + args.noise_num
         self.self_connection = args.self_connection
         self.dup_adj = self.compute_dup_adj()
 

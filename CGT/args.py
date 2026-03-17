@@ -36,10 +36,10 @@ def get_parser():
                         help='Number of propagating steps')
     parser.add_argument('--sample_num', type=int, default=5,
                         help='Number of sampled neighbors')
-    parser.add_argument('--subgraph_step_num', type=int, default=2,
-                        help='Number of propagating steps')
-    parser.add_argument('--subgraph_sample_num', type=int, default=5,
-                        help='Number of propagating steps')
+    parser.add_argument('--cg_depth', type=int, default=2,
+                        help='Number of hops to expand when building each computation graph')
+    parser.add_argument('--cg_fanout', type=int, default=5,
+                        help='Number of neighbors sampled per node per hop in the computation graph')
 
     # Privacy-related hyperparameters
     parser.add_argument('--dp_feature', dest='dp_feature', action='store_true')
@@ -184,8 +184,8 @@ def print_args(args):
     print(f"  dp_feature:       {args.dp_feature}")
 
     print(f"\n  [Computation Graph]")
-    print(f"  subgraph_step:    {args.subgraph_step_num}")
-    print(f"  subgraph_sample:  {args.subgraph_sample_num}")
+    print(f"  cg_depth:         {args.cg_depth}")
+    print(f"  cg_fanout:        {args.cg_fanout}")
     print(f"  noise_num:        {args.noise_num}")
     print(f"  self_connection:  {args.self_connection}")
     print(f"  org_code:         {args.org_code}")
