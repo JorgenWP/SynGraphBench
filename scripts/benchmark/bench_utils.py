@@ -256,7 +256,8 @@ def build_cgt_datasets(original_graph, syn_data):
     return syn_train, syn_val, test_ds
 
 
-def build_original_cg_datasets(original_graph, syn_data):
+def build_original_cg_datasets(original_graph, syn_data,
+                               trial_id=0, semi_supervised=False):
     """Build computation graph datasets from original data for all splits.
 
     Uses the same tree structure (step_num, sample_num, etc.) from the CGT
@@ -264,15 +265,19 @@ def build_original_cg_datasets(original_graph, syn_data):
     matches the feature space CGT operates in, making the original-CG baseline
     directly comparable to the synthetic-CGT condition.
 
+    Node IDs are derived from the graph's pre-stored mask columns so that
+    different trial_ids produce different train/val/test splits, matching the
+    split-varying behaviour of the whole-graph evaluation path.
+
     Returns:
         train_ds, val_ds, test_ds: OriginalCompGraphDataset for each split
     """
     step_num, sample_num, noise_num, self_conn = _extract_cg_params(syn_data)
 
-    ids = syn_data['ids']
-    train_ids = ids['train']
-    val_ids = ids['val']
-    test_ids = ids['test']
+    mask_col = trial_id + (10 if semi_supervised else 0)
+    train_ids = original_graph.ndata['train_masks'][:, mask_col].bool().nonzero(as_tuple=True)[0].numpy()
+    val_ids = original_graph.ndata['val_masks'][:, mask_col].bool().nonzero(as_tuple=True)[0].numpy()
+    test_ids = original_graph.ndata['test_masks'][:, mask_col].bool().nonzero(as_tuple=True)[0].numpy()
 
     adj_list = dgl_to_adj_list(original_graph)
     features = original_graph.ndata['feature'].cpu().numpy().astype(np.float32)

@@ -110,8 +110,9 @@ def evaluate_models(dataset_name, models, data_dir,
                 # Original data
                 data = GADBenchDataset(dataset_name, prefix=data_dir + '/')
 
-            # Apply train/val/test split masks
-            data.split(semi_supervised, trial_id)
+            # Apply train/val/test split masks — advance by t so each trial
+            # uses a different pre-stored mask column (trial_id is the starting offset)
+            data.split(semi_supervised, trial_id + t)
 
             model_config = {
                 'model': model_name,
@@ -163,8 +164,16 @@ def evaluate_models(dataset_name, models, data_dir,
 
 def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
                    feat_dim, source_label, trials, epochs, patience,
-                   batch_size, lr, drop_rate, h_feats, num_layers):
-    """Run CompGraphDetector trials for a set of models on given CG datasets."""
+                   batch_size, lr, drop_rate, h_feats, num_layers,
+                   rebuild_datasets_fn=None):
+    """Run CompGraphDetector trials for a set of models on given CG datasets.
+
+    Args:
+        rebuild_datasets_fn: optional callable(t) -> (train_ds, val_ds, test_ds).
+            When provided, datasets are rebuilt each trial so that different
+            train/val/test splits are used. When None, the passed-in datasets
+            are reused across all trials (only the seed varies).
+    """
     results = []
 
     for model_name in cg_models:
@@ -179,6 +188,9 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
             torch.cuda.empty_cache()
             seed = SEED_LIST[t]
             set_seed(seed)
+
+            if rebuild_datasets_fn is not None:
+                train_ds, val_ds, test_ds = rebuild_datasets_fn(t)
 
             train_config = {
                 'device': 'cuda' if torch.cuda.is_available() else 'cpu',
@@ -238,14 +250,18 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
 
 def evaluate_models_cgt(dataset_name, models, data_dir,
                         trials, epochs, patience, syn_path,
-                        batch_size, lr, drop_rate, h_feats, num_layers):
+                        batch_size, lr, drop_rate, h_feats, num_layers,
+                        trial_id=0, semi_supervised=False):
     """Evaluate GNN models on CGT computation graphs.
 
     Runs two comparisons:
       1. Original-CG: train/val/test all built as computation graphs
-         from the original graph (baseline for the CG format).
+         from the original graph (baseline for the CG format). Each trial
+         uses a different pre-stored mask split (trial_id + t).
       2. Synthetic-CGT: train/val from CGT-generated cluster-center
-         sequences, test from original graph computation graphs.
+         sequences, test from original graph computation graphs. The
+         synthetic split is fixed in the .pt file, so trials here only
+         vary the random seed (initialization variance).
     """
     results = []
 
@@ -262,14 +278,21 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
               f"Skipping.")
 
     # --- Original data as computation graphs (CG baseline) ---
-    orig_train, orig_val, orig_test = build_original_cg_datasets(
-        data.graph, syn_data)
+    # Rebuild datasets each trial so that different mask splits are used,
+    # matching the same split-varying behaviour as the whole-graph path.
+    orig_train0, orig_val0, orig_test0 = build_original_cg_datasets(
+        data.graph, syn_data, trial_id=trial_id, semi_supervised=semi_supervised)
     results.extend(_run_cg_trials(
-        dataset_name, cg_models, orig_train, orig_val, orig_test,
+        dataset_name, cg_models, orig_train0, orig_val0, orig_test0,
         feat_dim, 'original-cg', trials, epochs, patience,
-        batch_size, lr, drop_rate, h_feats, num_layers))
+        batch_size, lr, drop_rate, h_feats, num_layers,
+        rebuild_datasets_fn=lambda t: build_original_cg_datasets(
+            data.graph, syn_data,
+            trial_id=trial_id + t, semi_supervised=semi_supervised)))
 
     # --- CGT synthetic computation graphs ---
+    # The synthetic train/val split is baked into the .pt file, so it cannot
+    # vary across trials; only the random seed changes.
     syn_train, syn_val, test_ds = build_cgt_datasets(data.graph, syn_data)
     results.extend(_run_cg_trials(
         dataset_name, cg_models, syn_train, syn_val, test_ds,
@@ -366,7 +389,9 @@ def main():
                 dataset_name, models, args.data_dir,
                 args.trials, args.epochs, args.patience, syn_path,
                 args.batch_size, args.lr, args.drop_rate,
-                args.h_feats, args.num_layers)
+                args.h_feats, args.num_layers,
+                trial_id=args.trial_id,
+                semi_supervised=bool(args.semi_supervised))
         else:
             # Full graph (BiGG, etc.): use standard full-graph GNNs.
             # GADBenchDataset expects (dataset_name, prefix=<parent_dir>/), so
