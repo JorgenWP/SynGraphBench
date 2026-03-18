@@ -144,7 +144,7 @@ def main():
     gen_dgl.ndata['test_masks'] = torch.zeros(num_nodes, num_splits, dtype=torch.uint8) 
 
     # Save generated graph
-    save_name = f'{DATASET}_blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}'
+    save_name = f'{DATASET}_blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}'
     save_dir = '../datasets/synthetic/bigg'
     os.makedirs(save_dir, exist_ok=True)
     dgl.save_graphs(os.path.join(save_dir, save_name), [gen_dgl])

@@ -97,7 +97,7 @@ def main():
     gen_dgl.ndata['val_masks'] = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
     gen_dgl.ndata['test_masks'] = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
 
-    save_name = f'{DATASET}_structure_blksize_{cmd_args.blksize}'
+    save_name = f'{DATASET}_structure_blksize_{cmd_args.blksize}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}'
     save_dir = '../datasets/synthetic/bigg'
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, save_name)
