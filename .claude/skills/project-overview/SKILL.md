@@ -11,135 +11,180 @@ description: A comprehensive overview of the SynGraphBench project, detailing it
 
 The project is an amalgamation of three distinct, previously published research repositories, orchestrated together via custom shell scripts to form a complete benchmarking pipeline.
 
-## 2. Core Sub-Repositories
+## 2. The Two Generative Paradigms
+
+A central conceptual distinction in this project is **how** synthetic data is produced. The two generative models (CGT and BiGG) operate at fundamentally different levels of abstraction, which determines what they output, how that output is evaluated, and what kind of utility/privacy trade-off they represent.
+
+### Whole-Graph Generation (BiGG)
+
+BiGG generates a **complete, new graph** — both topology (edges) and node features — from scratch. The output is a full DGL graph that is a drop-in replacement for the original. The original graph is discarded entirely during evaluation; downstream models train and are tested purely on the generated graph.
+
+This is the more intuitive paradigm: the generative model captures the joint distribution of graph structure and node attributes, and samples from it to produce a synthetic counterpart.
+
+### Computation-Graph Generation (CGT)
+
+CGT operates at a different level. Rather than generating a new graph, it **generates synthetic node feature distributions** while leaving the original graph topology unchanged. The key idea is that GNNs aggregate information via local computation trees (computation graphs) rooted at each node. CGT learns to generate sequences of feature vectors that match the distribution of these computation trees, rather than the full graph.
+
+Concretely, CGT uses **DP-k-means** to cluster the real node features into `k` cluster centers. These centers — not the raw features — are what is "synthesized" and shared. During evaluation, the original graph's training and validation node features are replaced by the nearest cluster center, and a GNN is trained on this feature-masked graph and tested on the unmasked original test nodes.
+
+**Why this matters for the benchmark:**
+* BiGG output is a whole DGL graph → evaluated with standard whole-graph GNNs (`--synthetic_type graph`).
+* CGT output is a `.pt` file of cluster centers and sequence indices → evaluated with computation-graph GNNs that can ingest these sequences directly (`--synthetic_type comp-graph`).
+* The two paradigms are not directly comparable on a common evaluation framework; the benchmark script handles each path separately.
+
+## 3. Core Sub-Repositories
 
 The repository integrates three independent sub-systems. **Note for Agents:** Because these are distinct research projects, they have conflicting dependencies. *Always ensure you are using the correct Conda environment for the specific sub-repo you are interacting with.*
 
 ### A. CGT (Computation Graph Transformer)
 
-* **Purpose:** A graph generative model used to create privacy-controlled, synthetic substitutes of large-scale real-world graphs.
-* **Key Mechanisms:** Operates on minibatches rather than the whole graph. Converts graph distributions into feature vector sequence distributions using a Transformer architecture. Includes a DP-k-means module for differential privacy.
+* **Purpose:** A generative model that synthesizes node feature distributions for large-scale graphs using a Transformer over computation-graph sequences. Designed for privacy-preserving feature synthesis, not topology generation.
+* **Key Mechanisms:** Operates on minibatches of computation graph sequences (not the full graph). DP-k-means clusters real features into `k` centers, providing differential privacy. The Transformer learns to generate realistic sequences of these cluster assignments.
+* **Output format:** A `.pt` file containing cluster centers, generated sequence indices, and train/val/test node ID mappings. Stored under `datasets/synthetic/cgt/`.
 * **Important Files:**
-* `CGT/train.py`: Training script for the CGT generative model.
-* `CGT/test.py`: Test/evaluation script (generates graphs and evaluates GNNs).
-* `CGT/args.py`: Hyperparameter configurations.
-
-
-* **Environment:** Uses the `CGT` Conda environment (Python 3.11). Setup via `scripts/env_setups/cgt_setup.sh`.
+  * `CGT/train.py`: Training script.
+  * `CGT/test.py`: Generation and evaluation script.
+  * `CGT/args.py`: Hyperparameter configurations.
+* **Environment:** `CGT` Conda environment (Python 3.11). Setup via `scripts/env_setups/cgt_setup.sh`.
 
 ### B. BiGG (Scalable Deep Generative Modeling)
 
-* **Purpose:** A scalable deep generative model specifically for sparse graphs, capable of autoregressively generating graphs with node and edge features.
-* **Key Mechanisms:** Relies on a custom C++ extension (`tree_clib`) for fast tree operations.
-* **Important Files:** * `bigg/data_process/`: Scripts to prepare synthetic and SAT datasets.
-* `bigg/experiments/`: Contains execution scripts for different graph types (e.g., `run_lobster.sh`, `run_grid.sh`).
-
-
-* **Environment:** Uses the `bigg` Conda environment (Python 3.9, PyTorch 2.4.1). *Agent Alert:* Requires compiling the `tree_clib` C++ extension via `make` before running (handled in the setup script).
+* **Purpose:** A whole-graph generative model that autoregressively generates sparse graphs including both structure (edges) and node features/labels.
+* **Key Mechanisms:** Decomposes graph generation into a sequence of binary tree decisions, processed efficiently via a custom C++ extension (`tree_clib`). The project uses two modes: a conditional model (features + labels) and a structure-only baseline.
+* **Output format:** A full DGL graph stored as a directory under `datasets/synthetic/bigg/`. The generated graph is a complete stand-alone dataset.
+* **Important Files:**
+  * `bigg/extension/pipeline.py`: Conditional model training (features + labels).
+  * `bigg/extension/pipeline_structure_only.py`: Structure-only baseline.
+  * `bigg/data_process/`: Dataset preparation scripts.
+* **Environment:** `bigg` Conda environment (Python 3.9, PyTorch 2.4.1). *Agent Alert:* Requires compiling the `tree_clib` C++ extension via `make` before running (handled in `scripts/env_setups/bigg.sh`).
 
 ### C. GADBench (Graph Anomaly Detection Benchmark)
 
-* **Purpose:** A suite for evaluating supervised graph anomaly detection models. Used in this pipeline as the downstream predictive task to compare real vs. synthetic graph utility.
-* **Key Mechanisms:** Supports 25+ GAD models (GCN, GIN, BWGNN, etc.) across multiple settings (fully-supervised, semi-supervised, inductive). Relies heavily on DGL (Deep Graph Library).
+GADBench serves as the **downstream evaluation framework** for both generative paradigms. It supports two distinct tasks:
+
+**Anomaly Detection (native):** The original GADBench capability. Trains GNN-based classifiers to identify anomalous nodes. Supports 25+ models (GCN, GIN, BWGNN, etc.) across fully-supervised, semi-supervised, and inductive settings. This is the primary benchmark task for comparing real vs. synthetic data utility.
+
+**Link Prediction (added extension):** An extension added to this project that reuses the same GNN architectures for edge existence prediction. Rather than predicting node labels, the GNNs produce node embeddings (via an `output_emb=True` flag), which are then scored pairwise by a lightweight edge decoder. This was implemented to broaden the downstream evaluation beyond node classification.
+
+The key design principle of the extension is **minimal new code**: existing GNN models are reused unchanged by toggling `output_emb=True`, and only a thin `BaseGNNLinkPredictor` wrapper (with edge splitting, negative sampling, and a decoder) is added on top.
+
 * **Important Files:**
-* `GADBench/benchmark.py`: Main benchmarking script.
-* `GADBench/random_search.py`: Hyperparameter tuning.
-* `scripts/benchmark/benchmark.py`: Project-level benchmark comparing original vs. synthetic data.
+  * `GADBench/benchmark.py`: Native anomaly detection benchmark.
+  * `GADBench/link_benchmark.py`: Link prediction benchmark (extension).
+  * `GADBench/link_utils.py`: `LinkDataset` — edge splitting, negative sampling, model registry.
+  * `GADBench/models/link_prediction/link_predictor.py`: `BaseGNNLinkPredictor` — edge decoder and training loop.
+  * `GADBench/models/link_prediction/cgt_link_predictor.py`: Placeholder for CGT-based link prediction (not yet implemented).
+  * `GADBench/random_search.py`: Hyperparameter tuning.
+  * `scripts/benchmark/benchmark.py`: Project-level benchmark comparing original vs. synthetic data.
+* **Environment:** `GADBench` Conda environment (Python 3.10, PyTorch 1.13.1, DGL).
 
+## 4. Link Prediction Extension — Key Design Details
 
-* **Environment:** Uses the `GADBench` Conda environment (Python 3.10, PyTorch 1.13.1, DGL).
+The link prediction extension in `GADBench/link_utils.py` and `GADBench/models/link_prediction/link_predictor.py` is worth understanding in depth, as it involves several non-trivial design decisions:
 
-## 3. Folder Structure
+**Edge splitting with connectivity preservation:** Edges are split into train/val/test sets, but a minimum spanning tree (via NetworkX) is computed first. Spanning-tree edges are never moved to val/test splits — this guarantees the training graph remains connected, which is critical for GNN message passing.
 
-Understanding the directory routing is critical, as scripts in one folder often call Python files in another.
+**Negative sampling:**
+* `random` — uniform sampling with collision detection (vectorized hashing, 10-attempt retry per sample).
+* `hard` — 2-hop random walks to generate structurally plausible negatives (harder for the model to distinguish).
+* Val/test negatives are fixed at dataset creation for reproducibility. Training negatives are resampled each epoch to prevent overfitting to specific negatives.
+
+**Edge decoders:**
+* `dot` — simple dot product `(h[u] * h[v]).sum(dim=-1)`. No extra parameters; relies entirely on the GNN embedding quality.
+* `mlp` — learnable scoring on Hadamard product: `Linear(h) → ReLU → Dropout → Linear(1)`. Adds capacity at the cost of extra parameters.
+
+**Metrics:** AUROC, AUPRC, and Recall@K (where K = number of positive test edges).
+
+## 5. Folder Structure
 
 ```text
 SynGraphBench/
 ├── README.md               # Main project documentation
 ├── scripts/                # CENTRAL HUB FOR EXECUTION
-│   ├── env_setups/         # Conda environment creation scripts (bigg.sh, cgt_setup.sh, gadbench_setup.sh)
-│   ├── train/              # Scripts to train generative models (e.g., train_cgt.sh)
-│   ├── benchmark/          # Scripts and Python modules for benchmarking (run_benchmark.sh, benchmark.py)
-│   └── test/               # Quick test/example scripts (e.g., run_cgt_test.sh)
-├── datasets/               # Data storage
-│   ├── original/           # Original datasets (e.g., reddit, tolokers, amazon)
-│   └── synthetic/          # Generated datasets, organised by generative model
-│       ├── cgt/            # CGT outputs: computation graph sequences (.pt files)
+│   ├── env_setups/         # Conda environment creation scripts
+│   ├── train/              # Scripts to train generative models
+│   │   ├── train_bigg.sh           # Train BiGG (conditional: features + labels)
+│   │   ├── train_bigg_structure.sh # Train BiGG (structure-only baseline)
+│   │   ├── train_bigg.slurm        # SLURM job template
+│   │   ├── train_bigg_structure.slurm
+│   │   └── train_cgt.sh            # Train CGT generative model
+│   ├── benchmark/
+│   │   ├── run_benchmark.sh        # Shell wrapper for anomaly detection benchmark
+│   │   ├── benchmark.py            # Project-level benchmark (original vs. synthetic)
+│   │   └── bench_utils.py          # Arg parsing, data loading, CGT helpers
+│   └── test/               # Quick test/example scripts
+├── datasets/
+│   ├── original/           # Original DGL datasets (reddit, tolokers, amazon, …)
+│   └── synthetic/
+│       ├── cgt/            # CGT outputs: .pt files with cluster centers + sequence indices
 │       │   └── <dataset>_e<epochs>_k<clusters>_d<depth>_f<fanout>.pt
-│       │                           # e.g. reddit_e50_k512_d2_f5.pt
-│       └── bigg/           # BiGG outputs: full DGL graphs (directories)
-│           └── <dataset>[_<variant>]/    # e.g. tolokers/, tolokers_blksize_1024_b_1/
-├── results/                # Evaluation outputs (e.g., CSVs, XLSX)
-├── GADBench/               # Anomaly Detection Sub-repo
-├── CGT/                    # Computation Graph Transformer Sub-repo
+│       └── bigg/           # BiGG outputs: full DGL graph directories
+│           └── <dataset>[_<variant>]/
+├── results/                # Evaluation outputs (CSVs, XLSX)
+├── GADBench/               # Anomaly Detection + Link Prediction Sub-repo
+│   ├── benchmark.py
+│   ├── link_benchmark.py
+│   ├── link_utils.py
+│   └── models/
+│       ├── anomaly_detection/   # Native GNN detectors
+│       │   ├── detector.py
+│       │   └── cgt_detector.py
+│       └── link_prediction/     # Extension
+│           ├── link_predictor.py
+│           └── cgt_link_predictor.py   # Placeholder
+├── CGT/                    # CGT Sub-repo
 └── bigg/                   # BiGG Sub-repo
 ```
 
 ### Synthetic Dataset Naming Convention
 
-Synthetic datasets are stored under `datasets/synthetic/<generator>/` where `<generator>` matches the tool that produced them (`cgt`, `bigg`, etc.). Files are named after the **dataset only** — the generator name is not repeated in the filename since the folder already encodes it.
-
 | Generator | Type | Example path |
 |-----------|------|--------------|
-| `cgt` | Computation graph (`.pt`) | `synthetic/cgt/reddit_e50_k512_d2_f5.pt` |
-| `bigg` | Full DGL graph (directory) | `synthetic/bigg/tolokers/` |
-| `bigg` | Full DGL graph — variant | `synthetic/bigg/tolokers_blksize_1024_b_1/` |
+| `cgt` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit_e50_k512_d2_f5.pt` |
+| `bigg` | Full DGL graph — hyperparameter variant | `synthetic/bigg/tolokers_blksize_1024_b_1_lr_0.001_epochs_50` |
+| `bigg` | Structure-only baseline | `synthetic/bigg/tolokers_structure_blksize_128_lr_0.001_epochs_100` |
 
-### Benchmark CLI — Specifying Synthetic Data
-
-`scripts/benchmark/benchmark.py` uses three arguments to locate synthetic data:
-
-| Argument | Role | Values |
-|---|---|---|
-| `--synthetic_type` | Evaluation mode | `graph` (whole-graph GNNs) or `comp-graph` (computation-graph GNNs) |
-| `--generator` | Subfolder name | `bigg`, `cgt`, … |
-| `--synthetic_name` | Specific filename stem (optional) | e.g. `tolokers_blksize_1024_b_1` |
-
-Resolved path: `<synthetic_dir>/<generator>/<synthetic_name or dataset>[.pt]`
-
-**Examples:**
-```bash
-# CGT comp-graph: reads datasets/synthetic/cgt/reddit.pt
-python benchmark.py --datasets reddit --synthetic_type comp-graph --generator cgt
-
-# BiGG whole-graph (default name): reads datasets/synthetic/bigg/tolokers/
-python benchmark.py --datasets tolokers --synthetic_type graph --generator bigg
-
-# BiGG specific variant: reads datasets/synthetic/bigg/tolokers_blksize_1024_b_1/
-python benchmark.py --datasets tolokers --synthetic_type graph --generator bigg \
-    --synthetic_name tolokers_blksize_1024_b_1
-```
-
-## 4. Execution Flow & Script Usage
-
-The project relies on a decoupled architecture where training, generation, and evaluation are executed via shell scripts located in the `scripts/` folder.
+## 6. Execution Flow
 
 **The Pipeline:**
 
-1. **Baseline Evaluation:** Run predictive models (via `GADBench`) on `datasets/original/`.
-2. **Synthetic Generation:** Train generative models (`CGT` or `BiGG`) on real data, then generate outputs into `datasets/synthetic/`.
-3. **Utility Evaluation:** Train predictive models from scratch on `datasets/synthetic/` and compare against baselines.
-4. **Privacy Evaluation:** Apply k-anonymity (clustering) to real data, train generators, create private synthetic datasets, and measure the performance drop.
+1. **Baseline Evaluation:** Run GADBench on `datasets/original/` to get real-data performance.
+2. **Synthetic Generation:** Train CGT or BiGG on real data; outputs go to `datasets/synthetic/`.
+3. **Utility Evaluation:** Run GADBench on `datasets/synthetic/` and compare against baselines.
+4. **Privacy Evaluation:** Apply k-anonymity, generate private synthetic data, measure performance drop.
 
-**Running Scripts (Agent Guidelines):**
+**Run from anywhere:** All shell scripts use `cd "$(dirname "$0")/../.."` to navigate to the project root automatically.
 
-* **Run from anywhere:** All shell scripts use `cd "$(dirname "$0")/../.."` at the top to automatically navigate to the project root before executing. This means scripts can be invoked from any working directory — there is no need to `cd` into `scripts/` first.
-* **Example: `bash scripts/benchmark/run_benchmark.sh [datasets] [models] [trials]`**
-    * Evaluates GNN models on original vs. CGT-generated synthetic graph data using GADBench.
-    * Accepts three optional arguments with defaults: datasets (`reddit`), models (`GCN,GIN,GraphSAGE,XGBGraph`), and number of trials (`1`).
-    * Activates the `GADBench` Conda environment, then calls `scripts/benchmark/benchmark.py`.
-* **Example: `bash scripts/train/train_cgt.sh`**
-    * Trains the CGT generative model on specified datasets (currently `reddit`).
-    * Activates the appropriate Conda environment and calls `CGT/train.py`.
-* **Setting up Environments:** Run setup scripts from any directory, e.g., `bash scripts/env_setups/bigg.sh`.
-    * `bigg.sh` creates the conda environment, installs PyTorch, and automatically handles the `sed` and `make` commands to compile the C++ `tree_clib` library.
-    * `cgt_setup.sh` creates the CGT environment from `CGT/cgt_env.yml` and installs GPU dependencies.
-    * `gadbench_setup.sh` creates the GADBench environment with DGL and ML libraries.
+### Key Scripts
 
+**`bash scripts/benchmark/run_benchmark.sh [datasets] [models] [trials]`**
+Anomaly detection benchmark. Defaults: `reddit`, `GCN,GIN,GraphSAGE,XGBGraph`, `1` trial. Calls `scripts/benchmark/benchmark.py`.
 
+`scripts/benchmark/benchmark.py` has two evaluation modes, selected via `--synthetic_type`:
+* `graph` — loads a full DGL graph from `synthetic/bigg/`; trains/tests standard GNNs.
+* `comp-graph` — loads a CGT `.pt` file from `synthetic/cgt/`; trains computation-graph GNNs on synthetic sequences and tests on original graph test nodes.
 
-## 5. Quick Heuristics for the Agent
+**`bash scripts/train/train_bigg.sh [DATASET] [BLKSIZE] [BSIZE] [LR] [EMBED_DIM] [EPOCHS]`**
+Train BiGG conditional model (features + labels). Defaults: `tolokers 1024 1 0.001 256 50`. Checkpoints saved to `checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}`.
 
-1. **Changing GNN Hyperparameters?** Look in `CGT/args.py` or `GADBench/benchmark.py`.
-2. **Fixing C++ Compilation Errors?** Look at `scripts/env_setups/bigg.sh` and `bigg/bigg/model/tree_clib/Makefile`. Modern CUDA architectures are patched in via `sed` in the setup script.
-3. **Adding a New Dataset?** Place the original in `datasets/original/`. Place synthetic outputs in `datasets/synthetic/<generator>/<dataset>[.pt]` (no generator prefix in the filename). Ensure the loading utilities in the relevant sub-repo (e.g., `CGT/task/utils/utils.py` or `GADBench/benchmark.py`) are updated to parse it.
+**`bash scripts/train/train_bigg_structure.sh [DATASET] [BLKSIZE] [BSIZE] [LR] [EMBED_DIM] [EPOCHS]`**
+Train BiGG structure-only baseline. Defaults: `tolokers 128 1 0.001 256 100`. Checkpoints saved with `structure_` prefix.
+
+**`bash scripts/train/train_cgt.sh`**
+Train CGT on specified datasets (currently `reddit`). Calls `CGT/train.py`.
+
+**Environment setup:**
+```bash
+bash scripts/env_setups/bigg.sh           # Creates bigg env, compiles tree_clib C++ extension
+bash scripts/env_setups/cgt_setup.sh      # Creates CGT env from CGT/cgt_env.yml
+bash scripts/env_setups/gadbench_setup.sh # Creates GADBench env with DGL + ML libraries
+```
+
+## 7. Quick Heuristics for the Agent
+
+1. **Which synthetic type to use?** BiGG → `--synthetic_type graph`. CGT → `--synthetic_type comp-graph`. They are not interchangeable.
+2. **Changing anomaly detection hyperparameters?** `CGT/args.py` or `GADBench/benchmark.py`.
+3. **Changing link prediction hyperparameters?** `GADBench/link_benchmark.py` (epochs, patience) and `GADBench/models/link_prediction/link_predictor.py` (decoder architecture).
+4. **Fixing C++ compilation errors?** `scripts/env_setups/bigg.sh` and `bigg/bigg/model/tree_clib/Makefile`. Modern CUDA architectures are patched via `sed` in the setup script.
+5. **Adding a new dataset?** Place original in `datasets/original/`. Place synthetic in `datasets/synthetic/<generator>/<name>`. Update loading utilities in `CGT/task/utils/utils.py`, `GADBench/benchmark.py`, or `GADBench/link_utils.py` as appropriate.
+6. **BiGG output naming?** Embeds hyperparameters verbosely. Conditional: `{DATASET}_blksize_{blksize}_b_{batch_size}_lr_{lr}_epochs_{epochs}`. Structure-only: `{DATASET}_structure_blksize_{blksize}_lr_{lr}_epochs_{epochs}`. These are the names used when saving to `datasets/synthetic/bigg/`.
