@@ -1,7 +1,7 @@
 #!/bin/sh
 #SBATCH --account=share-ie-idi      # "share-ie-idi" "ie-idi"
-#SBATCH --job-name="BiGG_TRAIN_STRUCTURE_128_1"
-#SBATCH --time=04:00:00             # Time limit (hh:mm:ss)
+#SBATCH --job-name="BiGG_TRAIN_STRUCTURE_<something>"
+#SBATCH --time=01:30:00             # Time limit (hh:mm:ss)
 
 #SBATCH --partition=GPUQ            # Asking for GPU
 #SBATCH --gres=gpu:1                # Number of GPUs
@@ -10,8 +10,8 @@
 #SBATCH --nodes=2                   # Number of compute nodes
 #SBATCH --ntasks-per-node=2         # Number of tasks per node
 
-#SBATCH --output=output/bigg/train/output_structure_blksize_128.txt    # Specifying 'stdout'
-#SBATCH --error=output/bigg/train/error_structure_blksize_128.txt      # Specifying 'stderr'
+#SBATCH --output=output/bigg/train/output_<something>.txt    # Specifying 'stdout'
+#SBATCH --error=output/bigg/train/error_<something>.txt      # Specifying 'stderr'
 
 #SBATCH --mail-user=<username>@stud.ntnu.no         # The email to send notifications to
 #SBATCH --mail-type=ALL
@@ -35,6 +35,8 @@ DATASET="tolokers"
 BLKSIZE=128
 BSIZE=1
 EPOCHS=100
+LR=0.001
+EMBED_DIM=256
 
 # Run the BiGG structure-only baseline training and generation script
-bash scripts/train/train_bigg_structure.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS"
+bash scripts/train/train_bigg_structure.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM"

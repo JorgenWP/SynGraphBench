@@ -1,6 +1,6 @@
 #!/bin/sh
 #SBATCH --account=share-ie-idi      # "share-ie-idi" "ie-idi"
-#SBATCH --job-name="BiGG_TRAIN"
+#SBATCH --job-name="BiGG_TRAIN_<something>"
 #SBATCH --time=04:00:00             # Time limit (hh:mm:ss)
 
 #SBATCH --partition=GPUQ            # Asking for GPU
@@ -10,8 +10,8 @@
 #SBATCH --nodes=2                   # Number of compute nodes
 #SBATCH --ntasks-per-node=2         # Number of tasks per node
 
-#SBATCH --output=output/bigg/train/output_blksize_1024.txt    # Specifying 'stdout'
-#SBATCH --error=output/bigg/train/error_blksize_1024.txt      # Specifying 'stderr'
+#SBATCH --output=output/bigg/train/output_<something>.txt    # Specifying 'stdout'
+#SBATCH --error=output/bigg/train/error_<something>.txt      # Specifying 'stderr'
 
 #SBATCH --mail-user=<username>@stud.ntnu.no         # The email to send notifications to
 #SBATCH --mail-type=ALL
@@ -35,6 +35,8 @@ DATASET="tolokers"
 BLKSIZE=1024
 BSIZE=1
 EPOCHS=50
+LR=0.001
+EMBED_DIM=256
 
 # Run the BiGG training and generation script
-bash scripts/train/train_bigg.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS"
+bash scripts/train/train_bigg.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM"
