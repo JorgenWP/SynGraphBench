@@ -182,8 +182,9 @@ class BWGNN(nn.Module):
 
 class GCN(nn.Module):
     def __init__(self, in_feats, h_feats=32, num_classes=2, num_layers=2, mlp_layers=1, dropout_rate=0,
-                 activation='ReLU', **kwargs):
+                 activation='ReLU', output_emb=False, **kwargs):
         super().__init__()
+        self.output_emb = output_emb
         self.h_feats = h_feats
         self.layers = nn.ModuleList()
         self.act = getattr(nn, activation)()
@@ -199,7 +200,8 @@ class GCN(nn.Module):
             if i != 0:
                 h = self.dropout(h)
             h = layer(graph, h)
-        h = self.mlp(h, False)
+        if not self.output_emb:
+            h = self.mlp(h, False)
         return h
 
 
@@ -264,14 +266,16 @@ class HGT(nn.Module):
 
 class GIN(nn.Module):
     def __init__(self, in_feats, h_feats=32, num_classes=2, num_layers=2, agg='mean', dropout_rate=0,
-                 activation='ReLU', **kwargs):
+                 activation='ReLU', output_emb=False, **kwargs):
         super().__init__()
         self.layers = nn.ModuleList()
         self.act = getattr(nn, activation)()
         self.layers.append(dglnn.GINConv(nn.Linear(in_feats, h_feats), activation=self.act, aggregator_type=agg))
         for i in range(1, num_layers-1):
             self.layers.append(dglnn.GINConv(nn.Linear(h_feats, h_feats), activation=self.act, aggregator_type=agg))
-        self.layers.append(dglnn.GINConv(nn.Linear(h_feats, num_classes),  activation=None, aggregator_type=agg))
+        last_out = h_feats if output_emb else num_classes
+        last_act = self.act if output_emb else None
+        self.layers.append(dglnn.GINConv(nn.Linear(h_feats, last_out), activation=last_act, aggregator_type=agg))
         self.dropout = nn.Dropout(dropout_rate) if dropout_rate > 0 else nn.Identity()
 
     def forward(self, graph):
@@ -322,8 +326,9 @@ class ChebNet(nn.Module):
 
 class GraphSAGE(nn.Module):
     def __init__(self, in_feats, h_feats=32, num_classes=2, num_layers=2, agg='pool', dropout_rate=0,
-                 activation='ReLU', **kwargs):
+                 activation='ReLU', output_emb=False, **kwargs):
         super(GraphSAGE, self).__init__()
+        self.output_emb = output_emb
         self.layers = nn.ModuleList()
         self.act = getattr(nn, activation)()
         self.layers.append(dglnn.SAGEConv(in_feats, h_feats, agg, activation=self.act))
@@ -337,7 +342,8 @@ class GraphSAGE(nn.Module):
         for layer in self.layers:
             h = self.dropout(h)
             h = layer(graph, h)
-        h = self.output_linear(h)
+        if not self.output_emb:
+            h = self.output_linear(h)
         return h
 
 

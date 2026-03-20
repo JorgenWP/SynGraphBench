@@ -66,6 +66,8 @@ class BaseGNNLinkPredictor(BaseDetector):
     def __init__(self, train_config, model_config, data):
         super().__init__(train_config, model_config, data)
         model_config['output_emb'] = True
+        if model_config['model'] == 'GraphSAGE':
+            model_config.setdefault('agg', 'mean')
         gnn = globals()[model_config['model']]
         self.model = gnn(**model_config).to(train_config['device'])
 
@@ -156,7 +158,7 @@ class BaseGNNLinkPredictor(BaseDetector):
 
             with torch.no_grad():
                 self.model.eval()
-                h = self.model(self.graph)
+                h = self.model(self.train_graph)
                 val_pos = torch.sigmoid(self.score_edges(h, self.val_pos_edges))
                 val_neg = torch.sigmoid(self.score_edges(h, self.val_neg_edges))
             val_score = self.eval(val_pos, val_neg)

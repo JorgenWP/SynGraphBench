@@ -13,6 +13,59 @@ from data.comp_graph import (
 from models.anomaly_detection.cgt_detector import CG_SUPPORTED_MODELS
 
 SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph']
+LP_SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE']
+
+
+def parse_link_args():
+    """Parse arguments for link prediction benchmark."""
+    parser = argparse.ArgumentParser(
+        description='Benchmark GNNs on link prediction: original vs synthetic')
+
+    data_group = parser.add_argument_group('Data')
+    data_group.add_argument('--datasets', type=str, required=True,
+                            help='Comma-separated dataset names')
+    data_group.add_argument('--models', type=str, default=','.join(LP_SUPPORTED_MODELS),
+                            help='Comma-separated model names')
+    data_group.add_argument('--data_dir', type=str, default=None,
+                            help='Path to datasets root (default: datasets/)')
+    data_group.add_argument('--synthetic_dir', type=str, default=None,
+                            help='Path to synthetic datasets (default: datasets/synthetic)')
+    data_group.add_argument('--output_dir', type=str, default=None,
+                            help='Directory to save results (default: results/evaluate)')
+    data_group.add_argument('--synthetic_type', type=str, default='comp-graph',
+                            choices=['graph', 'comp-graph'],
+                            help='Synthetic data format: "graph" or "comp-graph"')
+    data_group.add_argument('--generator', type=str, default=None,
+                            help='Generative model subfolder (e.g. "cgt", "bigg")')
+    data_group.add_argument('--synthetic_name', type=str, default=None,
+                            help='Exact filename stem for a specific variant')
+
+    lp_group = parser.add_argument_group('Link prediction')
+    lp_group.add_argument('--val_ratio', type=float, default=0.05,
+                          help='Fraction of edges for validation')
+    lp_group.add_argument('--test_ratio', type=float, default=0.1,
+                          help='Fraction of edges for test')
+    lp_group.add_argument('--neg_sampling', type=str, default='random',
+                          choices=['random', 'hard'],
+                          help='Negative sampling strategy')
+    lp_group.add_argument('--decoder', type=str, default='dot',
+                          choices=['dot', 'mlp'],
+                          help='Edge decoder: dot product or MLP')
+
+    train_group = parser.add_argument_group('Training')
+    train_group.add_argument('--trials', type=int, default=1)
+    train_group.add_argument('--epochs', type=int, default=200)
+    train_group.add_argument('--patience', type=int, default=50)
+    train_group.add_argument('--batch_size', type=int, default=256,
+                             help='Batch size (CGT comp-graph mode only)')
+
+    model_group = parser.add_argument_group('Model architecture')
+    model_group.add_argument('--lr', type=float, default=0.01)
+    model_group.add_argument('--drop_rate', type=float, default=0.0)
+    model_group.add_argument('--h_feats', type=int, default=32)
+    model_group.add_argument('--num_layers', type=int, default=2)
+
+    return parser.parse_args()
 
 
 def parse_args():
@@ -198,8 +251,8 @@ def print_comparison(all_results, datasets, models):
 
 def _extract_cg_params(syn_data):
     """Extract computation graph tree parameters from CGT .pt data."""
-    step_num = syn_data['cg_depth']
-    sample_num = syn_data['cg_fanout']
+    step_num = syn_data.get('cg_depth', syn_data.get('subgraph_step_num'))
+    sample_num = syn_data.get('cg_fanout', syn_data.get('subgraph_sample_num'))
     noise_num = syn_data.get('noise_num', 0)
     self_conn = syn_data.get('self_connection', False)
     return step_num, sample_num, noise_num, self_conn

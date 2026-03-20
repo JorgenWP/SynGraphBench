@@ -14,7 +14,7 @@ class LinkDataset:
     def __init__(self, name='tfinance', prefix='datasets/'):
         graph = load_graphs(prefix + name)[0][0]
         self.name = name
-        self.graph = graph
+        self.graph = graph.long()
 
     def split(self, val_ratio=0.05, test_ratio=0.1, trial_id=0,
               neg_sampling='random'):
@@ -68,8 +68,8 @@ class LinkDataset:
         self.train_pos_edges = torch.stack([src[train_idx], dst[train_idx]], dim=1)
 
         # Build training graph without val/test edges
-        self.train_graph = dgl.remove_edges(
-            self.graph, torch.cat([test_idx, val_idx]))
+        eids = torch.cat([test_idx, val_idx])
+        self.train_graph = dgl.add_self_loop(dgl.remove_edges(self.graph, eids))
 
         # Build edge set for filtering false negatives
         N = self.graph.num_nodes()
