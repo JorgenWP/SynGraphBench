@@ -642,9 +642,10 @@ class RecurTreeGen(nn.Module):
             feat_dict['edge'] = (local_edge_feats, is_rch)
         if self.has_node_feats:
             is_tree_trivial = TreeLib.GetIsTreeTrivial()
-            new_h, new_c = self.row_tree.node_feat_update(node_feats[~is_tree_trivial], (new_h, new_c))
-            h_buf_list[0] = new_h
-            c_buf_list[0] = new_c
+            if h_buf_list[0] is not None:
+                new_h, new_c = self.row_tree.node_feat_update(node_feats[~is_tree_trivial], (h_buf_list[0],c_buf_list[0]))
+                h_buf_list[0] = new_h
+                c_buf_list[0] = new_c
             t_lch, t_rch = TreeLib.GetTrivialNodes()
             feat_dict['node'] = (node_feats, is_tree_trivial, t_lch, t_rch)
         if len(feat_dict):
