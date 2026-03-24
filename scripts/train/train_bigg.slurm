@@ -37,6 +37,9 @@ BSIZE=1
 EPOCHS=50
 LR=0.001
 EMBED_DIM=256
+NOISE_STD=0.1
+SS_MAX_PROB=0.5
+SS_START_EPOCH=0
 
 # Run the BiGG training and generation script
-bash scripts/train/train_bigg.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM"
+bash scripts/train/train_bigg.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH"

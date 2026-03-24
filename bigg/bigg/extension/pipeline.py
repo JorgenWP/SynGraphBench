@@ -23,7 +23,13 @@ def main():
                                  help='Choose feature generation model')
     pipeline_parser.add_argument('-label_temp', type=float, default=1.0,
                                  help='Sampling temperature for label generation (>1 boosts minority classes)')
-    
+    pipeline_parser.add_argument('-noise_std', type=float, default=0.0,
+                                 help='Gaussian noise std added to hidden state during training')
+    pipeline_parser.add_argument('-ss_max_prob', type=float, default=0.0,
+                                 help='Max scheduled sampling probability (0 = disabled)')
+    pipeline_parser.add_argument('-ss_start_epoch', type=int, default=0,
+                                 help='Epoch to begin scheduled sampling annealing')
+
     pipeline_args, _ = pipeline_parser.parse_known_args()
 
     set_device(cmd_args.gpu)
@@ -58,10 +64,12 @@ def main():
 
     if pipeline_args.model_type == 'conditional':
         model = BiggWithConditionedFeats(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
-                                         label_temp=pipeline_args.label_temp).to(cmd_args.device)
+                                         label_temp=pipeline_args.label_temp,
+                                         noise_std=pipeline_args.noise_std).to(cmd_args.device)
     elif pipeline_args.model_type == 'independent':
         model = BiggWithFeatsAndLabels(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
-                                       label_temp=pipeline_args.label_temp).to(cmd_args.device)
+                                       label_temp=pipeline_args.label_temp,
+                                       noise_std=pipeline_args.noise_std).to(cmd_args.device)
 
     optimizer = optim.Adam(model.parameters(), lr=cmd_args.learning_rate, weight_decay=1e-4)
 
@@ -70,9 +78,19 @@ def main():
     indices = [0]
     num_nodes = graph_nx.number_of_nodes()
 
+    ss_max_prob = pipeline_args.ss_max_prob
+    ss_start_epoch = pipeline_args.ss_start_epoch
+    ss_ramp_epochs = max(cmd_args.num_epochs - ss_start_epoch, 1)
+
     pbar = tqdm(range(cmd_args.num_epochs))
     print('Start learn')
     for epoch in pbar:
+        # Anneal scheduled sampling probability linearly from 0 to ss_max_prob
+        if epoch < ss_start_epoch or ss_max_prob <= 0:
+            model.ss_prob = 0.0
+        else:
+            model.ss_prob = ss_max_prob * (epoch - ss_start_epoch) / ss_ramp_epochs
+
         optimizer.zero_grad()
         model.reset_loss_trackers()
         batch_node_feats = torch.cat([list_node_feats[i] for i in indices], dim=0)
@@ -155,7 +173,7 @@ def main():
     gen_dgl.ndata['test_masks']  = test_masks
 
     # Save generated graph
-    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}'
+    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
     os.makedirs(save_dir, exist_ok=True)
     dgl.save_graphs(os.path.join(save_dir, save_name), [gen_dgl])
