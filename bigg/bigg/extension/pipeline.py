@@ -139,13 +139,24 @@ def main():
     num_nodes = gen_dgl.num_nodes()
     num_splits = graph.ndata['train_masks'].shape[1] 
 
-    gen_dgl.ndata['train_masks'] = torch.ones(num_nodes, num_splits, dtype=torch.uint8)
-    gen_dgl.ndata['val_masks'] = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
-    gen_dgl.ndata['test_masks'] = torch.zeros(num_nodes, num_splits, dtype=torch.uint8) 
+    train_masks = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
+    val_masks   = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
+    test_masks  = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)  # always zero
+
+    for col in range(num_splits):
+        n_train = int(graph.ndata['train_masks'][:, col].sum().item())
+        n_val   = int(graph.ndata['val_masks'][:, col].sum().item())
+        perm = torch.randperm(num_nodes)
+        train_masks[perm[:n_train],              col] = 1
+        val_masks  [perm[n_train:n_train+n_val], col] = 1
+
+    gen_dgl.ndata['train_masks'] = train_masks
+    gen_dgl.ndata['val_masks']   = val_masks
+    gen_dgl.ndata['test_masks']  = test_masks
 
     # Save generated graph
-    save_name = f'{DATASET}_blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}'
-    save_dir = '../datasets/synthetic/bigg'
+    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}'
+    save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
     os.makedirs(save_dir, exist_ok=True)
     dgl.save_graphs(os.path.join(save_dir, save_name), [gen_dgl])
 
