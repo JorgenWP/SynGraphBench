@@ -40,7 +40,7 @@ The repository integrates three independent sub-systems. **Note for Agents:** Be
 
 * **Purpose:** A generative model that synthesizes node feature distributions for large-scale graphs using a Transformer over computation-graph sequences. Designed for privacy-preserving feature synthesis, not topology generation.
 * **Key Mechanisms:** Operates on minibatches of computation graph sequences (not the full graph). DP-k-means clusters real features into `k` centers, providing differential privacy. The Transformer learns to generate realistic sequences of these cluster assignments.
-* **Output format:** A `.pt` file containing cluster centers, generated sequence indices, and train/val/test node ID mappings. Stored under `datasets/synthetic/cgt/`.
+* **Output format:** A `.pt` file containing cluster centers, generated sequence indices, and train/val/test node ID mappings. Stored under `datasets/synthetic/cgt/<dataset>/`.
 * **Important Files:**
   * `CGT/train.py`: Training script.
   * `CGT/test.py`: Generation and evaluation script.
@@ -51,7 +51,7 @@ The repository integrates three independent sub-systems. **Note for Agents:** Be
 
 * **Purpose:** A whole-graph generative model that autoregressively generates sparse graphs including both structure (edges) and node features/labels.
 * **Key Mechanisms:** Decomposes graph generation into a sequence of binary tree decisions, processed efficiently via a custom C++ extension (`tree_clib`). The project uses two modes: a conditional model (features + labels) and a structure-only baseline.
-* **Output format:** A full DGL graph stored as a directory under `datasets/synthetic/bigg/`. The generated graph is a complete stand-alone dataset.
+* **Output format:** A full DGL graph stored as a file under `datasets/synthetic/bigg/<dataset>/`. The generated graph is a complete stand-alone dataset.
 * **Important Files:**
   * `bigg/extension/pipeline.py`: Conditional model training (features + labels).
   * `bigg/extension/pipeline_structure_only.py`: Structure-only baseline.
@@ -117,9 +117,11 @@ SynGraphBench/
 │   ├── original/           # Original DGL datasets (reddit, tolokers, amazon, …)
 │   └── synthetic/
 │       ├── cgt/            # CGT outputs: .pt files with cluster centers + sequence indices
-│       │   └── <dataset>_e<epochs>_k<clusters>_d<depth>_f<fanout>.pt
-│       └── bigg/           # BiGG outputs: full DGL graph directories
-│           └── <dataset>[_<variant>]/
+│       │   └── <dataset>/
+│       │       └── e<epochs>_k<clusters>_d<depth>_f<fanout>.pt
+│       └── bigg/           # BiGG outputs: full DGL graph files
+│           └── <dataset>/
+│               └── <variant_hyperparams>
 ├── results/                # Evaluation outputs (CSVs, XLSX)
 ├── GADBench/               # Anomaly Detection + Link Prediction Sub-repo
 │   ├── benchmark.py
@@ -138,11 +140,13 @@ SynGraphBench/
 
 ### Synthetic Dataset Naming Convention
 
+All synthetic outputs follow the structure `datasets/synthetic/<generative_model>/<dataset>/<file_name>`. The dataset name is encoded in the directory, so filenames contain only the arguments that define the generated data.
+
 | Generator | Type | Example path |
 |-----------|------|--------------|
-| `cgt` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit_e50_k512_d2_f5.pt` |
-| `bigg` | Full DGL graph — hyperparameter variant | `synthetic/bigg/tolokers_blksize_1024_b_1_lr_0.001_epochs_50` |
-| `bigg` | Structure-only baseline | `synthetic/bigg/tolokers_structure_blksize_128_lr_0.001_epochs_100` |
+| `cgt` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/e50_k512_d2_f5.pt` |
+| `bigg` | Full DGL graph — conditional (features + labels) | `synthetic/bigg/tolokers/blksize_1024_b_1_lr_0.001_epochs_50` |
+| `bigg` | Structure-only baseline | `synthetic/bigg/tolokers/structure_blksize_128_lr_0.001_epochs_100` |
 
 ## 6. Execution Flow
 
@@ -186,5 +190,6 @@ bash scripts/env_setups/gadbench_setup.sh # Creates GADBench env with DGL + ML l
 2. **Changing anomaly detection hyperparameters?** `CGT/args.py` or `GADBench/benchmark.py`.
 3. **Changing link prediction hyperparameters?** `GADBench/link_benchmark.py` (epochs, patience) and `GADBench/models/link_prediction/link_predictor.py` (decoder architecture).
 4. **Fixing C++ compilation errors?** `scripts/env_setups/bigg.sh` and `bigg/bigg/model/tree_clib/Makefile`. Modern CUDA architectures are patched via `sed` in the setup script.
-5. **Adding a new dataset?** Place original in `datasets/original/`. Place synthetic in `datasets/synthetic/<generator>/<name>`. Update loading utilities in `CGT/task/utils/utils.py`, `GADBench/benchmark.py`, or `GADBench/link_utils.py` as appropriate.
-6. **BiGG output naming?** Embeds hyperparameters verbosely. Conditional: `{DATASET}_blksize_{blksize}_b_{batch_size}_lr_{lr}_epochs_{epochs}`. Structure-only: `{DATASET}_structure_blksize_{blksize}_lr_{lr}_epochs_{epochs}`. These are the names used when saving to `datasets/synthetic/bigg/`.
+5. **Adding a new dataset?** Place original in `datasets/original/`. Synthetic outputs go to `datasets/synthetic/<generator>/<dataset>/`. Update loading utilities in `CGT/task/utils/utils.py`, `GADBench/benchmark.py`, or `GADBench/link_utils.py` as appropriate.
+6. **BiGG output naming?** Saved to `datasets/synthetic/bigg/<dataset>/` with the filename encoding only hyperparameters (no dataset prefix). Conditional: `blksize_{blksize}_b_{batch_size}_lr_{lr}_epochs_{epochs}`. Structure-only: `structure_blksize_{blksize}_lr_{lr}_epochs_{epochs}`. CGT: `e{epochs}_k{clusters}_d{depth}_f{fanout}.pt` under `datasets/synthetic/cgt/<dataset>/`.
+7. **Benchmark `--synthetic_name`?** Pass the filename stem (without dataset prefix). E.g. `--generator bigg --synthetic_name blksize_1024_b_1_lr_0.001_epochs_50` resolves to `synthetic/bigg/<dataset>/blksize_1024_b_1_lr_0.001_epochs_50`.
