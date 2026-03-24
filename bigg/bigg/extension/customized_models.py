@@ -84,11 +84,13 @@ class BiggWithEdgeLen(RecurTreeGen):
 
 class BiggWithFeatsAndLabels(RecurTreeGen):
 
-    def __init__(self, args, feat_dim, num_classes, label_temp=1.0):
+    def __init__(self, args, feat_dim, num_classes, label_temp=1.0, noise_std=0.0, ss_prob=0.0):
         super().__init__(args)
         self.feat_dim = feat_dim
         self.num_classes = num_classes
         self.label_temp = label_temp  # sampling temperature; 1.0 = unmodified distribution
+        self.noise_std = noise_std    # Gaussian noise std on hidden state during training
+        self.ss_prob = ss_prob        # scheduled sampling probability (swap GT with prediction)
 
         # 1. Continuous feature encoders/decoders
         self.nodefeat_encoding = MLP(feat_dim, [2 * args.embed_dim, args.embed_dim])
@@ -128,12 +130,16 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
             state: tuple of (h=N x embed_dim, c=N x embed_dim)
             node_data: N x (feat_dim + 1) tensor containing continuous features and labels, or None
         """
-        h, _ = state
-        
+        h, c = state
+
+        # Add Gaussian noise to hidden state during training to improve robustness
+        if self.training and self.noise_std > 0:
+            h = h + torch.randn_like(h) * self.noise_std
+
         # Predict continuous features and class logits
         pred_cont = self.nodefeat_pred(h)
         pred_logits = self.nodelabel_pred(h)
-        
+
         if node_data is None:
             # Generation mode: sample from the learned distribution
             ll = 0
@@ -161,20 +167,31 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
             self._ll_cont += ll_cont.item()
             self._ll_label += ll_label.item()
 
-            state_update = self.embed_node_feats(node_data)
+            # Scheduled sampling: sometimes use model's own prediction for state update
+            if self.ss_prob > 0 and torch.rand(1).item() < self.ss_prob:
+                with torch.no_grad():
+                    ss_labels = torch.multinomial(
+                        F.softmax(pred_logits, dim=-1), num_samples=1
+                    ).float()
+                pred_data = torch.cat([pred_cont.detach(), ss_labels], dim=-1)
+                state_update = self.embed_node_feats(pred_data)
+            else:
+                state_update = self.embed_node_feats(node_data)
             return_data = node_data
 
-        new_state = self.node_state_update(state_update, state)
+        new_state = self.node_state_update(state_update, (h, c))
 
         return new_state, ll, return_data
 
 class BiggWithConditionedFeats(RecurTreeGen):
 
-    def __init__(self, args, feat_dim, num_classes, label_temp=1.0):
+    def __init__(self, args, feat_dim, num_classes, label_temp=1.0, noise_std=0.0, ss_prob=0.0):
         super().__init__(args)
         self.feat_dim = feat_dim
         self.num_classes = num_classes
         self.label_temp = label_temp  # sampling temperature; 1.0 = unmodified distribution
+        self.noise_std = noise_std    # Gaussian noise std on hidden state during training
+        self.ss_prob = ss_prob        # scheduled sampling probability (swap GT with prediction)
 
         # 1. Label encoders/decoders
         self.nodelabel_encoding = nn.Embedding(num_classes, args.embed_dim)
@@ -208,11 +225,15 @@ class BiggWithConditionedFeats(RecurTreeGen):
         return self.combiner(combined_embed)
 
     def predict_node_feats(self, state, node_data=None):
-        h, _ = state
-        
+        h, c = state
+
+        # Add Gaussian noise to hidden state during training to improve robustness
+        if self.training and self.noise_std > 0:
+            h = h + torch.randn_like(h) * self.noise_std
+
         # Step 1: Predict class logits from the hidden state 'h'
         pred_logits = self.nodelabel_pred(h)
-        
+
         if node_data is None:
             # --- Generation Mode ---
             ll = 0
@@ -256,9 +277,18 @@ class BiggWithConditionedFeats(RecurTreeGen):
             self._ll_cont += ll_cont.item()
             self._ll_label += ll_label.item()
 
-            state_update = self.embed_node_feats(node_data)
+            # Scheduled sampling: sometimes use model's own prediction for state update
+            if self.ss_prob > 0 and torch.rand(1).item() < self.ss_prob:
+                with torch.no_grad():
+                    ss_labels = torch.multinomial(
+                        F.softmax(pred_logits, dim=-1), num_samples=1
+                    ).squeeze(-1)
+                pred_data = torch.cat([pred_cont.detach(), ss_labels.unsqueeze(-1).float()], dim=-1)
+                state_update = self.embed_node_feats(pred_data)
+            else:
+                state_update = self.embed_node_feats(node_data)
             return_data = node_data
 
-        new_state = self.node_state_update(state_update, state)
-        
+        new_state = self.node_state_update(state_update, (h, c))
+
         return new_state, ll, return_data
