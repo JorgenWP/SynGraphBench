@@ -118,10 +118,12 @@ SynGraphBench/
 │   └── synthetic/
 │       ├── cgt/            # CGT outputs: .pt files with cluster centers + sequence indices
 │       │   └── <dataset>/
-│       │       └── e<epochs>_k<clusters>_d<depth>_f<fanout>.pt
+│       │       └── <task>/
+│       │           └── e<epochs>_k<clusters>_d<depth>_f<fanout>.pt
 │       └── bigg/           # BiGG outputs: full DGL graph files
 │           └── <dataset>/
-│               └── <variant_hyperparams>
+│               └── <task>/
+│                   └── <variant_hyperparams>
 ├── results/                # Evaluation outputs (CSVs, XLSX)
 ├── GADBench/               # Anomaly Detection + Link Prediction Sub-repo
 │   ├── benchmark.py
@@ -140,13 +142,16 @@ SynGraphBench/
 
 ### Synthetic Dataset Naming Convention
 
-All synthetic outputs follow the structure `datasets/synthetic/<generative_model>/<dataset>/<file_name>`. The dataset name is encoded in the directory, so filenames contain only the arguments that define the generated data.
+All synthetic outputs follow the structure `datasets/synthetic/<generative_model>/<dataset>/<task>/<file_name>`. The dataset and task are encoded in the directory hierarchy; filenames contain only the arguments that define the generated data.
 
-| Generator | Type | Example path |
-|-----------|------|--------------|
-| `cgt` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/e50_k512_d2_f5.pt` |
-| `bigg` | Full DGL graph — conditional (features + labels) | `synthetic/bigg/tolokers/blksize_1024_b_1_lr_0.001_epochs_50` |
-| `bigg` | Structure-only baseline | `synthetic/bigg/tolokers/structure_blksize_128_lr_0.001_epochs_100` |
+**Supported tasks:** `anomaly_detection`, `link_prediction`. The task level exists because the generative model has different information available during training per task (e.g. link prediction withholds test edges; anomaly detection uses node labels), so the generated datasets are fundamentally different.
+
+| Generator | Task | Type | Example path |
+|-----------|------|------|--------------|
+| `cgt` | `anomaly_detection` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/anomaly_detection/e50_k512_d2_f5.pt` |
+| `cgt` | `link_prediction` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/link_prediction/e50_k512_d2_f5.pt` |
+| `bigg` | `anomaly_detection` | Full DGL graph — conditional (features + labels) | `synthetic/bigg/tolokers/anomaly_detection/blksize_1024_b_1_lr_0.001_epochs_50` |
+| `bigg` | `anomaly_detection` | Structure-only baseline | `synthetic/bigg/tolokers/anomaly_detection/structure_blksize_128_lr_0.001_epochs_100` |
 
 ## 6. Execution Flow
 
@@ -190,6 +195,6 @@ bash scripts/env_setups/gadbench_setup.sh # Creates GADBench env with DGL + ML l
 2. **Changing anomaly detection hyperparameters?** `CGT/args.py` or `GADBench/benchmark.py`.
 3. **Changing link prediction hyperparameters?** `GADBench/link_benchmark.py` (epochs, patience) and `GADBench/models/link_prediction/link_predictor.py` (decoder architecture).
 4. **Fixing C++ compilation errors?** `scripts/env_setups/bigg.sh` and `bigg/bigg/model/tree_clib/Makefile`. Modern CUDA architectures are patched via `sed` in the setup script.
-5. **Adding a new dataset?** Place original in `datasets/original/`. Synthetic outputs go to `datasets/synthetic/<generator>/<dataset>/`. Update loading utilities in `CGT/task/utils/utils.py`, `GADBench/benchmark.py`, or `GADBench/link_utils.py` as appropriate.
-6. **BiGG output naming?** Saved to `datasets/synthetic/bigg/<dataset>/` with the filename encoding only hyperparameters (no dataset prefix). Conditional: `blksize_{blksize}_b_{batch_size}_lr_{lr}_epochs_{epochs}`. Structure-only: `structure_blksize_{blksize}_lr_{lr}_epochs_{epochs}`. CGT: `e{epochs}_k{clusters}_d{depth}_f{fanout}.pt` under `datasets/synthetic/cgt/<dataset>/`.
-7. **Benchmark `--synthetic_name`?** Pass the filename stem (without dataset prefix). E.g. `--generator bigg --synthetic_name blksize_1024_b_1_lr_0.001_epochs_50` resolves to `synthetic/bigg/<dataset>/blksize_1024_b_1_lr_0.001_epochs_50`.
+5. **Adding a new dataset?** Place original in `datasets/original/`. Synthetic outputs go to `datasets/synthetic/<generator>/<dataset>/<task>/`. Update loading utilities in `CGT/task/utils/utils.py`, `GADBench/benchmark.py`, or `GADBench/link_utils.py` as appropriate.
+6. **BiGG output naming?** Saved to `datasets/synthetic/bigg/<dataset>/<task>/` with the filename encoding only hyperparameters. Conditional: `blksize_{blksize}_b_{batch_size}_lr_{lr}_epochs_{epochs}`. Structure-only: `structure_blksize_{blksize}_lr_{lr}_epochs_{epochs}`. CGT: `e{epochs}_k{clusters}_d{depth}_f{fanout}.pt` under `datasets/synthetic/cgt/<dataset>/<task>/`.
+7. **Benchmark `--synthetic_name`?** Pass the filename stem. Also pass `--task` (`anomaly_detection` or `link_prediction`). E.g. `--generator bigg --task anomaly_detection --synthetic_name blksize_1024_b_1_lr_0.001_epochs_50` resolves to `synthetic/bigg/<dataset>/anomaly_detection/blksize_1024_b_1_lr_0.001_epochs_50`.
