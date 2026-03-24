@@ -62,16 +62,9 @@ def set_seed(seed=3407):
 
 
 def evaluate_models(dataset_name, models, data_dir,
-                    data_source, trials, semi_supervised, trial_id,
-                    epochs, patience, lr, drop_rate, h_feats, num_layers,
-                    synthetic_dir=None, synthetic_type=None):
-    """Train and evaluate all specified models on a single dataset.
-
-    Args:
-        data_source: 'original' or 'synthetic-graph'
-        synthetic_dir: path to synthetic data (only for synthetic sources)
-        synthetic_type: resolved type ('graph' only), used when data_source != 'original'
-    """
+                    trials, semi_supervised, trial_id,
+                    epochs, patience, lr, drop_rate, h_feats, num_layers):
+    """Train and evaluate all specified models on the original dataset."""
     results = []
 
     for model_name in models:
@@ -80,7 +73,7 @@ def evaluate_models(dataset_name, models, data_dir,
             continue
 
         print(f"\n{'='*60}")
-        print(f"  {data_source.upper()} | {dataset_name} | {model_name}")
+        print(f"  ORIGINAL | {dataset_name} | {model_name}")
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
@@ -100,15 +93,7 @@ def evaluate_models(dataset_name, models, data_dir,
                 'seed': seed,
             }
 
-            if synthetic_type == 'graph':
-                # Full synthetic graph (BiGG, etc.) — load directly
-                data = GADBenchDataset(dataset_name, prefix=synthetic_dir + '/')
-                # If the synthetic graph doesn't have self-loops, add them
-                # if (data.graph.in_degrees() == 0).any():
-                #     data.graph = dgl.add_self_loop(data.graph)
-            else:
-                # Original data
-                data = GADBenchDataset(dataset_name, prefix=data_dir + '/')
+            data = GADBenchDataset(dataset_name, prefix=data_dir + '/')
 
             # Apply train/val/test split masks — advance by t so each trial
             # uses a different pre-stored mask column (trial_id is the starting offset)
@@ -147,7 +132,7 @@ def evaluate_models(dataset_name, models, data_dir,
 
         if auc_list:
             results.append({
-                'source': data_source,
+                'source': 'original',
                 'dataset': dataset_name,
                 'model': model_name,
                 'AUROC_mean': np.mean(auc_list),
@@ -303,6 +288,73 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
     return results
 
 
+def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn_file_name,
+                                trials, semi_supervised, trial_id,
+                                epochs, patience, lr, drop_rate, h_feats, num_layers):
+    """Train GNNs on synthetic graph, validate on synthetic val, test on original test nodes."""
+    from models.cross_graph_detector import CrossGraphGNNDetector, CROSS_GRAPH_SUPPORTED_MODELS
+    results = []
+
+    for model_name in models:
+        if model_name not in CROSS_GRAPH_SUPPORTED_MODELS:
+            print(f"  NOTE: '{model_name}' skipped in cross-graph mode.")
+            continue
+
+        print(f"\n{'='*60}")
+        print(f"  SYNTHETIC-GRAPH (CROSS) | {dataset_name} | {model_name}")
+        print(f"{'='*60}")
+
+        auc_list, pre_list, rec_list = [], [], []
+        time_cost = 0
+
+        for t in range(trials):
+            torch.cuda.empty_cache()
+            seed = SEED_LIST[t]
+            set_seed(seed)
+
+            # Synthetic graph: train + val from synthetic masks
+            syn_data = GADBenchDataset(syn_file_name, prefix=dataset_dir + '/')
+            syn_data.split(semi_supervised, trial_id + t)
+
+            # Original graph: test nodes only
+            orig_data = GADBenchDataset(dataset_name, prefix=data_dir + '/')
+            orig_data.split(semi_supervised, trial_id + t)
+
+            train_config = {
+                'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+                'epochs': epochs, 'patience': patience, 'metric': 'AUPRC', 'seed': seed,
+            }
+            model_config = {
+                'model': model_name, 'lr': lr, 'drop_rate': drop_rate,
+                'h_feats': 16 if dataset_name == 'tsocial' else h_feats,
+                'num_layers': num_layers,
+            }
+
+            print(f"  Trial {t}, seed={seed}")
+            detector = CrossGraphGNNDetector(train_config, model_config, syn_data, orig_data)
+
+            st = time.time()
+            test_score = detector.train()
+            ed = time.time()
+            time_cost += ed - st
+
+            auc_list.append(test_score['AUROC'])
+            pre_list.append(test_score['AUPRC'])
+            rec_list.append(test_score['RecK'])
+            print(f"  -> AUROC={test_score['AUROC']:.4f}, AUPRC={test_score['AUPRC']:.4f}, RecK={test_score['RecK']:.4f}")
+            del detector, syn_data, orig_data
+
+        if auc_list:
+            results.append({
+                'source': 'synthetic-graph', 'dataset': dataset_name, 'model': model_name,
+                'AUROC_mean': np.mean(auc_list), 'AUROC_std': np.std(auc_list),
+                'AUPRC_mean': np.mean(pre_list), 'AUPRC_std': np.std(pre_list),
+                'RecK_mean':  np.mean(rec_list),  'RecK_std':  np.std(rec_list),
+                'time_per_trial': time_cost / len(auc_list),
+            })
+    return results
+
+
 def main():
     args = parse_args()
 
@@ -331,6 +383,7 @@ def main():
     print(f"  Synthetic type: {args.synthetic_type}")
     print(f"  Generator:      {args.generator}")
     print(f"  Synthetic name: {args.synthetic_name if args.synthetic_name else '(use dataset name)'}")
+    print(f"  Task:           {args.task}")
     print(f"  Data dir:       {args.data_dir}")
     print(f"  Synthetic dir:  {args.synthetic_dir}")
     print(f"  Output dir:     {args.output_dir}")
@@ -358,7 +411,7 @@ def main():
     for dataset_name in datasets:
         results = evaluate_models(
             dataset_name, models, args.data_dir,
-            'original', args.trials, args.semi_supervised, args.trial_id,
+            args.trials, args.semi_supervised, args.trial_id,
             args.epochs, args.patience,
             args.lr, args.drop_rate, args.h_feats, args.num_layers)
         all_results.extend(results)
@@ -369,13 +422,15 @@ def main():
     print("#" * 80)
 
     for dataset_name in datasets:
-        # Resolve path: synthetic_dir/<generator>/<stem>[.pt]
+        # Resolve path: synthetic_dir/<generator>/<dataset>/<task>/<stem>[.pt]
         gen_dir = os.path.join(args.synthetic_dir, args.generator)
-        stem = args.synthetic_name if args.synthetic_name else dataset_name
+        dataset_dir = os.path.join(gen_dir, dataset_name)
+        task_dir = os.path.join(dataset_dir, args.task)
+        stem = args.synthetic_name
         if args.synthetic_type == 'comp-graph':
-            syn_path = os.path.join(gen_dir, f'{stem}.pt')
+            syn_path = os.path.join(task_dir, f'{stem}.pt')
         else:
-            syn_path = os.path.join(gen_dir, stem)
+            syn_path = os.path.join(task_dir, stem)
 
         if not os.path.exists(syn_path):
             print(f"\n  Skipping {dataset_name}: {syn_path} not found")
@@ -393,17 +448,12 @@ def main():
                 trial_id=args.trial_id,
                 semi_supervised=bool(args.semi_supervised))
         else:
-            # Full graph (BiGG, etc.): use standard full-graph GNNs.
-            # GADBenchDataset expects (dataset_name, prefix=<parent_dir>/), so
-            # pass the gen_dir as prefix and the stem as the dataset name.
-            results = evaluate_models(
-                stem, models, args.data_dir,
-                f'synthetic-{args.synthetic_type}', args.trials,
-                args.semi_supervised, args.trial_id,
+            # Full graph (BiGG, etc.): train+val on synthetic, test on original.
+            results = evaluate_models_cross_graph(
+                dataset_name, models, args.data_dir, task_dir, stem,
+                args.trials, args.semi_supervised, args.trial_id,
                 args.epochs, args.patience,
-                args.lr, args.drop_rate, args.h_feats, args.num_layers,
-                synthetic_dir=gen_dir,
-                synthetic_type=args.synthetic_type)
+                args.lr, args.drop_rate, args.h_feats, args.num_layers)
         all_results.extend(results)
 
     # --- Save and display results ---

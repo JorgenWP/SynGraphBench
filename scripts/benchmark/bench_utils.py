@@ -96,12 +96,17 @@ def parse_args():
                                  'Resolved path: '
                                  '<synthetic_dir>/<generator>/<synthetic_name or dataset>[.pt].')
     data_group.add_argument('--synthetic_name', type=str, default=None,
-                            help='Exact filename stem within the generator subfolder. '
-                                 'Use this to select a specific variant when multiple '
-                                 'synthetic files exist for the same dataset. '
-                                 'If not set, falls back to <dataset>[.pt]. '
-                                 'Example: "--generator bigg --synthetic_name tolokers_blksize_1024_b_1" '
-                                 'resolves to synthetic/bigg/tolokers_blksize_1024_b_1.')
+                            help='Filename stem of the synthetic variant to evaluate. '
+                                 'Required when a dataset has multiple synthetic variants. '
+                                 'Resolved path: <synthetic_dir>/<generator>/<dataset>/<task>/<stem>[.pt]. '
+                                 'Example: "--generator bigg --task hidden_labels --datasets tolokers --synthetic_name blksize_1024_b_1_lr_0.001_epochs_50" '
+                                 'resolves to synthetic/bigg/tolokers/hidden_labels/blksize_1024_b_1_lr_0.001_epochs_50.')
+    data_group.add_argument('--task', type=str, default='hidden_labels',
+                            choices=['hidden_labels', 'hidden_links', 'structure'],
+                            help='Task subfolder under <dataset>/ '
+                                 '(hidden_labels, hidden_links, or structure). '
+                                 'Resolved path: '
+                                 '<synthetic_dir>/<generator>/<dataset>/<task>/<stem>[.pt].')
     data_group.add_argument('--semi_supervised', type=int, default=0,
                             help='Use semi-supervised split (0 or 1)')
     data_group.add_argument('--trial_id', type=int, default=0,
