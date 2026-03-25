@@ -39,6 +39,12 @@ def parse_link_args():
                             help='Generative model subfolder (e.g. "cgt", "bigg")')
     data_group.add_argument('--synthetic_name', type=str, default=None,
                             help='Exact filename stem for a specific variant')
+    data_group.add_argument('--task', type=str, default='hidden_links',
+                            choices=['hidden_labels', 'hidden_links', 'structure'],
+                            help='Task subfolder under <dataset>/ '
+                                 '(hidden_labels, hidden_links, or structure). '
+                                 'Resolved path: '
+                                 '<synthetic_dir>/<generator>/<dataset>/<task>/<stem>[.pt].')
 
     lp_group = parser.add_argument_group('Link prediction')
     lp_group.add_argument('--val_ratio', type=float, default=0.05,

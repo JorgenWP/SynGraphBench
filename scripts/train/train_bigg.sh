@@ -21,7 +21,7 @@ EMBED_DIM="${6:-256}"
 NOISE_STD="${7:-0.0}"
 SS_MAX_PROB="${8:-0.0}"
 SS_START_EPOCH="${9:-0}"
-BFS_PREPROCESS="${10:-True}"
+BFS_PREPROCESS="${10:-False}"
 
 cd "$(dirname "$0")/../../bigg"
 
