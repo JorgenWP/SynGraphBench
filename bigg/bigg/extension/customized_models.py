@@ -132,13 +132,16 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
         """
         h, c = state
 
-        # Add Gaussian noise to hidden state during training to improve robustness
+        # Add noise only to the copy used for feature/label prediction,
+        # keeping the clean h for structural decisions and state update
         if self.training and self.noise_std > 0:
-            h = h + torch.randn_like(h) * self.noise_std
+            h_pred = h + torch.randn_like(h) * self.noise_std
+        else:
+            h_pred = h
 
-        # Predict continuous features and class logits
-        pred_cont = self.nodefeat_pred(h)
-        pred_logits = self.nodelabel_pred(h)
+        # Predict continuous features and class logits from (possibly noised) state
+        pred_cont = self.nodefeat_pred(h_pred)
+        pred_logits = self.nodelabel_pred(h_pred)
 
         if node_data is None:
             # Generation mode: sample from the learned distribution
@@ -227,12 +230,15 @@ class BiggWithConditionedFeats(RecurTreeGen):
     def predict_node_feats(self, state, node_data=None):
         h, c = state
 
-        # Add Gaussian noise to hidden state during training to improve robustness
+        # Add noise only to the copy used for feature/label prediction,
+        # keeping the clean h for structural decisions and state update
         if self.training and self.noise_std > 0:
-            h = h + torch.randn_like(h) * self.noise_std
+            h_pred = h + torch.randn_like(h) * self.noise_std
+        else:
+            h_pred = h
 
-        # Step 1: Predict class logits from the hidden state 'h'
-        pred_logits = self.nodelabel_pred(h)
+        # Step 1: Predict class logits from (possibly noised) hidden state
+        pred_logits = self.nodelabel_pred(h_pred)
 
         if node_data is None:
             # --- Generation Mode ---
@@ -245,8 +251,8 @@ class BiggWithConditionedFeats(RecurTreeGen):
             # Step 2: Embed the sampled label
             label_embed = self.nodelabel_encoding(pred_labels)
 
-            # Step 3 & 4: Condition continuous features on both 'h' and 'label_embed'
-            h_conditioned = torch.cat([h, label_embed], dim=-1)
+            # Step 3 & 4: Condition continuous features on both 'h_pred' and 'label_embed'
+            h_conditioned = torch.cat([h_pred, label_embed], dim=-1)
             pred_cont = self.nodefeat_pred(h_conditioned)
 
             # Format output
@@ -261,8 +267,8 @@ class BiggWithConditionedFeats(RecurTreeGen):
             # Step 2: Embed the GROUND TRUTH label (Teacher Forcing)
             label_embed = self.nodelabel_encoding(target_labels)
 
-            # Step 3 & 4: Condition continuous features on both 'h' and true 'label_embed'
-            h_conditioned = torch.cat([h, label_embed], dim=-1)
+            # Step 3 & 4: Condition continuous features on both 'h_pred' and true 'label_embed'
+            h_conditioned = torch.cat([h_pred, label_embed], dim=-1)
             pred_cont = self.nodefeat_pred(h_conditioned)
 
             # Compute losses

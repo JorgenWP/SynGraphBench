@@ -134,7 +134,7 @@ def main():
 
         #Generating graph
         _, pred_edges, _, pred_node_feats, _ = model(
-            target_num_nodes
+            target_num_nodes, display=True
         )
         #Create generated graphs as NetworkX graph
         gen_nx = nx.Graph()
