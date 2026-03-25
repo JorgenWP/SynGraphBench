@@ -38,4 +38,4 @@ bash scripts/train/train_cgt.sh
 # Activate benchmark conda environment
 conda activate GADBench
 # Run the benchmark script
-bash scripts/benchmark/run_benchmark.sh
+bash scripts/benchmark/run_anomaly_benchmark.sh

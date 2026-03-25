@@ -10,11 +10,11 @@ Supports two types of synthetic data:
 
 Usage:
     # Auto-detect synthetic data type:
-    python scripts/benchmark/benchmark.py --datasets reddit --trials 1
+    python scripts/benchmark/anomaly_benchmark.py --datasets reddit --trials 1
 
     # Explicitly specify type:
-    python scripts/benchmark/benchmark.py --datasets reddit --synthetic_type cgt
-    python scripts/benchmark/benchmark.py --datasets reddit --synthetic_type graph
+    python scripts/benchmark/anomaly_benchmark.py --datasets reddit --synthetic_type cgt
+    python scripts/benchmark/anomaly_benchmark.py --datasets reddit --synthetic_type graph
 """
 
 import os

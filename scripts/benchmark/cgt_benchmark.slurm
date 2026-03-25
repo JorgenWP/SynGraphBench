@@ -37,4 +37,4 @@ TRIALS="1"
 SYNTHETIC_NAME=""   # Optional: set to a specific variant, e.g. "reddit_eps0.1"
 
 # Run the benchmark script with CGT synthetic data
-bash scripts/benchmark/run_benchmark.sh "$DATASETS" "$MODELS" "$TRIALS" "$GENERATOR" "$SYNTHETIC_NAME"
+bash scripts/benchmark/run_anomaly_benchmark.sh "$DATASETS" "$MODELS" "$TRIALS" "$GENERATOR" "$SYNTHETIC_NAME"

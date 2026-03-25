@@ -37,4 +37,4 @@ TRIALS="1"
 SYNTHETIC_NAME=""   # Optional: set to a specific variant, e.g. "tolokers_blksize_1024_b_1"
 
 # Run the benchmark script with BiGG synthetic data
-bash scripts/benchmark/run_benchmark.sh "$DATASETS" "$MODELS" "$TRIALS" "$GENERATOR" "$SYNTHETIC_NAME"
+bash scripts/benchmark/run_anomaly_benchmark.sh "$DATASETS" "$MODELS" "$TRIALS" "$GENERATOR" "$SYNTHETIC_NAME"

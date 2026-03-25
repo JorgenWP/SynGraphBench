@@ -20,20 +20,20 @@ description: End-to-end pipeline steps, key shell scripts with their CLI argumen
 
 ### Benchmark
 
-**`bash scripts/benchmark/run_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [task]`**
-Anomaly detection benchmark. Defaults: `reddit`, `GCN,GIN,GraphSAGE,XGBGraph`, `1`, `cgt`, `""` (uses dataset name), `hidden_labels`. Calls `scripts/benchmark/benchmark.py`.
+**`bash scripts/benchmark/run_anomaly_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [task]`**
+Anomaly detection benchmark. Defaults: `reddit`, `GCN,GIN,GraphSAGE,XGBGraph`, `1`, `cgt`, `""` (uses dataset name), `hidden_labels`. Calls `scripts/benchmark/anomaly_benchmark.py`.
 
-`scripts/benchmark/benchmark.py` has two evaluation modes, selected via `--synthetic_type`:
+`scripts/benchmark/anomaly_benchmark.py` has two evaluation modes, selected via `--synthetic_type`:
 * `graph` — loads a full DGL graph from `synthetic/bigg/`; trains/tests standard GNNs.
 * `comp-graph` — loads a CGT `.pt` file from `synthetic/cgt/`; trains computation-graph GNNs on synthetic sequences and tests on original graph test nodes.
 
 Examples:
 ```bash
 # CGT on reddit, 3 trials
-bash scripts/benchmark/run_benchmark.sh reddit GCN,GIN 3 cgt
+bash scripts/benchmark/run_anomaly_benchmark.sh reddit GCN,GIN 3 cgt
 
 # BiGG on tolokers
-bash scripts/benchmark/run_benchmark.sh tolokers GCN,GIN 1 bigg blksize_1024_b_1_lr_0.001_epochs_50 hidden_labels
+bash scripts/benchmark/run_anomaly_benchmark.sh tolokers GCN,GIN 1 bigg blksize_1024_b_1_lr_0.001_epochs_50 hidden_labels
 ```
 
 **`bash scripts/benchmark/run_link_benchmark.sh [datasets] [models] [trials] [generator] [neg_sampling] [decoder] [synthetic_name]`**

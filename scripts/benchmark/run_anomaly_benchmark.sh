@@ -2,7 +2,7 @@
 # Evaluate GNN models on original vs synthetic graph data.
 #
 # Usage:
-#   bash scripts/benchmark/run_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [task]
+#   bash scripts/benchmark/run_anomaly_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [task]
 #
 # Arguments:
 #   datasets        Comma-separated dataset names (default: reddit)
@@ -15,9 +15,9 @@
 #                   Supported: hidden_labels, hidden_links, structure
 #
 # Examples:
-#   bash scripts/benchmark/run_benchmark.sh reddit GCN,GIN 3 cgt
-#   bash scripts/benchmark/run_benchmark.sh tolokers GCN,GIN 1 bigg blksize_1024_b_1_lr_0.001_epochs_50
-#   bash scripts/benchmark/run_benchmark.sh tolokers GCN,GIN 1 bigg structure_blksize_128_lr_0.001_epochs_100 structure
+#   bash scripts/benchmark/run_anomaly_benchmark.sh reddit GCN,GIN 3 cgt
+#   bash scripts/benchmark/run_anomaly_benchmark.sh tolokers GCN,GIN 1 bigg blksize_1024_b_1_lr_0.001_epochs_50
+#   bash scripts/benchmark/run_anomaly_benchmark.sh tolokers GCN,GIN 1 bigg structure_blksize_128_lr_0.001_epochs_100 structure
 
 set -e
 
@@ -54,7 +54,7 @@ if [ -n "$SYNTHETIC_NAME" ]; then
     EXTRA_ARGS="--synthetic_name $SYNTHETIC_NAME"
 fi
 
-python scripts/benchmark/benchmark.py \
+python scripts/benchmark/anomaly_benchmark.py \
     --datasets "$DATASETS" \
     --models "$MODELS" \
     --trials "$TRIALS" \

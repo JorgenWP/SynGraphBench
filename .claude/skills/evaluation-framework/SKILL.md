@@ -17,7 +17,7 @@ The original GADBench capability. Trains GNN-based classifiers to identify anoma
 
 * `GADBench/benchmark.py`: Native anomaly detection benchmark.
 * `GADBench/random_search.py`: Hyperparameter tuning.
-* `scripts/benchmark/benchmark.py`: Project-level benchmark comparing original vs. synthetic data.
+* `scripts/benchmark/anomaly_benchmark.py`: Project-level anomaly detection benchmark comparing original vs. synthetic data.
 * **Hyperparameters:** `CGT/args.py` or `GADBench/benchmark.py`.
 
 ---

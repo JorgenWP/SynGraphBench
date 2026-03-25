@@ -19,9 +19,9 @@ SynGraphBench/
 │   │   ├── train_bigg_structure.slurm
 │   │   └── train_cgt.sh            # Train CGT generative model
 │   ├── benchmark/
-│   │   ├── run_benchmark.sh        # Shell wrapper for anomaly detection benchmark
+│   │   ├── run_anomaly_benchmark.sh # Shell wrapper for anomaly detection benchmark
 │   │   ├── run_link_benchmark.sh   # Shell wrapper for link prediction benchmark
-│   │   ├── benchmark.py            # Project-level benchmark (original vs. synthetic)
+│   │   ├── anomaly_benchmark.py    # Project-level anomaly detection benchmark (original vs. synthetic)
 │   │   ├── link_benchmark.py       # Link prediction benchmark
 │   │   ├── bench_utils.py          # Arg parsing, data loading, CGT helpers
 │   │   ├── bigg_benchmark.slurm    # SLURM template for BiGG evaluation

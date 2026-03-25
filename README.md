@@ -95,7 +95,7 @@ To train the predictive models and evaluate their performance on the real and sy
 The benchmarking script has the following usage:
 
 ```bash
-bash scripts/benchmark/run_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_dataset_name]
+bash scripts/benchmark/run_anomaly_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_dataset_name]
 ```
 
 #### Examples
@@ -105,7 +105,7 @@ Example command for running the benchmark on the CGT datasets:
 
 ```bash
 # Train and evaluate predictive models on CGT datasets
-bash scripts/benchmark/run_benchmark.sh reddit GCN,GIN 3 cgt synthetic_cgt_dataset
+bash scripts/benchmark/run_anomaly_benchmark.sh reddit GCN,GIN 3 cgt synthetic_cgt_dataset
 ```
 
 Example command for running the benchmark on the BiGG datasets:
@@ -113,5 +113,5 @@ Example command for running the benchmark on the BiGG datasets:
 
 ```bash
 # Train and evaluate predictive models on BiGG datasets
-bash scripts/benchmark/run_benchmark.sh tolokers GCN,GIN,GraphSAGE,XGBGraph 1 bigg synthetic_bigg_dataset
+bash scripts/benchmark/run_anomaly_benchmark.sh tolokers GCN,GIN,GraphSAGE,XGBGraph 1 bigg synthetic_bigg_dataset
 ```
