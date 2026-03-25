@@ -20,8 +20,19 @@ SynGraphBench/
 │   │   └── train_cgt.sh            # Train CGT generative model
 │   ├── benchmark/
 │   │   ├── run_benchmark.sh        # Shell wrapper for anomaly detection benchmark
+│   │   ├── run_link_benchmark.sh   # Shell wrapper for link prediction benchmark
 │   │   ├── benchmark.py            # Project-level benchmark (original vs. synthetic)
-│   │   └── bench_utils.py          # Arg parsing, data loading, CGT helpers
+│   │   ├── link_benchmark.py       # Link prediction benchmark
+│   │   ├── bench_utils.py          # Arg parsing, data loading, CGT helpers
+│   │   ├── bigg_benchmark.slurm    # SLURM template for BiGG evaluation
+│   │   ├── cgt_benchmark.slurm     # SLURM template for CGT evaluation
+│   │   └── models/
+│   │       ├── cross_graph_detector.py     # Train on synthetic, test on original graph
+│   │       └── link_prediction/
+│   │           ├── link_predictor.py       # Placeholder (link prediction via scripts)
+│   │           └── cgt_link_predictor.py   # Placeholder for CGT link prediction
+│   ├── pipeline/
+│   │   └── run_cgt_pipeline.slurm  # Full CGT pipeline SLURM job
 │   └── test/               # Quick test/example scripts
 ├── datasets/
 │   ├── original/           # Original DGL datasets (reddit, tolokers, amazon, …)
@@ -29,7 +40,7 @@ SynGraphBench/
 │       ├── cgt/            # CGT outputs: .pt files with cluster centers + sequence indices
 │       │   └── <dataset>/
 │       │       └── <task>/
-│       │           └── e<epochs>_k<clusters>_d<depth>_f<fanout>.pt
+│       │           └── <dataset>_e<epochs>_k<clusters>_d<depth>_f<fanout>.pt
 │       └── bigg/           # BiGG outputs: full DGL graph files
 │           └── <dataset>/
 │               └── <task>/
@@ -44,8 +55,8 @@ SynGraphBench/
 │       │   ├── detector.py
 │       │   └── cgt_detector.py
 │       └── link_prediction/     # Extension
-│           ├── link_predictor.py
-│           └── cgt_link_predictor.py   # Placeholder
+│           ├── link_predictor.py        # BaseGNNLinkPredictor — edge decoder + training loop
+│           └── cgt_link_predictor.py    # Placeholder for CGT link prediction
 ├── CGT/                    # CGT Sub-repo
 └── bigg/                   # BiGG Sub-repo
 ```
@@ -58,12 +69,12 @@ All synthetic outputs follow the structure `datasets/synthetic/<generative_model
 
 | Generator | Task folder | Type | Example path |
 |-----------|-------------|------|--------------|
-| `cgt` | `hidden_labels` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/hidden_labels/e50_k512_d2_f5.pt` |
-| `cgt` | `hidden_links` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/hidden_links/e50_k512_d2_f5.pt` |
+| `cgt` | `hidden_labels` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/hidden_labels/reddit_e50_k512_d2_f5.pt` |
+| `cgt` | `hidden_links` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/hidden_links/reddit_e50_k512_d2_f5.pt` |
 | `bigg` | `hidden_labels` | Full DGL graph — conditional (features + labels) | `synthetic/bigg/tolokers/hidden_labels/blksize_1024_b_1_lr_0.001_epochs_50` |
 | `bigg` | `hidden_labels` | Structure-only baseline | `synthetic/bigg/tolokers/hidden_labels/structure_blksize_128_lr_0.001_epochs_100` |
 
 **Filename patterns:**
-- CGT: `e{epochs}_k{clusters}_d{depth}_f{fanout}.pt`
+- CGT: `{dataset}_e{epochs}_k{clusters}_d{depth}_f{fanout}.pt`
 - BiGG conditional: `blksize_{blksize}_b_{batch_size}_lr_{lr}_epochs_{epochs}`
 - BiGG structure-only: `structure_blksize_{blksize}_lr_{lr}_epochs_{epochs}`

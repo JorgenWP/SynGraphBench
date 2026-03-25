@@ -22,13 +22,16 @@ BiGG generates a **complete, new graph** — both topology (edges) and node feat
 The generative model captures the joint distribution of graph structure and node attributes, and samples from it to produce a synthetic counterpart.
 
 * **Key Mechanisms:** Decomposes graph generation into a sequence of binary tree decisions, processed efficiently via a custom C++ extension (`tree_clib`). Two modes: a conditional model (features + labels) and a structure-only baseline.
+* **Data Augmentation (optional):** Two training-time augmentation strategies, both disabled by default:
+  * *Gaussian noise* (`noise_std`): Adds random noise to node features during training to improve generalization. Default `0.0` (disabled).
+  * *Scheduled self-sampling* (`ss_max_prob`, `ss_start_epoch`): Gradually replaces teacher-forced inputs with the model's own predictions during training, reducing exposure bias. `ss_max_prob` controls the max probability (default `0.0` = disabled); `ss_start_epoch` controls when ramp-up begins.
 * **Output format:** A full DGL graph stored as a file under `datasets/synthetic/bigg/<dataset>/<task>/`.
 * **Important Files:**
   * `bigg/extension/pipeline.py`: Conditional model training (features + labels).
   * `bigg/extension/pipeline_structure_only.py`: Structure-only baseline.
   * `bigg/data_process/`: Dataset preparation scripts.
 * **Environment:** `bigg` Conda environment (Python 3.9, PyTorch 2.4.1).
-  * **Agent Alert:** Requires compiling the `tree_clib` C++ extension via `make` before running. This is handled in `scripts/env_setups/bigg.sh`. Modern CUDA architectures are patched via `sed` in that script.
+  * **Agent Alert:** Requires compiling the `tree_clib` C++ extension via `make` before running. This is handled in `scripts/env_setups/bigg_setup.sh`. Modern CUDA architectures are patched via `sed` in that script.
 
 ---
 
