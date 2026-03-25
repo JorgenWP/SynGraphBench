@@ -29,6 +29,8 @@ def main():
                                  help='Max scheduled sampling probability (0 = disabled)')
     pipeline_parser.add_argument('-ss_start_epoch', type=int, default=0,
                                  help='Epoch to begin scheduled sampling annealing')
+    pipeline_parser.add_argument('-bfs_preprocess', type=eval, default=False,
+                                 help='Apply fixed BFS node ordering before training')
 
     pipeline_args, _ = pipeline_parser.parse_known_args()
 
@@ -56,6 +58,27 @@ def main():
     graph_nx = nx.Graph(graph_nx_directed.to_undirected())
 
     graph_nx.remove_edges_from(nx.selfloop_edges(graph_nx))
+
+    # Apply fixed BFS node ordering: reorder graph and features so that
+    # BFS-adjacent nodes have consecutive indices
+    if pipeline_args.bfs_preprocess:
+        # BFS from the highest-degree node
+        start_node = max(graph_nx.degree(), key=lambda x: x[1])[0]
+        bfs_order = list(nx.bfs_tree(graph_nx, source=start_node).nodes())
+        # Add any disconnected nodes not reached by BFS
+        remaining = [n for n in graph_nx.nodes() if n not in set(bfs_order)]
+        bfs_order += remaining
+
+        # Reorder graph
+        mapping = {old: new for new, old in enumerate(bfs_order)}
+        graph_nx = nx.relabel_nodes(graph_nx, mapping)
+
+        # Reorder features to match
+        perm = torch.tensor(bfs_order, dtype=torch.long)
+        node_data = node_data[perm]
+        list_node_feats = [node_data]
+
+        print(f'Applied BFS ordering from node {start_node} (degree {graph_nx.degree(mapping[start_node])})')
 
     TreeLib.InsertGraph(graph_nx)
 

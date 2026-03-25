@@ -2,11 +2,11 @@
 # Train BiGG model on a dataset.
 #
 # Usage:
-#   bash scripts/train/train_bigg.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch]
+#   bash scripts/train/train_bigg.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess]
 #
 # Examples:
 #   bash scripts/train/train_bigg.sh tolokers 1024 1 50 0.001 256
-#   bash scripts/train/train_bigg.sh reddit 512 2 100 0.0005 128 0.1 0.5 50
+#   bash scripts/train/train_bigg.sh reddit 512 2 100 0.0005 128 0.1 0.5 50 True
 #
 
 set -e
@@ -21,6 +21,7 @@ EMBED_DIM="${6:-256}"
 NOISE_STD="${7:-0.0}"
 SS_MAX_PROB="${8:-0.0}"
 SS_START_EPOCH="${9:-0}"
+BFS_PREPROCESS="${10:-True}"
 
 cd "$(dirname "$0")/../../bigg"
 
@@ -34,6 +35,7 @@ echo "Embed dim:       $EMBED_DIM"
 echo "Noise std:       $NOISE_STD"
 echo "SS max prob:     $SS_MAX_PROB"
 echo "SS start epoch:  $SS_START_EPOCH"
+echo "BFS preprocess:  $BFS_PREPROCESS"
 echo ""
 
 python -m bigg.extension.pipeline \
@@ -42,6 +44,7 @@ python -m bigg.extension.pipeline \
   -gpu 0 \
   -embed_dim "$EMBED_DIM" \
   -bits_compress 0 \
+  -bfs_preprocess "$BFS_PREPROCESS" \
   -learning_rate "$LR" \
   -num_epochs "$EPOCHS" \
   -batch_size "$BSIZE" \
