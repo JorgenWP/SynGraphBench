@@ -1,4 +1,4 @@
-# SynGraphBench - Synthetic Graph data Benchmarking
+# SynGraphBench - Synthetic Graph Benchmarking
 
 SynGraphBench is a benchmarking suite designed to evaluate the performance of graph processing (GNNs and tree ensembles with aggregation) on synthetic graph data. It provides a collection of repositories, for training graph processing models and for generating synthetic graph data. 
 
