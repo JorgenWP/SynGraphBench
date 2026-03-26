@@ -1,7 +1,10 @@
 import os
 import argparse
+import psutil
+import dgl
 import torch
 import torch.optim as optim
+import networkx as nx
 from tqdm import tqdm
 
 # BiGG specific imports
@@ -102,6 +105,14 @@ def main():
     ss_start_epoch = pipeline_args.ss_start_epoch
     ss_ramp_epochs = max(cmd_args.num_epochs - ss_start_epoch, 1)
 
+    # Memory tracking
+    process = psutil.Process(os.getpid())
+    gpu_available = torch.cuda.is_available()
+    peak_ram_mb = 0.0
+    peak_vram_mb = 0.0
+    if gpu_available:
+        torch.cuda.reset_peak_memory_stats()
+
     pbar = tqdm(range(cmd_args.num_epochs))
     print('Start learn')
     for epoch in pbar:
@@ -139,12 +150,24 @@ def main():
 
         optimizer.step()
 
+        # Track memory usage
+        ram_mb = process.memory_info().rss / 1024 ** 2
+        peak_ram_mb = max(peak_ram_mb, ram_mb)
+        if gpu_available:
+            vram_mb = torch.cuda.max_memory_allocated() / 1024 ** 2
+            peak_vram_mb = max(peak_vram_mb, vram_mb)
+
         # Update progress bar with total loss and separate component losses (per node)
         ll_cont_val = -model._ll_cont / num_nodes
         ll_label_val = -model._ll_label / num_nodes
         pbar.set_description(
             f"Loss: {loss_val:.4f} | cont: {ll_cont_val:.4f} | label: {ll_label_val:.4f}"
         )
+
+    print(f'\n=== Memory usage (training) ===')
+    print(f'Peak RAM:  {peak_ram_mb:.1f} MB')
+    if gpu_available:
+        print(f'Peak VRAM: {peak_vram_mb:.1f} MB')
 
     model.eval()
     print('Start generate')
@@ -160,7 +183,6 @@ def main():
     gen_labels = pred_node_feats[:, feat_dim:]
 
     # Build DGL graph with masks
-    import networkx as nx
     gen_nx = nx.Graph()
     gen_nx.add_nodes_from(range(target_num_nodes))
     for edge in pred_edges:
