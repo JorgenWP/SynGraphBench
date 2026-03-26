@@ -1,9 +1,7 @@
 import os
 import argparse
-import dgl
 import torch
 import torch.optim as optim
-import networkx as nx
 from tqdm import tqdm
 
 # BiGG specific imports
@@ -13,6 +11,16 @@ from bigg.experiments.train_utils import sqrtn_forward_backward
 
 # Import both custom models
 from bigg.extension.customized_models import BiggWithConditionedFeats, BiggWithFeatsAndLabels
+
+# Preprocessing utilities
+from bigg.extension.preprocessing import (
+    load_dgl_graph,
+    dgl_to_networkx,
+    bfs_reorder,
+    normalize_features,
+    build_generated_dgl,
+    NORMALIZATION_METHODS,
+)
 
 def main():
 
@@ -31,6 +39,9 @@ def main():
                                  help='Epoch to begin scheduled sampling annealing')
     pipeline_parser.add_argument('-bfs_preprocess', type=eval, default=False,
                                  help='Apply fixed BFS node ordering before training')
+    pipeline_parser.add_argument('-normalize', type=str, default=None,
+                                 choices=list(NORMALIZATION_METHODS),
+                                 help='Feature normalisation method (default: none)')
 
     pipeline_args, _ = pipeline_parser.parse_known_args()
 
@@ -39,12 +50,16 @@ def main():
 
     #Load dataset
     DATASET = cmd_args.data_dir
-    graphs_dgl, _ = dgl.load_graphs('../datasets/original/' + DATASET)
-    graph = graphs_dgl[0]
+    graph = load_dgl_graph(DATASET)
 
     #Get features and labels
     cont_feats = graph.ndata['feature']
     labels = graph.ndata['label']
+
+    # Optionally normalise features
+    if pipeline_args.normalize is not None:
+        cont_feats = normalize_features(cont_feats, pipeline_args.normalize)
+        print(f'Applied {pipeline_args.normalize} normalisation to features')
 
     #Determine dimensions of features
     feat_dim = cont_feats.shape[1]
@@ -54,31 +69,13 @@ def main():
     list_node_feats = [node_data]
 
     #Convert topology for treelib
-    graph_nx_directed = graph.to_networkx()
-    graph_nx = nx.Graph(graph_nx_directed.to_undirected())
-
-    graph_nx.remove_edges_from(nx.selfloop_edges(graph_nx))
+    graph_nx = dgl_to_networkx(graph)
 
     # Apply fixed BFS node ordering: reorder graph and features so that
     # BFS-adjacent nodes have consecutive indices
     if pipeline_args.bfs_preprocess:
-        # BFS from the highest-degree node
-        start_node = max(graph_nx.degree(), key=lambda x: x[1])[0]
-        bfs_order = list(nx.bfs_tree(graph_nx, source=start_node).nodes())
-        # Add any disconnected nodes not reached by BFS
-        remaining = [n for n in graph_nx.nodes() if n not in set(bfs_order)]
-        bfs_order += remaining
-
-        # Reorder graph
-        mapping = {old: new for new, old in enumerate(bfs_order)}
-        graph_nx = nx.relabel_nodes(graph_nx, mapping)
-
-        # Reorder features to match
-        perm = torch.tensor(bfs_order, dtype=torch.long)
-        node_data = node_data[perm]
+        graph_nx, node_data = bfs_reorder(graph_nx, node_data)
         list_node_feats = [node_data]
-
-        print(f'Applied BFS ordering from node {start_node} (degree {graph_nx.degree(mapping[start_node])})')
 
     TreeLib.InsertGraph(graph_nx)
 
@@ -154,49 +151,29 @@ def main():
     with torch.no_grad():
         target_num_nodes = graph_nx.number_of_nodes()
 
-
         #Generating graph
         _, pred_edges, _, pred_node_feats, _ = model(
             target_num_nodes, display=True
         )
-        #Create generated graphs as NetworkX graph
-        gen_nx = nx.Graph()
-        gen_nx.add_nodes_from(range(target_num_nodes))
 
-        for edge in pred_edges:
-            gen_nx.add_edge(edge[0], edge[1])
-        
     gen_cont_feats = pred_node_feats[:, :feat_dim]
     gen_labels = pred_node_feats[:, feat_dim:]
 
-    # Convert generated graph to DGL format
-    gen_dgl = dgl.from_networkx(gen_nx)
+    # Build DGL graph with masks
+    import networkx as nx
+    gen_nx = nx.Graph()
+    gen_nx.add_nodes_from(range(target_num_nodes))
+    for edge in pred_edges:
+        gen_nx.add_edge(edge[0], edge[1])
 
-    # Add generated features and labels to the DGL graph
-    gen_dgl.ndata['feature'] = gen_cont_feats.cpu()
-    gen_dgl.ndata['label'] = gen_labels.squeeze().long().cpu()
-
-    # Add train/val/test split
-    num_nodes = gen_dgl.num_nodes()
-    num_splits = graph.ndata['train_masks'].shape[1] 
-
-    train_masks = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
-    val_masks   = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
-    test_masks  = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)  # always zero
-
-    for col in range(num_splits):
-        n_train = int(graph.ndata['train_masks'][:, col].sum().item())
-        n_val   = int(graph.ndata['val_masks'][:, col].sum().item())
-        perm = torch.randperm(num_nodes)
-        train_masks[perm[:n_train],              col] = 1
-        val_masks  [perm[n_train:n_train+n_val], col] = 1
-
-    gen_dgl.ndata['train_masks'] = train_masks
-    gen_dgl.ndata['val_masks']   = val_masks
-    gen_dgl.ndata['test_masks']  = test_masks
+    gen_dgl = build_generated_dgl(gen_nx, graph,
+                                  features=gen_cont_feats,
+                                  labels=gen_labels)
 
     # Save generated graph
-    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}'
+    norm_tag = pipeline_args.normalize if pipeline_args.normalize is not None else 'none'
+    bfs_tag = 'bfs' if pipeline_args.bfs_preprocess else 'nobfs'
+    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
     os.makedirs(save_dir, exist_ok=True)
     dgl.save_graphs(os.path.join(save_dir, save_name), [gen_dgl])
@@ -204,4 +181,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-        

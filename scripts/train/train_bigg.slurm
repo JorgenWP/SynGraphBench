@@ -41,6 +41,7 @@ NOISE_STD=0.1
 SS_MAX_PROB=0.5
 SS_START_EPOCH=0
 BFS_PREPROCESS=True
+NORMALIZE=none          # "zscore", "minmax", "row", or "none"
 
 # Run the BiGG training and generation script
-bash scripts/train/train_bigg.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS"
+bash scripts/train/train_bigg.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE"

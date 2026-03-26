@@ -2,11 +2,13 @@
 # Train BiGG model on a dataset.
 #
 # Usage:
-#   bash scripts/train/train_bigg.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess]
+#   bash scripts/train/train_bigg.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize]
+#
+# normalize: feature normalisation — one of "zscore", "minmax", "row", or "none" (default: none)
 #
 # Examples:
 #   bash scripts/train/train_bigg.sh tolokers 1024 1 50 0.001 256
-#   bash scripts/train/train_bigg.sh reddit 512 2 100 0.0005 128 0.1 0.5 50 True
+#   bash scripts/train/train_bigg.sh reddit 512 2 100 0.0005 128 0.1 0.5 50 True zscore
 #
 
 set -e
@@ -22,6 +24,7 @@ NOISE_STD="${7:-0.0}"
 SS_MAX_PROB="${8:-0.0}"
 SS_START_EPOCH="${9:-0}"
 BFS_PREPROCESS="${10:-False}"
+NORMALIZE="${11:-none}"
 
 cd "$(dirname "$0")/../../bigg"
 
@@ -36,7 +39,13 @@ echo "Noise std:       $NOISE_STD"
 echo "SS max prob:     $SS_MAX_PROB"
 echo "SS start epoch:  $SS_START_EPOCH"
 echo "BFS preprocess:  $BFS_PREPROCESS"
+echo "Normalize:       $NORMALIZE"
 echo ""
+
+NORM_FLAG=""
+if [ "$NORMALIZE" != "none" ]; then
+  NORM_FLAG="-normalize $NORMALIZE"
+fi
 
 python -m bigg.extension.pipeline \
   -data_dir "$DATASET" \
@@ -53,4 +62,5 @@ python -m bigg.extension.pipeline \
   -ss_max_prob "$SS_MAX_PROB" \
   -ss_start_epoch "$SS_START_EPOCH" \
   -seed 34 \
-  -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}"
+  $NORM_FLAG \
+  -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}"

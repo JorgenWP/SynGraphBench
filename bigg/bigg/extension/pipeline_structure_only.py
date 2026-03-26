@@ -10,6 +10,12 @@ from bigg.model.tree_clib.tree_lib import setup_treelib, TreeLib
 from bigg.model.tree_model import RecurTreeGen
 from bigg.experiments.train_utils import sqrtn_forward_backward
 
+from bigg.extension.preprocessing import (
+    load_dgl_graph,
+    dgl_to_networkx,
+    build_generated_dgl,
+)
+
 
 def main():
     set_device(cmd_args.gpu)
@@ -17,12 +23,10 @@ def main():
 
     # Load dataset
     DATASET = cmd_args.data_dir
-    graphs_dgl, _ = dgl.load_graphs('../datasets/original/' + DATASET)
-    graph = graphs_dgl[0]
+    graph = load_dgl_graph(DATASET)
 
     # Convert topology for TreeLib (structure only — no features)
-    graph_nx = nx.Graph(graph.to_networkx().to_undirected())
-    graph_nx.remove_edges_from(nx.selfloop_edges(graph_nx))
+    graph_nx = dgl_to_networkx(graph)
 
     TreeLib.InsertGraph(graph_nx)
 
@@ -84,29 +88,8 @@ def main():
     print(f'Generated graph  |  nodes: {num_nodes}  |  edges: {gen_num_edges}  '
           f'(original: {num_edges})')
 
-    # Build DGL graph and attach placeholder features/labels so it is
-    # compatible with the rest of the benchmark pipeline
-    gen_dgl = dgl.from_networkx(gen_nx)
-
-    feat_dim = graph.ndata['feature'].shape[1]
-    num_splits = graph.ndata['train_masks'].shape[1]
-
-    gen_dgl.ndata['feature'] = torch.zeros(num_nodes, feat_dim)
-    gen_dgl.ndata['label'] = torch.zeros(num_nodes, dtype=torch.long)
-    train_masks = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
-    val_masks   = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
-    test_masks  = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)  # always zero
-
-    for col in range(num_splits):
-        n_train = int(graph.ndata['train_masks'][:, col].sum().item())
-        n_val   = int(graph.ndata['val_masks'][:, col].sum().item())
-        perm = torch.randperm(num_nodes)
-        train_masks[perm[:n_train],              col] = 1
-        val_masks  [perm[n_train:n_train+n_val], col] = 1
-
-    gen_dgl.ndata['train_masks'] = train_masks
-    gen_dgl.ndata['val_masks']   = val_masks
-    gen_dgl.ndata['test_masks']  = test_masks
+    # Build DGL graph with placeholder features/labels and masks
+    gen_dgl = build_generated_dgl(gen_nx, graph)
 
     save_name = f'structure_blksize_{cmd_args.blksize}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/structure'

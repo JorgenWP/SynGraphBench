@@ -18,6 +18,7 @@
 #   bash scripts/benchmark/run_anomaly_benchmark.sh reddit GCN,GIN 3 cgt
 #   bash scripts/benchmark/run_anomaly_benchmark.sh tolokers GCN,GIN 1 bigg blksize_1024_b_1_lr_0.001_epochs_50
 #   bash scripts/benchmark/run_anomaly_benchmark.sh tolokers GCN,GIN 1 bigg structure_blksize_128_lr_0.001_epochs_100 structure
+#   bash scripts/benchmark/run_anomaly_benchmark.sh reddit GCN,GIN,GraphSAGE 1 bigg blksize_-1_b_1_lr_0.001_epochs_300_noise_0.1_ss_0.0_BFSPRE_False_reverted hidden_labels
 
 set -e
 
