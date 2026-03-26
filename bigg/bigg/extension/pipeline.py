@@ -45,8 +45,16 @@ def main():
     pipeline_parser.add_argument('-normalize', type=str, default=None,
                                  choices=list(NORMALIZATION_METHODS),
                                  help='Feature normalisation method (default: none)')
+    pipeline_parser.add_argument('-loss_weights', type=str, default='1,1',
+                                 help='Loss weights for cont,label relative to struct (default: 1,1). '
+                                      'Applied on top of dynamic normalization after epoch 0.')
 
     pipeline_args, _ = pipeline_parser.parse_known_args()
+
+    # Parse loss weights
+    lw = [float(x) for x in pipeline_args.loss_weights.split(',')]
+    assert len(lw) == 2, f'Expected 2 loss weights (cont,label), got {len(lw)}'
+    user_w_cont, user_w_label = lw
 
     set_device(cmd_args.gpu)
     setup_treelib(cmd_args)
@@ -113,8 +121,38 @@ def main():
     if gpu_available:
         torch.cuda.reset_peak_memory_stats()
 
+    # Calibration: forward-only pass to capture loss magnitudes for dynamic normalization
+    print('Calibration pass (no weight update)...')
+    model.reset_loss_trackers()
+    batch_node_feats = torch.cat([list_node_feats[i] for i in indices], dim=0)
+
+    with torch.no_grad():
+        if cmd_args.blksize < 0 or num_nodes <= cmd_args.blksize:
+            ll, _ = model.forward_train(indices, node_feats=batch_node_feats)
+            calib_loss = (-ll / num_nodes).item()
+        else:
+            ll, _ = sqrtn_forward_backward(model,
+                                           graph_ids=indices,
+                                           list_node_starts=[0],
+                                           num_nodes=num_nodes,
+                                           blksize=cmd_args.blksize,
+                                           loss_scale=1.0/num_nodes,
+                                           node_feats=batch_node_feats)
+            calib_loss = -ll / num_nodes
+
+    calib_cont = abs(model._ll_cont / num_nodes) or 1.0
+    calib_label = abs(model._ll_label / num_nodes) or 1.0
+    calib_struct = abs(calib_loss - calib_cont - calib_label) or 1.0
+
+    model.w_cont = (calib_struct / calib_cont) * user_w_cont
+    model.w_label = (calib_struct / calib_label) * user_w_label
+
+    print(f'Calibration magnitudes — struct: {calib_struct:.4f}, '
+          f'cont: {calib_cont:.4f}, label: {calib_label:.4f}')
+    print(f'Dynamic weights — w_cont: {model.w_cont:.4f}, w_label: {model.w_label:.4f}')
+
     pbar = tqdm(range(cmd_args.num_epochs))
-    print('Start learn')
+    print(f'Start learn (loss weights relative to struct: cont={user_w_cont}, label={user_w_label})')
     for epoch in pbar:
         # Anneal scheduled sampling probability linearly from 0 to ss_max_prob
         if epoch < ss_start_epoch or ss_max_prob <= 0:
@@ -150,6 +188,11 @@ def main():
 
         optimizer.step()
 
+        # Compute per-node component losses (unweighted, for monitoring)
+        ll_cont_val = -model._ll_cont / num_nodes
+        ll_label_val = -model._ll_label / num_nodes
+        ll_struct_val = loss_val - ll_cont_val - ll_label_val
+
         # Track memory usage
         ram_mb = process.memory_info().rss / 1024 ** 2
         peak_ram_mb = max(peak_ram_mb, ram_mb)
@@ -157,11 +200,8 @@ def main():
             vram_mb = torch.cuda.max_memory_allocated() / 1024 ** 2
             peak_vram_mb = max(peak_vram_mb, vram_mb)
 
-        # Update progress bar with total loss and separate component losses (per node)
-        ll_cont_val = -model._ll_cont / num_nodes
-        ll_label_val = -model._ll_label / num_nodes
         pbar.set_description(
-            f"Loss: {loss_val:.4f} | cont: {ll_cont_val:.4f} | label: {ll_label_val:.4f}"
+            f"Loss: {loss_val:.4f} | struct: {ll_struct_val:.4f} | cont: {ll_cont_val:.4f} | label: {ll_label_val:.4f}"
         )
 
     print(f'\n=== Memory usage (training) ===')
@@ -195,7 +235,8 @@ def main():
     # Save generated graph
     norm_tag = pipeline_args.normalize if pipeline_args.normalize is not None else 'none'
     bfs_tag = 'bfs' if pipeline_args.bfs_preprocess else 'nobfs'
-    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}'
+    lw_tag = pipeline_args.loss_weights.replace(',', '_')
+    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
     os.makedirs(save_dir, exist_ok=True)
     dgl.save_graphs(os.path.join(save_dir, save_name), [gen_dgl])

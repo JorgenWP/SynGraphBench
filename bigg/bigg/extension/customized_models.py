@@ -107,6 +107,10 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
         self._ll_cont = 0.0
         self._ll_label = 0.0
 
+        # Loss weights (set by pipeline for dynamic normalization)
+        self.w_cont = 1.0
+        self.w_label = 1.0
+
     def reset_loss_trackers(self):
         self._ll_cont = 0.0
         self._ll_label = 0.0
@@ -163,7 +167,7 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
             # 2. Likelihood for discrete labels (Negative Cross-Entropy)
             ll_label = -F.cross_entropy(pred_logits, target_labels, reduction='sum')
 
-            ll = ll_cont + ll_label
+            ll = self.w_cont * ll_cont + self.w_label * ll_label
 
             self._ll_cont += ll_cont.item()
             self._ll_label += ll_label.item()
@@ -211,6 +215,10 @@ class BiggWithConditionedFeats(RecurTreeGen):
         self._ll_cont = 0.0
         self._ll_label = 0.0
 
+        # Loss weights (set by pipeline for dynamic normalization)
+        self.w_cont = 1.0
+        self.w_label = 1.0
+
     def reset_loss_trackers(self):
         self._ll_cont = 0.0
         self._ll_label = 0.0
@@ -218,10 +226,10 @@ class BiggWithConditionedFeats(RecurTreeGen):
     def embed_node_feats(self, node_data):
         cont_feats = node_data[:, :self.feat_dim]
         node_labels = node_data[:, self.feat_dim].long()
-        
+
         embed_cont = self.nodefeat_encoding(cont_feats)
         embed_label = self.nodelabel_encoding(node_labels)
-        
+
         combined_embed = torch.cat([embed_cont, embed_label], dim=-1)
         return self.combiner(combined_embed)
 
@@ -274,7 +282,7 @@ class BiggWithConditionedFeats(RecurTreeGen):
 
             ll_label = -F.cross_entropy(pred_logits, target_labels, reduction='sum')
 
-            ll = ll_cont + ll_label
+            ll = self.w_cont * ll_cont + self.w_label * ll_label
 
             self._ll_cont += ll_cont.item()
             self._ll_label += ll_label.item()
