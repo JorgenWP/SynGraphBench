@@ -55,7 +55,7 @@ fi
 
 HETERO_FLAG=""
 if [ "$HETERO_FEAT" = "true" ]; then
-  HETERO_FLAG="-hetero_feat"
+  HETERO_FLAG="--hetero_feat"
 fi
 
 python -m bigg.extension.pipeline \

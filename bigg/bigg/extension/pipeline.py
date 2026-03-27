@@ -48,7 +48,7 @@ def main():
     pipeline_parser.add_argument('-loss_weights', type=str, default='1,1',
                                  help='Loss weights for cont,label relative to struct (default: 1,1). '
                                       'Applied on top of dynamic normalization after epoch 0.')
-    pipeline_parser.add_argument('-hetero_feat', action='store_true', default=False,
+    pipeline_parser.add_argument('--hetero_feat', action='store_true', default=False,
                                  help='Heteroscedastic feature prediction: predict mean + log-variance '
                                       'and sample at generation time (default: deterministic MSE)')
 
