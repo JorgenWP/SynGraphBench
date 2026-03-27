@@ -84,17 +84,19 @@ class BiggWithEdgeLen(RecurTreeGen):
 
 class BiggWithFeatsAndLabels(RecurTreeGen):
 
-    def __init__(self, args, feat_dim, num_classes, label_temp=1.0, noise_std=0.0, ss_prob=0.0):
+    def __init__(self, args, feat_dim, num_classes, label_temp=1.0, noise_std=0.0, ss_prob=0.0, hetero_feat=False):
         super().__init__(args)
         self.feat_dim = feat_dim
         self.num_classes = num_classes
         self.label_temp = label_temp  # sampling temperature; 1.0 = unmodified distribution
         self.noise_std = noise_std    # Gaussian noise std on hidden state during training
         self.ss_prob = ss_prob        # scheduled sampling probability (swap GT with prediction)
+        self.hetero_feat = hetero_feat  # predict mean + log-variance for continuous features
 
         # 1. Continuous feature encoders/decoders
         self.nodefeat_encoding = MLP(feat_dim, [2 * args.embed_dim, args.embed_dim])
-        self.nodefeat_pred = MLP(args.embed_dim, [2 * args.embed_dim, feat_dim])
+        feat_out_dim = 2 * feat_dim if hetero_feat else feat_dim
+        self.nodefeat_pred = MLP(args.embed_dim, [2 * args.embed_dim, feat_out_dim])
 
         # 2. Discrete label encoders/decoders
         self.nodelabel_encoding = nn.Embedding(num_classes, args.embed_dim)
@@ -142,8 +144,14 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
             h = h + torch.randn_like(h) * self.noise_std
 
         # Predict continuous features and class logits
-        pred_cont = self.nodefeat_pred(h)
+        raw_cont = self.nodefeat_pred(h)
         pred_logits = self.nodelabel_pred(h)
+
+        if self.hetero_feat:
+            pred_cont = raw_cont[:, :self.feat_dim]
+            log_var = torch.clamp(raw_cont[:, self.feat_dim:], -4.0, 2.0)
+        else:
+            pred_cont = raw_cont
 
         if node_data is None:
             # Generation mode: sample from the learned distribution
@@ -151,8 +159,14 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
             probs = F.softmax(pred_logits / self.label_temp, dim=-1)
             pred_labels = torch.multinomial(probs, num_samples=1).float()
 
+            if self.hetero_feat:
+                std = torch.exp(0.5 * log_var)
+                sampled_cont = pred_cont + std * torch.randn_like(pred_cont)
+            else:
+                sampled_cont = pred_cont
+
             # Concatenate predictions back into a single tensor of shape [batch_size, feat_dim + 1]
-            return_data = torch.cat([pred_cont, pred_labels], dim=-1)
+            return_data = torch.cat([sampled_cont, pred_labels], dim=-1)
 
             state_update = self.embed_node_feats(return_data)
         else:
@@ -160,8 +174,12 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
             target_cont = node_data[:, :self.feat_dim]
             target_labels = node_data[:, self.feat_dim].long()
 
-            # 1. Likelihood for continuous features (Negative MSE), normalized per feature
-            ll_cont = -(target_cont - pred_cont) ** 2
+            # 1. Likelihood for continuous features, normalized per feature
+            if self.hetero_feat:
+                # Gaussian NLL: -0.5 * (log_var + (target - mean)^2 / exp(log_var))
+                ll_cont = -0.5 * (log_var + (target_cont - pred_cont) ** 2 / torch.exp(log_var))
+            else:
+                ll_cont = -(target_cont - pred_cont) ** 2
             ll_cont = torch.sum(ll_cont) / self.feat_dim
 
             # 2. Likelihood for discrete labels (Negative Cross-Entropy)
@@ -190,13 +208,14 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
 
 class BiggWithConditionedFeats(RecurTreeGen):
 
-    def __init__(self, args, feat_dim, num_classes, label_temp=1.0, noise_std=0.0, ss_prob=0.0):
+    def __init__(self, args, feat_dim, num_classes, label_temp=1.0, noise_std=0.0, ss_prob=0.0, hetero_feat=False):
         super().__init__(args)
         self.feat_dim = feat_dim
         self.num_classes = num_classes
         self.label_temp = label_temp  # sampling temperature; 1.0 = unmodified distribution
         self.noise_std = noise_std    # Gaussian noise std on hidden state during training
         self.ss_prob = ss_prob        # scheduled sampling probability (swap GT with prediction)
+        self.hetero_feat = hetero_feat  # predict mean + log-variance for continuous features
 
         # 1. Label encoders/decoders
         self.nodelabel_encoding = nn.Embedding(num_classes, args.embed_dim)
@@ -206,7 +225,8 @@ class BiggWithConditionedFeats(RecurTreeGen):
         # Notice the input dimension to nodefeat_pred is now 2 * args.embed_dim
         # to accept both 'h' and the 'label_embedding'
         self.nodefeat_encoding = MLP(feat_dim, [2 * args.embed_dim, args.embed_dim])
-        self.nodefeat_pred = MLP(args.embed_dim * 2, [2 * args.embed_dim, feat_dim])
+        feat_out_dim = 2 * feat_dim if hetero_feat else feat_dim
+        self.nodefeat_pred = MLP(args.embed_dim * 2, [2 * args.embed_dim, feat_out_dim])
 
         # 3. Combiner for the recurrent state update
         self.combiner = nn.Linear(args.embed_dim * 2, args.embed_dim)
@@ -257,10 +277,18 @@ class BiggWithConditionedFeats(RecurTreeGen):
 
             # Step 3 & 4: Condition continuous features on both 'h' and 'label_embed'
             h_conditioned = torch.cat([h, label_embed], dim=-1)
-            pred_cont = self.nodefeat_pred(h_conditioned)
+            raw_cont = self.nodefeat_pred(h_conditioned)
+
+            if self.hetero_feat:
+                pred_cont = raw_cont[:, :self.feat_dim]
+                log_var = torch.clamp(raw_cont[:, self.feat_dim:], -4.0, 2.0)
+                std = torch.exp(0.5 * log_var)
+                sampled_cont = pred_cont + std * torch.randn_like(pred_cont)
+            else:
+                sampled_cont = raw_cont
 
             # Format output
-            return_data = torch.cat([pred_cont, pred_labels.unsqueeze(-1).float()], dim=-1)
+            return_data = torch.cat([sampled_cont, pred_labels.unsqueeze(-1).float()], dim=-1)
             state_update = self.embed_node_feats(return_data)
 
         else:
@@ -273,11 +301,20 @@ class BiggWithConditionedFeats(RecurTreeGen):
 
             # Step 3 & 4: Condition continuous features on both 'h' and true 'label_embed'
             h_conditioned = torch.cat([h, label_embed], dim=-1)
-            pred_cont = self.nodefeat_pred(h_conditioned)
+            raw_cont = self.nodefeat_pred(h_conditioned)
+
+            if self.hetero_feat:
+                pred_cont = raw_cont[:, :self.feat_dim]
+                log_var = torch.clamp(raw_cont[:, self.feat_dim:], -4.0, 2.0)
+            else:
+                pred_cont = raw_cont
 
             # Compute losses
             # Normalize ll_cont per feature so it's on the same scale as ll_label
-            ll_cont = -(target_cont - pred_cont) ** 2
+            if self.hetero_feat:
+                ll_cont = -0.5 * (log_var + (target_cont - pred_cont) ** 2 / torch.exp(log_var))
+            else:
+                ll_cont = -(target_cont - pred_cont) ** 2
             ll_cont = torch.sum(ll_cont) / self.feat_dim
 
             ll_label = -F.cross_entropy(pred_logits, target_labels, reduction='sum')

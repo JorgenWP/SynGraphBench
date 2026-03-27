@@ -43,6 +43,7 @@ SS_START_EPOCH=0
 BFS_PREPROCESS=True
 NORMALIZE=none          # "zscore", "minmax", "row", or "none"
 LOSS_WEIGHTS="1,1"      # cont,label weights relative to struct (applied after dynamic normalization)
+HETERO_FEAT=false       # "true" for heteroscedastic feature prediction (mean + variance), "false" for deterministic MSE
 
 # Run the BiGG training and generation script
-bash scripts/train/train_bigg.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS"
+bash scripts/train/train_bigg.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT"

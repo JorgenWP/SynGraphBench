@@ -48,6 +48,9 @@ def main():
     pipeline_parser.add_argument('-loss_weights', type=str, default='1,1',
                                  help='Loss weights for cont,label relative to struct (default: 1,1). '
                                       'Applied on top of dynamic normalization after epoch 0.')
+    pipeline_parser.add_argument('-hetero_feat', action='store_true', default=False,
+                                 help='Heteroscedastic feature prediction: predict mean + log-variance '
+                                      'and sample at generation time (default: deterministic MSE)')
 
     pipeline_args, _ = pipeline_parser.parse_known_args()
 
@@ -96,11 +99,13 @@ def main():
     if pipeline_args.model_type == 'conditional':
         model = BiggWithConditionedFeats(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
                                          label_temp=pipeline_args.label_temp,
-                                         noise_std=pipeline_args.noise_std).to(cmd_args.device)
+                                         noise_std=pipeline_args.noise_std,
+                                         hetero_feat=pipeline_args.hetero_feat).to(cmd_args.device)
     elif pipeline_args.model_type == 'independent':
         model = BiggWithFeatsAndLabels(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
                                        label_temp=pipeline_args.label_temp,
-                                       noise_std=pipeline_args.noise_std).to(cmd_args.device)
+                                       noise_std=pipeline_args.noise_std,
+                                       hetero_feat=pipeline_args.hetero_feat).to(cmd_args.device)
 
     optimizer = optim.Adam(model.parameters(), lr=cmd_args.learning_rate, weight_decay=1e-4)
 
@@ -236,7 +241,8 @@ def main():
     norm_tag = pipeline_args.normalize if pipeline_args.normalize is not None else 'none'
     bfs_tag = 'bfs' if pipeline_args.bfs_preprocess else 'nobfs'
     lw_tag = pipeline_args.loss_weights.replace(',', '_')
-    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}'
+    hetero_tag = 'hetero' if pipeline_args.hetero_feat else 'det'
+    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
     os.makedirs(save_dir, exist_ok=True)
     dgl.save_graphs(os.path.join(save_dir, save_name), [gen_dgl])
