@@ -292,7 +292,9 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
                                 trials, semi_supervised, trial_id,
                                 epochs, patience, lr, drop_rate, h_feats, num_layers):
     """Train GNNs on synthetic graph, validate on synthetic val, test on original test nodes."""
-    from models.cross_graph_detector import CrossGraphGNNDetector, CROSS_GRAPH_SUPPORTED_MODELS
+    from models.cross_graph_detector import (CrossGraphGNNDetector,
+                                                CrossGraphXGBGraphDetector,
+                                                CROSS_GRAPH_SUPPORTED_MODELS)
     results = []
 
     for model_name in models:
@@ -331,7 +333,10 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
             }
 
             print(f"  Trial {t}, seed={seed}")
-            detector = CrossGraphGNNDetector(train_config, model_config, syn_data, orig_data)
+            if model_name == 'XGBGraph':
+                detector = CrossGraphXGBGraphDetector(train_config, model_config, syn_data, orig_data)
+            else:
+                detector = CrossGraphGNNDetector(train_config, model_config, syn_data, orig_data)
 
             st = time.time()
             test_score = detector.train()
