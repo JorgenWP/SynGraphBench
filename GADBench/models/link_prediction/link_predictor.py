@@ -1,6 +1,7 @@
 from models.gnn import *
 from sklearn.metrics import roc_auc_score, average_precision_score
 import dgl
+import numpy as np
 import torch
 import torch.nn.functional as F
 
@@ -178,4 +179,88 @@ class BaseGNNLinkPredictor(BaseDetector):
                 self.patience_knt += 1
                 if self.patience_knt > self.train_config['patience']:
                     break
+        return test_score
+
+
+class XGBGraphLinkPredictor(BaseDetector):
+    """XGBoost link predictor using GIN_noparam node embeddings.
+
+    Encodes nodes with parameter-free GIN, creates edge features via
+    Hadamard product of endpoint embeddings, then trains XGBoost to
+    classify edges as real or negative.
+    """
+
+    def __init__(self, train_config, model_config, data):
+        super().__init__(train_config, model_config, data)
+        import xgboost as xgb
+
+        device = train_config['device']
+
+        # GIN_noparam feature extraction
+        gnn = GIN_noparam(**model_config).to(device)
+        self.node_feats = gnn(self.train_graph).detach()
+
+        # XGBoost model
+        eval_metric = roc_auc_score if train_config['metric'] == "AUROC" else average_precision_score
+        cfg = {k: v for k, v in model_config.items() if k != 'model'}
+        self.model = xgb.XGBClassifier(
+            tree_method='hist', eval_metric=eval_metric, verbose=False, **cfg)
+
+    def _edge_features(self, h, edges):
+        return (h[edges[:, 0]] * h[edges[:, 1]]).cpu().numpy()
+
+    def _sample_random_negatives(self, n):
+        neg_edges = torch.stack([
+            torch.randint(0, self.num_nodes, (n,)),
+            torch.randint(0, self.num_nodes, (n,))
+        ], dim=1)
+        src, dst = neg_edges[:, 0], neg_edges[:, 1]
+        for _ in range(10):
+            hashes = src.long() * self.num_nodes + dst.long()
+            collision = torch.isin(hashes, self.edge_set) | (src == dst)
+            if not collision.any():
+                break
+            n_bad = collision.sum().item()
+            dst[collision] = torch.randint(0, self.num_nodes, (n_bad,))
+        return neg_edges.to(self.train_config['device'])
+
+    def train(self):
+        h = self.node_feats
+        n_train = self.train_pos_edges.shape[0]
+
+        # Train features: positive + negative edges
+        train_neg = self._sample_random_negatives(n_train)
+        train_X = np.vstack([
+            self._edge_features(h, self.train_pos_edges),
+            self._edge_features(h, train_neg),
+        ])
+        train_y = np.concatenate([np.ones(n_train), np.zeros(n_train)])
+
+        # Val features
+        val_X = np.vstack([
+            self._edge_features(h, self.val_pos_edges),
+            self._edge_features(h, self.val_neg_edges),
+        ])
+        val_y = np.concatenate([
+            np.ones(self.val_pos_edges.shape[0]),
+            np.zeros(self.val_neg_edges.shape[0]),
+        ])
+
+        self.model.fit(train_X, train_y, eval_set=[(val_X, val_y)], verbose=False)
+
+        # Evaluate
+        val_probs = self.model.predict_proba(val_X)[:, 1]
+        val_pos_probs = torch.tensor(val_probs[:self.val_pos_edges.shape[0]])
+        val_neg_probs = torch.tensor(val_probs[self.val_pos_edges.shape[0]:])
+        val_score = self.eval(val_pos_probs, val_neg_probs)
+        self.best_score = val_score[self.train_config['metric']]
+
+        test_X = np.vstack([
+            self._edge_features(h, self.test_pos_edges),
+            self._edge_features(h, self.test_neg_edges),
+        ])
+        test_probs = self.model.predict_proba(test_X)[:, 1]
+        test_pos_probs = torch.tensor(test_probs[:self.test_pos_edges.shape[0]])
+        test_neg_probs = torch.tensor(test_probs[self.test_pos_edges.shape[0]:])
+        test_score = self.eval(test_pos_probs, test_neg_probs)
         return test_score

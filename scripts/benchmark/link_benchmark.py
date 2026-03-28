@@ -35,19 +35,20 @@ if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 
 from link_utils import LinkDataset, save_results
-from models.link_prediction.link_predictor import BaseGNNLinkPredictor
+from models.link_prediction.link_predictor import BaseGNNLinkPredictor, XGBGraphLinkPredictor
 from models.link_prediction.cgt_link_predictor import CompGraphLinkPredictor
 from bench_utils import (
     parse_link_args, load_cgt_synthetic_data,
     print_comparison,
 )
 from models.cross_graph_link_predictor import (
-    CrossGraphLinkPredictor, CROSS_GRAPH_LP_SUPPORTED_MODELS,
+    CrossGraphLinkPredictor, CrossGraphXGBGraphLinkPredictor,
+    CROSS_GRAPH_LP_SUPPORTED_MODELS,
 )
 
 SEED_LIST = list(range(3407, 10000, 10))
 
-SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE']
+SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph']
 
 
 def set_seed(seed=3407):
@@ -108,7 +109,10 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
                 'num_layers': num_layers,
             }
 
-            detector = BaseGNNLinkPredictor(train_config, model_config, data)
+            if model_name == 'XGBGraph':
+                detector = XGBGraphLinkPredictor(train_config, model_config, data)
+            else:
+                detector = BaseGNNLinkPredictor(train_config, model_config, data)
             st = time.time()
             test_score = detector.train()
             ed = time.time()
@@ -330,7 +334,16 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
             }
 
             print(f"  Trial {t}, seed={seed}")
-            detector = CrossGraphLinkPredictor(train_config, model_config, syn_data, orig_data)
+
+            if syn_data.val_pos_edges.shape[0] == 0:
+                print(f"  Skipping trial {t}: synthetic graph too sparse (0 val edges)")
+                del syn_data, orig_data
+                continue
+
+            if model_name == 'XGBGraph':
+                detector = CrossGraphXGBGraphLinkPredictor(train_config, model_config, syn_data, orig_data)
+            else:
+                detector = CrossGraphLinkPredictor(train_config, model_config, syn_data, orig_data)
 
             st = time.time()
             test_score = detector.train()
