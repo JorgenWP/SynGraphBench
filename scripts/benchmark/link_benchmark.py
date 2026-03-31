@@ -287,8 +287,15 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
 def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn_file_name,
                                      trials, val_ratio, test_ratio, neg_sampling,
                                      decoder, epochs, patience, lr, drop_rate,
-                                     h_feats, num_layers):
+                                     h_feats, num_layers, norm_stats_path=None):
     """Train GNNs on synthetic graph edges, validate on synthetic val, test on original test edges."""
+
+    # Load normalization stats if available
+    norm_stats = None
+    if norm_stats_path and os.path.exists(norm_stats_path):
+        norm_stats = torch.load(norm_stats_path, weights_only=False)
+        print(f"  Loaded normalization stats ({norm_stats['method']}) from {norm_stats_path}")
+
     results = []
 
     for model_name in models:
@@ -315,6 +322,14 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
             # Original graph: test edges
             orig_data = LinkDataset(dataset_name, prefix=data_dir + '/original/')
             orig_data.split(val_ratio, test_ratio, t, neg_sampling)
+
+            # Apply same normalization as was used during synthetic generation
+            if norm_stats is not None:
+                from bench_utils import apply_normalization
+                orig_data.graph.ndata['feature'] = apply_normalization(
+                    orig_data.graph.ndata['feature'], norm_stats)
+                orig_data.train_graph.ndata['feature'] = apply_normalization(
+                    orig_data.train_graph.ndata['feature'], norm_stats)
 
             train_config = {
                 'device': 'cuda' if torch.cuda.is_available() else 'cpu',
@@ -472,12 +487,14 @@ def main():
                 args.h_feats, args.num_layers)
         else:
             # Full graph (BiGG, etc.): train+val on synthetic, test on original.
+            norm_stats_path = os.path.join(task_dir, stem + '_norm_stats.pt')
             results = evaluate_link_models_cross_graph(
                 dataset_name, models, args.data_dir, task_dir, stem,
                 args.trials, args.val_ratio, args.test_ratio,
                 args.neg_sampling, args.decoder,
                 args.epochs, args.patience,
-                args.lr, args.drop_rate, args.h_feats, args.num_layers)
+                args.lr, args.drop_rate, args.h_feats, args.num_layers,
+                norm_stats_path=norm_stats_path)
         all_results.extend(results)
 
     # --- Save and display results ---

@@ -18,6 +18,7 @@ The original GADBench capability. Trains GNN-based classifiers to identify anoma
 * `GADBench/benchmark.py`: Native anomaly detection benchmark.
 * `GADBench/random_search.py`: Hyperparameter tuning.
 * `scripts/benchmark/anomaly_benchmark.py`: Project-level anomaly detection benchmark comparing original vs. synthetic data.
+* `scripts/benchmark/models/cross_graph_detector.py`: Cross-graph detectors (GNN + XGBGraph) — train on synthetic, test on original.
 * **Hyperparameters:** `CGT/args.py` or `GADBench/benchmark.py`.
 
 ---
@@ -30,8 +31,9 @@ An extension added to this project that reuses existing GNN architectures for ed
 
 * `GADBench/link_benchmark.py`: Link prediction benchmark (epochs, patience hyperparameters here).
 * `GADBench/link_utils.py`: `LinkDataset` — edge splitting, negative sampling, model registry.
-* `GADBench/models/link_prediction/link_predictor.py`: `BaseGNNLinkPredictor` — edge decoder and training loop (decoder architecture hyperparameters here).
-* `GADBench/models/link_prediction/cgt_link_predictor.py`: Placeholder for CGT-based link prediction (not yet implemented).
+* `GADBench/models/link_prediction/link_predictor.py`: `BaseGNNLinkPredictor` and `XGBGraphLinkPredictor` — edge decoder and training loop (decoder architecture hyperparameters here).
+* `GADBench/models/link_prediction/cgt_link_predictor.py`: CGT computation-graph link prediction.
+* `scripts/benchmark/models/cross_graph_link_predictor.py`: Cross-graph link predictors (GNN + XGBGraph) — train on synthetic edges, test on original edges.
 
 ### Key Design Details
 
@@ -47,3 +49,16 @@ An extension added to this project that reuses existing GNN architectures for ed
 * `mlp` — learnable scoring on Hadamard product: `Linear(h) → ReLU → Dropout → Linear(1)`. Adds capacity at the cost of extra parameters.
 
 **Metrics:** AUROC, AUPRC, and Recall@K (where K = number of positive test edges).
+
+---
+
+## Feature Normalization in Cross-Graph Evaluation
+
+When BiGG trains with feature normalization (e.g., `-normalize zscore`), the synthetic graph's features are in normalized space. The benchmarks must apply the same transform to the original graph's features before testing, otherwise the model trains on one feature distribution and tests on another.
+
+* `bigg/bigg/extension/preprocessing.py`: `normalize_features()` returns `(features, stats)` — stats dict contains the method and parameters (e.g., mean/std for zscore). `apply_normalization()` applies saved stats to new data.
+* `bigg/bigg/extension/pipeline.py`: Saves `_norm_stats.pt` alongside the synthetic graph.
+* `scripts/benchmark/bench_utils.py`: `apply_normalization()` duplicated here for benchmark imports.
+* Both anomaly and link prediction benchmarks: load stats if the `_norm_stats.pt` file exists, apply to original graph features before cross-graph evaluation. If no stats file exists (non-normalized runs), features are used as-is.
+
+This only affects the BiGG full-graph path. CGT handles its own L2 normalization internally (`build_cgt_datasets` in `bench_utils.py`).

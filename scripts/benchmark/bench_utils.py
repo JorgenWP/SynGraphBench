@@ -154,6 +154,30 @@ def parse_args():
     return parser.parse_args()
 
 
+def apply_normalization(features, stats):
+    """Apply a previously computed normalization to a feature tensor.
+
+    Parameters
+    ----------
+    features : torch.Tensor
+        Node feature matrix of shape (N, D).
+    stats : dict
+        Stats dict saved by BiGG pipeline (contains 'method' and params).
+    """
+    method = stats['method']
+
+    if method == 'zscore':
+        features = (features - stats['mean']) / stats['std']
+    elif method == 'minmax':
+        features = (features - stats['min']) / stats['denom']
+    elif method == 'row':
+        norms = features.norm(p=2, dim=1, keepdim=True)
+        norms[norms == 0] = 1.0
+        features = features / norms
+
+    return features
+
+
 def load_cgt_synthetic_data(syn_path):
     """Load CGT synthetic data from a .pt file."""
     try:

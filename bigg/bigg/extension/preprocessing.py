@@ -61,7 +61,7 @@ NORMALIZATION_METHODS = ('zscore', 'minmax', 'row')
 
 
 def normalize_features(features, method):
-    """Normalise *features* tensor in-place and return it.
+    """Normalise *features* tensor and return it together with stats.
 
     Parameters
     ----------
@@ -73,8 +73,11 @@ def normalize_features(features, method):
 
     Returns
     -------
-    torch.Tensor
-        The normalised feature tensor.
+    tuple[torch.Tensor, dict]
+        The normalised feature tensor and a stats dict that can be passed to
+        :func:`apply_normalization` to transform other data identically.
+        For ``'row'`` normalization the stats dict is empty (transform is
+        per-sample, no global stats).
     """
     if method not in NORMALIZATION_METHODS:
         raise ValueError(
@@ -82,11 +85,15 @@ def normalize_features(features, method):
             f"Choose from {NORMALIZATION_METHODS}."
         )
 
+    stats = {'method': method}
+
     if method == 'zscore':
         mean = features.mean(dim=0)
         std = features.std(dim=0)
         std[std == 0] = 1.0  # avoid division by zero for constant columns
         features = (features - mean) / std
+        stats['mean'] = mean
+        stats['std'] = std
 
     elif method == 'minmax':
         fmin = features.min(dim=0).values
@@ -94,7 +101,38 @@ def normalize_features(features, method):
         denom = fmax - fmin
         denom[denom == 0] = 1.0
         features = (features - fmin) / denom
+        stats['min'] = fmin
+        stats['denom'] = denom
 
+    elif method == 'row':
+        norms = features.norm(p=2, dim=1, keepdim=True)
+        norms[norms == 0] = 1.0
+        features = features / norms
+
+    return features, stats
+
+
+def apply_normalization(features, stats):
+    """Apply a previously computed normalization to *features*.
+
+    Parameters
+    ----------
+    features : torch.Tensor
+        Node feature matrix of shape (N, D).
+    stats : dict
+        Stats dict returned by :func:`normalize_features`.
+
+    Returns
+    -------
+    torch.Tensor
+        The normalised feature tensor.
+    """
+    method = stats['method']
+
+    if method == 'zscore':
+        features = (features - stats['mean']) / stats['std']
+    elif method == 'minmax':
+        features = (features - stats['min']) / stats['denom']
     elif method == 'row':
         norms = features.norm(p=2, dim=1, keepdim=True)
         norms[norms == 0] = 1.0

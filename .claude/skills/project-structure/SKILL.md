@@ -27,10 +27,8 @@ SynGraphBench/
 │   │   ├── bigg_benchmark.slurm    # SLURM template for BiGG evaluation
 │   │   ├── cgt_benchmark.slurm     # SLURM template for CGT evaluation
 │   │   └── models/
-│   │       ├── cross_graph_detector.py     # Train on synthetic, test on original graph
-│   │       └── link_prediction/
-│   │           ├── link_predictor.py       # Placeholder (link prediction via scripts)
-│   │           └── cgt_link_predictor.py   # Placeholder for CGT link prediction
+│   │       ├── cross_graph_detector.py         # Cross-graph anomaly (GNN + XGBGraph)
+│   │       └── cross_graph_link_predictor.py   # Cross-graph link prediction (GNN + XGBGraph)
 │   ├── pipeline/
 │   │   └── run_cgt_pipeline.slurm  # Full CGT pipeline SLURM job
 │   └── test/               # Quick test/example scripts
@@ -76,5 +74,7 @@ All synthetic outputs follow the structure `datasets/synthetic/<generative_model
 
 **Filename patterns:**
 - CGT: `{dataset}_e{epochs}_k{clusters}_d{depth}_f{fanout}.pt`
-- BiGG conditional: `blksize_{blksize}_b_{batch_size}_lr_{lr}_epochs_{epochs}`
+- BiGG conditional: `blksize_{blksize}_b_{batch}_lr_{lr}_epochs_{epochs}_noise_{noise}_ss_{ss}_norm_{method}_{bfs}_lw_{cw}_{lw}_{hetero|det}`
 - BiGG structure-only: `structure_blksize_{blksize}_lr_{lr}_epochs_{epochs}`
+
+**Normalization stats:** When BiGG trains with feature normalization, a `_norm_stats.pt` file is saved alongside the synthetic graph. This contains the normalization parameters (e.g., mean/std for zscore) needed to transform original graph features at benchmark time.

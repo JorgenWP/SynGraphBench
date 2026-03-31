@@ -290,11 +290,19 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
 
 def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn_file_name,
                                 trials, semi_supervised, trial_id,
-                                epochs, patience, lr, drop_rate, h_feats, num_layers):
+                                epochs, patience, lr, drop_rate, h_feats, num_layers,
+                                norm_stats_path=None):
     """Train GNNs on synthetic graph, validate on synthetic val, test on original test nodes."""
     from models.cross_graph_detector import (CrossGraphGNNDetector,
                                                 CrossGraphXGBGraphDetector,
                                                 CROSS_GRAPH_SUPPORTED_MODELS)
+
+    # Load normalization stats if available
+    norm_stats = None
+    if norm_stats_path and os.path.exists(norm_stats_path):
+        norm_stats = torch.load(norm_stats_path, weights_only=False)
+        print(f"  Loaded normalization stats ({norm_stats['method']}) from {norm_stats_path}")
+
     results = []
 
     for model_name in models:
@@ -321,6 +329,12 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
             # Original graph: test nodes only
             orig_data = GADBenchDataset(dataset_name, prefix=data_dir + '/')
             orig_data.split(semi_supervised, trial_id + t)
+
+            # Apply same normalization as was used during synthetic generation
+            if norm_stats is not None:
+                from bench_utils import apply_normalization
+                orig_data.graph.ndata['feature'] = apply_normalization(
+                    orig_data.graph.ndata['feature'], norm_stats)
 
             train_config = {
                 'device': 'cuda' if torch.cuda.is_available() else 'cpu',
@@ -454,11 +468,13 @@ def main():
                 semi_supervised=bool(args.semi_supervised))
         else:
             # Full graph (BiGG, etc.): train+val on synthetic, test on original.
+            norm_stats_path = os.path.join(task_dir, stem + '_norm_stats.pt')
             results = evaluate_models_cross_graph(
                 dataset_name, models, args.data_dir, task_dir, stem,
                 args.trials, args.semi_supervised, args.trial_id,
                 args.epochs, args.patience,
-                args.lr, args.drop_rate, args.h_feats, args.num_layers)
+                args.lr, args.drop_rate, args.h_feats, args.num_layers,
+                norm_stats_path=norm_stats_path)
         all_results.extend(results)
 
     # --- Save and display results ---

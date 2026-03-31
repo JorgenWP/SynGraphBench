@@ -71,8 +71,9 @@ def main():
     labels = graph.ndata['label']
 
     # Optionally normalise features
+    norm_stats = None
     if pipeline_args.normalize is not None:
-        cont_feats = normalize_features(cont_feats, pipeline_args.normalize)
+        cont_feats, norm_stats = normalize_features(cont_feats, pipeline_args.normalize)
         print(f'Applied {pipeline_args.normalize} normalisation to features')
 
     #Determine dimensions of features
@@ -246,6 +247,10 @@ def main():
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
     os.makedirs(save_dir, exist_ok=True)
     dgl.save_graphs(os.path.join(save_dir, save_name), [gen_dgl])
+
+    # Save normalization stats so benchmarks can transform the original graph
+    if norm_stats is not None:
+        torch.save(norm_stats, os.path.join(save_dir, save_name + '_norm_stats.pt'))
 
 
 if __name__ == '__main__':
