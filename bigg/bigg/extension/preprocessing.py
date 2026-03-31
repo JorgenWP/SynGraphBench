@@ -34,7 +34,8 @@ def dgl_to_networkx(graph):
 def bfs_reorder(graph_nx, node_data):
     """Reorder *graph_nx* and *node_data* by BFS from the highest-degree node.
 
-    Returns the reordered (graph_nx, node_data) tuple.
+    Returns the reordered (graph_nx, node_data, perm) tuple where *perm* is the
+    permutation tensor used for reordering (can apply to other per-node tensors).
     """
     start_node = max(graph_nx.degree(), key=lambda x: x[1])[0]
     bfs_order = list(nx.bfs_tree(graph_nx, source=start_node).nodes())
@@ -50,7 +51,7 @@ def bfs_reorder(graph_nx, node_data):
 
     print(f'Applied BFS ordering from node {start_node} '
           f'(degree {graph_nx.degree(mapping[start_node])})')
-    return graph_nx, node_data
+    return graph_nx, node_data, perm
 
 
 # ---------------------------------------------------------------------------

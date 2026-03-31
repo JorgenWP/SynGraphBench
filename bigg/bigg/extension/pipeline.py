@@ -51,6 +51,9 @@ def main():
     pipeline_parser.add_argument('--hetero_feat', action='store_true', default=False,
                                  help='Heteroscedastic feature prediction: predict mean + log-variance '
                                       'and sample at generation time (default: deterministic MSE)')
+    pipeline_parser.add_argument('--mask_test_labels', action='store_true', default=False,
+                                 help='Exclude test node labels (split 0) from label loss to prevent '
+                                      'data leakage in anomaly detection benchmarks')
 
     pipeline_args, _ = pipeline_parser.parse_known_args()
 
@@ -83,14 +86,25 @@ def main():
     node_data = torch.cat([cont_feats, labels.unsqueeze(1).float()], dim = 1).to(cmd_args.device)
     list_node_feats = [node_data]
 
+    # Build label mask: True = include in label loss (train+val nodes from split 0)
+    label_mask = None
+    if pipeline_args.mask_test_labels:
+        train_m = graph.ndata['train_masks'][:, 0].bool()
+        val_m = graph.ndata['val_masks'][:, 0].bool()
+        label_mask = (train_m | val_m).to(cmd_args.device)
+        n_masked = (~label_mask).sum().item()
+        print(f'Label masking enabled: {n_masked} test nodes excluded from label loss (split 0)')
+
     #Convert topology for treelib
     graph_nx = dgl_to_networkx(graph)
 
     # Apply fixed BFS node ordering: reorder graph and features so that
     # BFS-adjacent nodes have consecutive indices
     if pipeline_args.bfs_preprocess:
-        graph_nx, node_data = bfs_reorder(graph_nx, node_data)
+        graph_nx, node_data, perm = bfs_reorder(graph_nx, node_data)
         list_node_feats = [node_data]
+        if label_mask is not None:
+            label_mask = label_mask[perm]
 
     TreeLib.InsertGraph(graph_nx)
 
@@ -133,21 +147,17 @@ def main():
     batch_node_feats = torch.cat([list_node_feats[i] for i in indices], dim=0)
 
     with torch.no_grad():
-        if cmd_args.blksize < 0 or num_nodes <= cmd_args.blksize:
-            ll, _ = model.forward_train(indices, node_feats=batch_node_feats)
-            calib_loss = (-ll / num_nodes).item()
-        else:
-            ll, _ = sqrtn_forward_backward(model,
-                                           graph_ids=indices,
-                                           list_node_starts=[0],
-                                           num_nodes=num_nodes,
-                                           blksize=cmd_args.blksize,
-                                           loss_scale=1.0/num_nodes,
-                                           node_feats=batch_node_feats)
-            calib_loss = -ll / num_nodes
+        # Use forward_train on first chunk for calibration (sqrtn_forward_backward
+        # calls .backward() which is incompatible with no_grad context)
+        calib_num = min(num_nodes, max(cmd_args.blksize, num_nodes) if cmd_args.blksize < 0 else cmd_args.blksize)
+        calib_feats = batch_node_feats[:calib_num]
+        calib_mask = label_mask[:calib_num] if label_mask is not None else None
+        ll, _ = model.forward_train(indices, node_feats=calib_feats, num_nodes=calib_num,
+                                    label_mask=calib_mask)
+        calib_loss = (-ll / calib_num).item()
 
-    calib_cont = abs(model._ll_cont / num_nodes) or 1.0
-    calib_label = abs(model._ll_label / num_nodes) or 1.0
+    calib_cont = abs(model._ll_cont / calib_num) or 1.0
+    calib_label = abs(model._ll_label / calib_num) or 1.0
     calib_struct = abs(calib_loss - calib_cont - calib_label) or 1.0
 
     model.w_cont = (calib_struct / calib_cont) * user_w_cont
@@ -173,7 +183,7 @@ def main():
         # Gradient Checkpointing Logic
         if cmd_args.blksize < 0 or num_nodes <= cmd_args.blksize:
             # Full pass (for small graphs)
-            ll, _ = model.forward_train(indices, node_feats=batch_node_feats)
+            ll, _ = model.forward_train(indices, node_feats=batch_node_feats, label_mask=label_mask)
             loss = -ll / num_nodes
             loss.backward()
             loss_val = loss.item()
@@ -186,7 +196,8 @@ def main():
                                            num_nodes=num_nodes,
                                            blksize=cmd_args.blksize,
                                            loss_scale=1.0/num_nodes,
-                                           node_feats=batch_node_feats)
+                                           node_feats=batch_node_feats,
+                                           label_mask=label_mask)
             loss_val = -ll / num_nodes
 
         if cmd_args.grad_clip > 0:
@@ -243,7 +254,8 @@ def main():
     bfs_tag = 'bfs' if pipeline_args.bfs_preprocess else 'nobfs'
     lw_tag = pipeline_args.loss_weights.replace(',', '_')
     hetero_tag = 'hetero' if pipeline_args.hetero_feat else 'det'
-    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}'
+    mask_tag = '_masked' if pipeline_args.mask_test_labels else ''
+    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{mask_tag}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
     os.makedirs(save_dir, exist_ok=True)
     dgl.save_graphs(os.path.join(save_dir, save_name), [gen_dgl])

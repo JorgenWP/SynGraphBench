@@ -535,7 +535,7 @@ class RecurTreeGen(nn.Module):
                 edge_feats = torch.cat(pred_edge_feats, dim=0)
             return ll, summary_state, num_left + num_right, edge_feats
 
-    def forward(self, node_end, edge_list=None, node_feats=None, edge_feats=None, node_start=0, list_states=[], lb_list=None, ub_list=None, col_range=None, num_nodes=None, display=False):
+    def forward(self, node_end, edge_list=None, node_feats=None, edge_feats=None, node_start=0, list_states=[], lb_list=None, ub_list=None, col_range=None, num_nodes=None, display=False, label_mask=None):
         pos = 0
         total_ll = 0.0
         edges = []
@@ -566,7 +566,8 @@ class RecurTreeGen(nn.Module):
             controller_state = [x + cur_pos_embed for x in controller_state]
             if self.has_node_feats:
                 target_node_feats = None if node_feats is None else node_feats[[i]]
-                controller_state, ll_node, target_node_feats = self.predict_node_feats(controller_state, target_node_feats)
+                node_label_mask = None if label_mask is None else label_mask[[i]]
+                controller_state, ll_node, target_node_feats = self.predict_node_feats(controller_state, target_node_feats, label_mask=node_label_mask)
                 total_ll = total_ll + ll_node
                 list_pred_node_feats.append(target_node_feats)
             if self.has_edge_feats:
@@ -660,13 +661,14 @@ class RecurTreeGen(nn.Module):
         return row_states, next_states
 
     def forward_train(self, graph_ids, node_feats=None, edge_feats=None,
-                      list_node_starts=None, num_nodes=-1, prev_rowsum_states=[None, None], list_col_ranges=None):
+                      list_node_starts=None, num_nodes=-1, prev_rowsum_states=[None, None], list_col_ranges=None,
+                      label_mask=None):
         ll = 0.0
         hc_bot, fn_hc_bot, h_buf_list, c_buf_list = self.forward_row_trees(graph_ids, node_feats, edge_feats,
                                                                            list_node_starts, num_nodes, list_col_ranges)
         row_states, next_states = self.row_tree.forward_train(*hc_bot, h_buf_list[0], c_buf_list[0], *prev_rowsum_states)
         if self.has_node_feats:
-            row_states, ll_node_feats, _ = self.predict_node_feats(row_states, node_feats)
+            row_states, ll_node_feats, _ = self.predict_node_feats(row_states, node_feats, label_mask=label_mask)
             ll = ll + ll_node_feats
         if self.has_edge_feats:
             edge_feats_embed = self.embed_edge_feats(edge_feats)

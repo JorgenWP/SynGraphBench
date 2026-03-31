@@ -52,8 +52,9 @@ def sqrtn_forward_backward(model,
     if blksize < 0 or blksize > num_nodes:
         blksize = num_nodes
 
-    # Extract node_feats from kwargs so we can slice per chunk
+    # Extract node_feats and label_mask from kwargs so we can slice per chunk
     full_node_feats = kwargs.pop('node_feats', None)
+    full_label_mask = kwargs.pop('label_mask', None)
 
     prev_states = init_states
     cache_stages = list(range(0, num_nodes, blksize))
@@ -86,6 +87,8 @@ def sqrtn_forward_backward(model,
         chunk_kwargs = dict(kwargs)
         if full_node_feats is not None:
             chunk_kwargs['node_feats'] = full_node_feats[st_delta:st_delta + cur_num]
+        if full_label_mask is not None:
+            chunk_kwargs['label_mask'] = full_label_mask[st_delta:st_delta + cur_num]
         ll, cur_states = model.forward_train(graph_ids,
                                              list_node_starts=[node_st],
                                              num_nodes=cur_num,

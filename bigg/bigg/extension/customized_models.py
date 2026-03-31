@@ -130,11 +130,12 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
         combined_embed = torch.cat([embed_cont, embed_label], dim=-1)
         return self.combiner(combined_embed)
 
-    def predict_node_feats(self, state, node_data=None):
+    def predict_node_feats(self, state, node_data=None, label_mask=None):
         """
         Args:
             state: tuple of (h=N x embed_dim, c=N x embed_dim)
             node_data: N x (feat_dim + 1) tensor containing continuous features and labels, or None
+            label_mask: N boolean tensor — True = include in label loss (None = all)
         """
         h, c = state
 
@@ -183,7 +184,10 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
             ll_cont = torch.sum(ll_cont) / self.feat_dim
 
             # 2. Likelihood for discrete labels (Negative Cross-Entropy)
-            ll_label = -F.cross_entropy(pred_logits, target_labels, reduction='sum')
+            if label_mask is not None and not label_mask.all():
+                ll_label = -F.cross_entropy(pred_logits[label_mask], target_labels[label_mask], reduction='sum')
+            else:
+                ll_label = -F.cross_entropy(pred_logits, target_labels, reduction='sum')
 
             ll = self.w_cont * ll_cont + self.w_label * ll_label
 
@@ -253,7 +257,13 @@ class BiggWithConditionedFeats(RecurTreeGen):
         combined_embed = torch.cat([embed_cont, embed_label], dim=-1)
         return self.combiner(combined_embed)
 
-    def predict_node_feats(self, state, node_data=None):
+    def predict_node_feats(self, state, node_data=None, label_mask=None):
+        """
+        Args:
+            state: tuple of (h=N x embed_dim, c=N x embed_dim)
+            node_data: N x (feat_dim + 1) tensor containing continuous features and labels, or None
+            label_mask: N boolean tensor — True = include in label loss (None = all)
+        """
         h, c = state
 
         # Add Gaussian noise to hidden state during training to improve robustness
@@ -317,7 +327,10 @@ class BiggWithConditionedFeats(RecurTreeGen):
                 ll_cont = -(target_cont - pred_cont) ** 2
             ll_cont = torch.sum(ll_cont) / self.feat_dim
 
-            ll_label = -F.cross_entropy(pred_logits, target_labels, reduction='sum')
+            if label_mask is not None and not label_mask.all():
+                ll_label = -F.cross_entropy(pred_logits[label_mask], target_labels[label_mask], reduction='sum')
+            else:
+                ll_label = -F.cross_entropy(pred_logits, target_labels, reduction='sum')
 
             ll = self.w_cont * ll_cont + self.w_label * ll_label
 
