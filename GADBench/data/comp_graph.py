@@ -55,6 +55,34 @@ def compute_tree_adj(step_num, sample_num, self_connection=False):
     return adj
 
 
+def compute_template_edges(tree_adj):
+    """Pre-compute DGL edge arrays from the fixed tree adjacency.
+
+    Extracts child→parent edges (reversed for message passing) and adds
+    self-loops (skipped if tree_adj already contains them via
+    self_connection=True). Returns tensors that can be offset-replicated
+    per batch to avoid redundant per-sample DGL graph construction.
+
+    Returns:
+        (src, dst, num_nodes): LongTensors of edge endpoints + node count
+    """
+    n = tree_adj.shape[0]
+
+    # adj[parent][child] = 1 → reverse to child→parent for message passing
+    parent_idx, child_idx = tree_adj.nonzero(as_tuple=True)
+    src = child_idx
+    dst = parent_idx
+
+    # Add self-loops only if not already present from self_connection
+    has_self_loops = tree_adj.diagonal().any()
+    if not has_self_loops:
+        self_loops = torch.arange(n, dtype=torch.long)
+        src = torch.cat([src, self_loops])
+        dst = torch.cat([dst, self_loops])
+
+    return src, dst, n
+
+
 class OriginalCompGraphDataset(Dataset):
     """Build computation graph trees from original graph data.
 
@@ -79,8 +107,10 @@ class OriginalCompGraphDataset(Dataset):
             [features, np.zeros((1, features.shape[1]), dtype=features.dtype)])
         self.empty_id = features.shape[0]
 
-        self.tree_adj = compute_tree_adj(
+        tree_adj = compute_tree_adj(
             step_num, self.total_sample, self_connection)
+        self.template_src, self.template_dst, self.num_tree_nodes = \
+            compute_template_edges(tree_adj)
 
     def __len__(self):
         return len(self.node_ids)
@@ -121,7 +151,6 @@ class OriginalCompGraphDataset(Dataset):
 
         return {
             "feat": torch.FloatTensor(self.features[sampled]),
-            "adj": self.tree_adj,
             "label": torch.LongTensor([self.labels[seed_id]]),
         }
 
@@ -143,7 +172,9 @@ class SyntheticCompGraphDataset(Dataset):
             cluster_centers.float(),
             torch.zeros(1, cluster_centers.shape[1]),
         ], dim=0)
-        self.tree_adj = compute_tree_adj(step_num, sample_num, self_connection)
+        tree_adj = compute_tree_adj(step_num, sample_num, self_connection)
+        self.template_src, self.template_dst, self.num_tree_nodes = \
+            compute_template_edges(tree_adj)
 
     def __len__(self):
         return len(self.sequences)
@@ -154,33 +185,39 @@ class SyntheticCompGraphDataset(Dataset):
     def __getitem__(self, index):
         return {
             "feat": self.cluster_centers[self.sequences[index]],
-            "adj": self.tree_adj,
             "label": torch.LongTensor([self.labels[index]]),
         }
 
 
-def comp_graph_collate(items):
-    """Collate computation graph items into a batched DGL graph.
+def make_comp_graph_collate(template_src, template_dst, num_tree_nodes):
+    """Create a collate function using pre-computed template edges.
 
-    Converts each tree's dense adjacency to a DGL sub-graph (reversing
-    edge direction so children send messages to parents), adds self-loops,
-    and batches everything with dgl.batch().
+    Instead of building separate DGL graphs per sample then batching,
+    offsets the template edges for each sample and constructs a single
+    DGL graph for the whole batch.
     """
-    graphs = []
-    labels = []
+    num_edges = len(template_src)
 
-    for item in items:
-        feat = item['feat']
-        adj = item['adj']
-        # adj[parent][child] = 1 → reverse to child→parent for DGL
-        parent_idx, child_idx = adj.nonzero(as_tuple=True)
-        g = dgl.graph((child_idx, parent_idx), num_nodes=feat.shape[0])
-        g = dgl.add_self_loop(g)
-        g.ndata['feature'] = feat
-        graphs.append(g)
-        labels.append(item['label'])
+    def collate(items):
+        B = len(items)
+        all_feats = torch.cat([item['feat'] for item in items], dim=0)
+        all_labels = torch.cat([item['label'] for item in items])
 
-    return dgl.batch(graphs), torch.cat(labels)
+        # Offset template edges for each sample in the batch
+        offsets = torch.arange(B, dtype=torch.long) * num_tree_nodes
+        src = (template_src.unsqueeze(0) + offsets.unsqueeze(1)).reshape(-1)
+        dst = (template_dst.unsqueeze(0) + offsets.unsqueeze(1)).reshape(-1)
+
+        g = dgl.graph((src, dst), num_nodes=B * num_tree_nodes)
+        g.ndata['feature'] = all_feats
+        g.set_batch_num_nodes(
+            torch.full((B,), num_tree_nodes, dtype=torch.long))
+        g.set_batch_num_edges(
+            torch.full((B,), num_edges, dtype=torch.long))
+
+        return g, all_labels
+
+    return collate
 
 
 def extract_root_logits(batched_graph, all_logits):

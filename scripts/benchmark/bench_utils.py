@@ -338,7 +338,7 @@ def build_cgt_datasets(original_graph, syn_data):
 
     print(f"  CG datasets: syn_train={len(syn_train)}, syn_val={len(syn_val)}, "
           f"test={len(test_ds)} | "
-          f"tree_nodes={test_ds.tree_adj.shape[0]} "
+          f"tree_nodes={test_ds.num_tree_nodes} "
           f"(step={step_num}, sample={sample_num}, noise={noise_num})")
 
     return syn_train, syn_val, test_ds
@@ -384,7 +384,7 @@ def build_original_cg_datasets(original_graph, syn_data,
 
     print(f"  Original CG datasets: train={len(train_ds)}, val={len(val_ds)}, "
           f"test={len(test_ds)} | "
-          f"tree_nodes={test_ds.tree_adj.shape[0]} "
+          f"tree_nodes={test_ds.num_tree_nodes} "
           f"(step={step_num}, sample={sample_num}, noise={noise_num})")
 
     return train_ds, val_ds, test_ds

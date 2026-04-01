@@ -13,7 +13,8 @@ import dgl
 from torch.utils.data import DataLoader
 
 from data.comp_graph import (
-    OriginalCompGraphDataset, comp_graph_collate,
+    OriginalCompGraphDataset, make_comp_graph_collate,
+    compute_template_edges, compute_tree_adj,
     extract_root_logits, dgl_to_adj_list,
 )
 from models.link_prediction.link_predictor import BaseDetector, MLPDecoder
@@ -65,15 +66,22 @@ class CompGraphLinkPredictor(BaseDetector):
         self.features = data.graph.ndata['feature'].cpu().numpy()
         self.dummy_labels = np.zeros(self.num_nodes, dtype=np.int64)
 
+        # Pre-compute template edges for comp graph collation
+        tree_adj = compute_tree_adj(self.step_num, self.sample_num)
+        self.template_src, self.template_dst, self.num_tree_nodes = \
+            compute_template_edges(tree_adj)
+
     def _compute_all_embeddings(self):
         """Compute embeddings for all nodes via batched computation graph trees."""
         all_node_ids = np.arange(self.num_nodes)
         dataset = OriginalCompGraphDataset(
             self.train_adj_list, self.features, self.dummy_labels,
             all_node_ids, self.step_num, self.sample_num)
+        collate_fn = make_comp_graph_collate(
+            self.template_src, self.template_dst, self.num_tree_nodes)
         loader = DataLoader(
             dataset, batch_size=self.batch_size, shuffle=False,
-            collate_fn=comp_graph_collate, num_workers=0)
+            collate_fn=collate_fn, num_workers=0)
 
         all_embs = []
         for batched_g, _ in loader:

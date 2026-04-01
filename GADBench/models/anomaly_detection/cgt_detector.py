@@ -12,7 +12,7 @@ import numpy as np
 from torch.utils.data import DataLoader
 from sklearn.metrics import roc_auc_score, average_precision_score
 
-from data.comp_graph import comp_graph_collate, extract_root_logits
+from data.comp_graph import make_comp_graph_collate, extract_root_logits
 
 # GNN models that support computation graph mode
 CG_SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE']
@@ -33,18 +33,18 @@ class CompGraphDetector:
         self.device = train_config['device']
 
         batch_size = train_config.get('batch_size', 256)
-        loader_kw = dict(
-            batch_size=batch_size,
-            num_workers=0,
-            collate_fn=comp_graph_collate,
-            drop_last=False,
-        )
-        self.train_loader = DataLoader(
-            train_dataset, shuffle=True, **loader_kw)
-        self.val_loader = DataLoader(
-            val_dataset, shuffle=False, **loader_kw)
-        self.test_loader = DataLoader(
-            test_dataset, shuffle=False, **loader_kw)
+
+        def _make_loader(dataset, shuffle):
+            collate_fn = make_comp_graph_collate(
+                dataset.template_src, dataset.template_dst,
+                dataset.num_tree_nodes)
+            return DataLoader(
+                dataset, batch_size=batch_size, num_workers=0,
+                collate_fn=collate_fn, drop_last=False, shuffle=shuffle)
+
+        self.train_loader = _make_loader(train_dataset, shuffle=True)
+        self.val_loader = _make_loader(val_dataset, shuffle=False)
+        self.test_loader = _make_loader(test_dataset, shuffle=False)
 
         # Class weight for imbalanced anomaly detection
         train_labels = np.asarray(train_dataset.get_labels())
