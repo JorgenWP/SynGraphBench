@@ -22,6 +22,7 @@ from bigg.extension.preprocessing import (
     bfs_reorder,
     normalize_features,
     build_generated_dgl,
+    partition_graph_bfs,
     NORMALIZATION_METHODS,
 )
 
@@ -54,6 +55,14 @@ def main():
     pipeline_parser.add_argument('--mask_test_labels', action='store_true', default=False,
                                  help='Exclude test node labels (split 0) from label loss to prevent '
                                       'data leakage in anomaly detection benchmarks')
+    pipeline_parser.add_argument('--subsample', action='store_true', default=False,
+                                 help='Partition graph into BFS subgraphs for VRAM-limited training')
+    pipeline_parser.add_argument('-subsample_size', type=int, default=2000,
+                                 help='Target number of nodes per subgraph (default: 2000)')
+    pipeline_parser.add_argument('-subsample_k', type=int, default=10,
+                                 help='Max neighbors added per BFS step — controls edge density (default: 10)')
+    pipeline_parser.add_argument('-num_subgraphs', type=int, default=None,
+                                 help='Number of subgraphs to generate. Default: ceil(N / subsample_size)')
 
     pipeline_args, _ = pipeline_parser.parse_known_args()
 
@@ -98,18 +107,43 @@ def main():
     #Convert topology for treelib
     graph_nx = dgl_to_networkx(graph)
 
-    # Apply fixed BFS node ordering: reorder graph and features so that
-    # BFS-adjacent nodes have consecutive indices
-    if pipeline_args.bfs_preprocess:
-        graph_nx, node_data, perm = bfs_reorder(graph_nx, node_data)
-        list_node_feats = [node_data]
-        if label_mask is not None:
-            label_mask = label_mask[perm]
+    # --- Build list of (gid, sub_node_data, sub_label_mask, sub_num_nodes) ---
+    # When subsampling is disabled this list has a single entry for the full graph.
+    if pipeline_args.subsample:
+        import math
+        n_total = graph_nx.number_of_nodes()
+        num_subgraphs = pipeline_args.num_subgraphs or math.ceil(n_total / pipeline_args.subsample_size)
+        print(f'Subsampling enabled: {num_subgraphs} subgraphs, '
+              f'target_size={pipeline_args.subsample_size}, k={pipeline_args.subsample_k}')
+        raw_partitions = partition_graph_bfs(
+            graph_nx, node_data,
+            target_size=pipeline_args.subsample_size,
+            max_neighbors=pipeline_args.subsample_k,
+        )
+        # Trim or keep only the requested number of subgraphs
+        raw_partitions = raw_partitions[:num_subgraphs]
+        print(f'  Produced {len(raw_partitions)} partitions '
+              f'(sizes: {[sg.number_of_nodes() for sg, _, _ in raw_partitions]})')
 
-    TreeLib.InsertGraph(graph_nx)
+        subgraphs = []  # list of (gid, sub_node_data, sub_label_mask, sub_num_nodes)
+        for sg, sub_nd, orig_idx in raw_partitions:
+            if pipeline_args.bfs_preprocess:
+                sg, sub_nd, _ = bfs_reorder(sg, sub_nd)
+            sub_lm = label_mask[orig_idx] if label_mask is not None else None
+            gid = TreeLib.InsertGraph(sg)
+            subgraphs.append((gid, sub_nd.to(cmd_args.device), sub_lm, sg.number_of_nodes()))
+    else:
+        # Single full graph
+        if pipeline_args.bfs_preprocess:
+            graph_nx, node_data, perm = bfs_reorder(graph_nx, node_data)
+            list_node_feats = [node_data]
+            if label_mask is not None:
+                label_mask = label_mask[perm]
+        TreeLib.InsertGraph(graph_nx)
+        subgraphs = [(0, node_data, label_mask, graph_nx.number_of_nodes())]
 
     cmd_args.has_node_feats = True
-    cmd_args.max_num_nodes = graph_nx.number_of_nodes()
+    cmd_args.max_num_nodes = max(sub_num_nodes for _, _, _, sub_num_nodes in subgraphs)
 
     if pipeline_args.model_type == 'conditional':
         model = BiggWithConditionedFeats(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
@@ -126,9 +160,6 @@ def main():
 
     model.train()
 
-    indices = [0]
-    num_nodes = graph_nx.number_of_nodes()
-
     ss_max_prob = pipeline_args.ss_max_prob
     ss_start_epoch = pipeline_args.ss_start_epoch
     ss_ramp_epochs = max(cmd_args.num_epochs - ss_start_epoch, 1)
@@ -141,19 +172,19 @@ def main():
     if gpu_available:
         torch.cuda.reset_peak_memory_stats()
 
-    # Calibration: forward-only pass to capture loss magnitudes for dynamic normalization
+    # Calibration: forward-only pass on first subgraph to capture loss magnitudes
     print('Calibration pass (no weight update)...')
     model.reset_loss_trackers()
-    batch_node_feats = torch.cat([list_node_feats[i] for i in indices], dim=0)
-
+    calib_gid, calib_nd, calib_lm, calib_total = subgraphs[0]
     with torch.no_grad():
-        # Use forward_train on first chunk for calibration (sqrtn_forward_backward
-        # calls .backward() which is incompatible with no_grad context)
-        calib_num = min(num_nodes, max(cmd_args.blksize, num_nodes) if cmd_args.blksize < 0 else cmd_args.blksize)
-        calib_feats = batch_node_feats[:calib_num]
-        calib_mask = label_mask[:calib_num] if label_mask is not None else None
-        ll, _ = model.forward_train(indices, node_feats=calib_feats, num_nodes=calib_num,
-                                    label_mask=calib_mask)
+        # Use forward_train on first chunk (sqrtn_forward_backward calls .backward(),
+        # incompatible with no_grad context)
+        calib_num = min(calib_total,
+                        calib_total if cmd_args.blksize < 0 else cmd_args.blksize)
+        ll, _ = model.forward_train([calib_gid],
+                                    node_feats=calib_nd[:calib_num],
+                                    num_nodes=calib_num,
+                                    label_mask=calib_lm[:calib_num] if calib_lm is not None else None)
         calib_loss = (-ll / calib_num).item()
 
     calib_cont = abs(model._ll_cont / calib_num) or 1.0
@@ -168,7 +199,7 @@ def main():
     print(f'Dynamic weights — w_cont: {model.w_cont:.4f}, w_label: {model.w_label:.4f}')
 
     pbar = tqdm(range(cmd_args.num_epochs))
-    print(f'Start learn (loss weights relative to struct: cont={user_w_cont}, label={user_w_label})')
+    print(f'Start learn ({len(subgraphs)} subgraph(s), loss weights relative to struct: cont={user_w_cont}, label={user_w_label})')
     for epoch in pbar:
         # Anneal scheduled sampling probability linearly from 0 to ss_max_prob
         if epoch < ss_start_epoch or ss_max_prob <= 0:
@@ -176,39 +207,47 @@ def main():
         else:
             model.ss_prob = ss_max_prob * (epoch - ss_start_epoch) / ss_ramp_epochs
 
-        optimizer.zero_grad()
-        model.reset_loss_trackers()
-        batch_node_feats = torch.cat([list_node_feats[i] for i in indices], dim=0)
+        epoch_loss_val = 0.0
+        epoch_ll_cont = 0.0
+        epoch_ll_label = 0.0
+        epoch_nodes = 0
 
-        # Gradient Checkpointing Logic
-        if cmd_args.blksize < 0 or num_nodes <= cmd_args.blksize:
-            # Full pass (for small graphs)
-            ll, _ = model.forward_train(indices, node_feats=batch_node_feats, label_mask=label_mask)
-            loss = -ll / num_nodes
-            loss.backward()
-            loss_val = loss.item()
-        else:
-            # Chunked pass (for large graphs like Tolokers)
-            # This calls .backward() internally for each chunk to save VRAM
-            ll, _ = sqrtn_forward_backward(model,
-                                           graph_ids=indices,
-                                           list_node_starts=[0],
-                                           num_nodes=num_nodes,
-                                           blksize=cmd_args.blksize,
-                                           loss_scale=1.0/num_nodes,
-                                           node_feats=batch_node_feats,
-                                           label_mask=label_mask)
-            loss_val = -ll / num_nodes
+        for gid, sub_nd, sub_lm, sub_num_nodes in subgraphs:
+            optimizer.zero_grad()
+            model.reset_loss_trackers()
 
-        if cmd_args.grad_clip > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cmd_args.grad_clip)
+            if cmd_args.blksize < 0 or sub_num_nodes <= cmd_args.blksize:
+                # Full pass
+                ll, _ = model.forward_train([gid], node_feats=sub_nd, label_mask=sub_lm)
+                loss = -ll / sub_num_nodes
+                loss.backward()
+                sg_loss_val = loss.item()
+            else:
+                # Chunked pass
+                ll, _ = sqrtn_forward_backward(model,
+                                               graph_ids=[gid],
+                                               list_node_starts=[0],
+                                               num_nodes=sub_num_nodes,
+                                               blksize=cmd_args.blksize,
+                                               loss_scale=1.0/sub_num_nodes,
+                                               node_feats=sub_nd,
+                                               label_mask=sub_lm)
+                sg_loss_val = -ll / sub_num_nodes
 
-        optimizer.step()
+            if cmd_args.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cmd_args.grad_clip)
+            optimizer.step()
 
-        # Compute per-node component losses (unweighted, for monitoring)
-        ll_cont_val = -model._ll_cont / num_nodes
-        ll_label_val = -model._ll_label / num_nodes
-        ll_struct_val = loss_val - ll_cont_val - ll_label_val
+            epoch_loss_val += sg_loss_val
+            epoch_ll_cont  += model._ll_cont
+            epoch_ll_label += model._ll_label
+            epoch_nodes    += sub_num_nodes
+
+        # Epoch-level monitoring (averaged across subgraphs)
+        avg_loss    = epoch_loss_val / len(subgraphs)
+        ll_cont_val  = -epoch_ll_cont  / epoch_nodes
+        ll_label_val = -epoch_ll_label / epoch_nodes
+        ll_struct_val = avg_loss - ll_cont_val - ll_label_val
 
         # Track memory usage
         ram_mb = process.memory_info().rss / 1024 ** 2
@@ -218,7 +257,7 @@ def main():
             peak_vram_mb = max(peak_vram_mb, vram_mb)
 
         pbar.set_description(
-            f"Loss: {loss_val:.4f} | struct: {ll_struct_val:.4f} | cont: {ll_cont_val:.4f} | label: {ll_label_val:.4f}"
+            f"Loss: {avg_loss:.4f} | struct: {ll_struct_val:.4f} | cont: {ll_cont_val:.4f} | label: {ll_label_val:.4f}"
         )
 
     print(f'\n=== Memory usage (training) ===')
@@ -226,43 +265,68 @@ def main():
     if gpu_available:
         print(f'Peak VRAM: {peak_vram_mb:.1f} MB')
 
-    model.eval()
-    print('Start generate')
-    with torch.no_grad():
-        target_num_nodes = graph_nx.number_of_nodes()
-
-        #Generating graph
-        _, pred_edges, _, pred_node_feats, _ = model(
-            target_num_nodes, display=True
-        )
-
-    gen_cont_feats = pred_node_feats[:, :feat_dim]
-    gen_labels = pred_node_feats[:, feat_dim:]
-
-    # Build DGL graph with masks
-    gen_nx = nx.Graph()
-    gen_nx.add_nodes_from(range(target_num_nodes))
-    for edge in pred_edges:
-        gen_nx.add_edge(edge[0], edge[1])
-
-    gen_dgl = build_generated_dgl(gen_nx, graph,
-                                  features=gen_cont_feats,
-                                  labels=gen_labels)
-
-    # Save generated graph
+    # Build save name and directory
     norm_tag = pipeline_args.normalize if pipeline_args.normalize is not None else 'none'
     bfs_tag = 'bfs' if pipeline_args.bfs_preprocess else 'nobfs'
     lw_tag = pipeline_args.loss_weights.replace(',', '_')
     hetero_tag = 'hetero' if pipeline_args.hetero_feat else 'det'
     mask_tag = '_masked' if pipeline_args.mask_test_labels else ''
-    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{mask_tag}'
+    sub_tag = f'_sub{len(subgraphs)}_size{pipeline_args.subsample_size}_k{pipeline_args.subsample_k}' if pipeline_args.subsample else ''
+    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{mask_tag}{sub_tag}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
-    os.makedirs(save_dir, exist_ok=True)
-    dgl.save_graphs(os.path.join(save_dir, save_name), [gen_dgl])
 
-    # Save normalization stats so benchmarks can transform the original graph
-    if norm_stats is not None:
-        torch.save(norm_stats, os.path.join(save_dir, save_name + '_norm_stats.pt'))
+    model.eval()
+    print('Start generate')
+
+    if pipeline_args.subsample:
+        # Generate one synthetic subgraph per training subgraph, save to a directory
+        out_dir = os.path.join(save_dir, save_name)
+        os.makedirs(out_dir, exist_ok=True)
+
+        with torch.no_grad():
+            for i, (_, _, _, sub_num_nodes) in enumerate(subgraphs):
+                _, pred_edges, _, pred_node_feats, _ = model(sub_num_nodes, display=(i == 0))
+
+                gen_cont_feats = pred_node_feats[:, :feat_dim]
+                gen_labels = pred_node_feats[:, feat_dim:]
+
+                gen_nx = nx.Graph()
+                gen_nx.add_nodes_from(range(sub_num_nodes))
+                for edge in pred_edges:
+                    gen_nx.add_edge(edge[0], edge[1])
+
+                gen_dgl = build_generated_dgl(gen_nx, graph,
+                                              features=gen_cont_feats,
+                                              labels=gen_labels)
+                dgl.save_graphs(os.path.join(out_dir, f'subgraph_{i}'), [gen_dgl])
+                print(f'  Saved subgraph {i} ({sub_num_nodes} nodes)')
+
+        if norm_stats is not None:
+            torch.save(norm_stats, os.path.join(out_dir, 'norm_stats.pt'))
+
+    else:
+        # Single full graph — original code path
+        with torch.no_grad():
+            target_num_nodes = graph_nx.number_of_nodes()
+            _, pred_edges, _, pred_node_feats, _ = model(target_num_nodes, display=True)
+
+        gen_cont_feats = pred_node_feats[:, :feat_dim]
+        gen_labels = pred_node_feats[:, feat_dim:]
+
+        gen_nx = nx.Graph()
+        gen_nx.add_nodes_from(range(target_num_nodes))
+        for edge in pred_edges:
+            gen_nx.add_edge(edge[0], edge[1])
+
+        gen_dgl = build_generated_dgl(gen_nx, graph,
+                                      features=gen_cont_feats,
+                                      labels=gen_labels)
+
+        os.makedirs(save_dir, exist_ok=True)
+        dgl.save_graphs(os.path.join(save_dir, save_name), [gen_dgl])
+
+        if norm_stats is not None:
+            torch.save(norm_stats, os.path.join(save_dir, save_name + '_norm_stats.pt'))
 
 
 if __name__ == '__main__':

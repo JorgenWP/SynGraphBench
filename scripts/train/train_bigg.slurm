@@ -45,6 +45,10 @@ NORMALIZE=none          # "zscore", "minmax", "row", or "none"
 LOSS_WEIGHTS="1,1"      # cont,label weights relative to struct (applied after dynamic normalization)
 HETERO_FEAT=false       # "true" for heteroscedastic feature prediction (mean + variance), "false" for deterministic MSE
 MASK_TEST_LABELS=false  # "true" to exclude test node labels (split 0) from label loss
+SUBSAMPLE=true         # "true" to partition graph into BFS subgraphs for VRAM-limited training
+SUBSAMPLE_SIZE=2000     # target number of nodes per subgraph
+SUBSAMPLE_K=10          # max neighbors per BFS step (controls edge density)
+NUM_SUBGRAPHS="3"        # number of subgraphs (leave empty for auto = ceil(N / subsample_size))
 
 # Run the BiGG training and generation script
-bash scripts/train/train_bigg.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS"
+bash scripts/train/train_bigg.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$SUBSAMPLE" "$SUBSAMPLE_SIZE" "$SUBSAMPLE_K" "$NUM_SUBGRAPHS"
