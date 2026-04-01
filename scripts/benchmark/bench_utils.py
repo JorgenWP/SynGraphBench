@@ -264,10 +264,10 @@ def print_comparison(all_results, datasets, models):
 
     for dataset in datasets:
         print(f"\n  Dataset: {dataset}")
-        header = (f"  {'Model':<14} {'Source':<16} "
-                  f"{'AUROC':>18} {'AUPRC':>18} {'RecK':>18}")
+        header = (f"  {'Model':<14} {'Source':<24} "
+                  f"{'AUROC':>15} {'AUPRC':>15} {'RecK':>15}")
         print(header)
-        print(f"  {'-' * 82}")
+        print(f"  {'-' * 86}")
 
         for model in models:
             for source in sources:
@@ -277,10 +277,11 @@ def print_comparison(all_results, datasets, models):
                            and r['model'] == model]
                 if matches:
                     r = matches[0]
-                    print(f"  {model:<14} {source:<16} "
-                          f"{r['AUROC_mean']:.4f}\u00b1{r['AUROC_std']:.4f}   "
-                          f"{r['AUPRC_mean']:.4f}\u00b1{r['AUPRC_std']:.4f}   "
-                          f"{r['RecK_mean']:.4f}\u00b1{r['RecK_std']:.4f}")
+                    auroc = f"{r['AUROC_mean']:.4f}\u00b1{r['AUROC_std']:.4f}"
+                    auprc = f"{r['AUPRC_mean']:.4f}\u00b1{r['AUPRC_std']:.4f}"
+                    reck = f"{r['RecK_mean']:.4f}\u00b1{r['RecK_std']:.4f}"
+                    print(f"  {model:<14} {source:<24} "
+                          f"{auroc:>15} {auprc:>15} {reck:>15}")
             print()
 
 
