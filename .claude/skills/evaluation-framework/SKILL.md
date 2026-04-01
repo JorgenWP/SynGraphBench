@@ -20,6 +20,7 @@ The original GADBench capability. Trains GNN-based classifiers to identify anoma
 * `scripts/benchmark/anomaly_benchmark.py`: Project-level anomaly detection benchmark comparing original vs. synthetic data.
 * `scripts/benchmark/models/cross_graph_detector.py`: Cross-graph detectors (GNN + XGBGraph) — train on synthetic, test on original.
 * **Hyperparameters:** `CGT/args.py` or `GADBench/benchmark.py`.
+* **Label leakage prevention:** BiGG's `--mask_test_labels` flag excludes test node labels (split 0) from label loss during training. Without this, BiGG can memorize test labels, artificially inflating anomaly detection scores when synthetic-trained GNNs are tested on original test nodes.
 
 ---
 

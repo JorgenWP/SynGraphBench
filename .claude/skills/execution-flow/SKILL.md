@@ -53,13 +53,16 @@ bash scripts/benchmark/run_link_benchmark.sh tolokers GCN,GIN 1 bigg random mlp 
 
 ### Training
 
-**`bash scripts/train/train_bigg.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch]`**
-Train BiGG conditional model (features + labels). Defaults: `tolokers 1024 1 50 0.001 256 0.0 0.0 0`.
-* `noise_std`: Gaussian noise std added to node features during training (0.0 = disabled).
+**`bash scripts/train/train_bigg.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels]`**
+Train BiGG conditional model (features + labels). Defaults: `tolokers 1024 1 50 0.001 256 0.0 0.0 0 False none 1,1 false false`.
+* `noise_std`: Gaussian noise std added to hidden state during training (0.0 = disabled).
 * `ss_max_prob`: Max scheduled-sampling probability (0.0 = disabled; uses teacher forcing only).
 * `ss_start_epoch`: Epoch at which scheduled sampling begins ramping up.
-
-Checkpoints saved to `checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}`.
+* `bfs_preprocess`: Apply fixed BFS node ordering before training (`True`/`False`).
+* `normalize`: Feature normalisation method (`zscore`, `minmax`, `row`, or `none`).
+* `loss_weights`: Comma-separated cont,label weights relative to struct (e.g., `0.1,0.1`).
+* `hetero_feat`: `true` for heteroscedastic feature prediction (mean + variance).
+* `mask_test_labels`: `true` to exclude test node labels (split 0) from label loss, preventing data leakage in anomaly benchmarks. Appends `_masked` to save name.
 
 **`bash scripts/train/train_bigg_structure.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim]`**
 Train BiGG structure-only baseline. Defaults: `tolokers 128 1 100 0.001 256`.
