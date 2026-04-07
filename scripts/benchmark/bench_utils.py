@@ -178,6 +178,39 @@ def apply_normalization(features, stats):
     return features
 
 
+def load_bigg_synthetic_graph(path):
+    """Load a BiGG-generated DGL graph from *path*.
+
+    *path* may be either:
+    - A file path: loaded directly as a single DGL graph.
+    - A directory (subsampled run): all ``subgraph_*`` files are loaded and
+      combined into one block-diagonal graph via ``dgl.batch()``.
+
+    Also returns the norm_stats dict (or None) located alongside the graph.
+    """
+    if os.path.isdir(path):
+        subgraph_files = sorted(
+            f for f in os.listdir(path) if f.startswith('subgraph_')
+        )
+        if not subgraph_files:
+            raise FileNotFoundError(f'No subgraph_* files found in {path}')
+        graphs = []
+        for fname in subgraph_files:
+            gs, _ = dgl.load_graphs(os.path.join(path, fname))
+            graphs.append(gs[0])
+        combined = dgl.batch(graphs)
+        stats_path = os.path.join(path, 'norm_stats.pt')
+        norm_stats = torch.load(stats_path, weights_only=False) if os.path.exists(stats_path) else None
+        print(f'  Loaded {len(graphs)} subgraphs → combined: '
+              f'{combined.num_nodes()} nodes, {combined.num_edges()} edges')
+        return combined, norm_stats
+    else:
+        graphs, _ = dgl.load_graphs(path)
+        stats_path = path + '_norm_stats.pt'
+        norm_stats = torch.load(stats_path, weights_only=False) if os.path.exists(stats_path) else None
+        return graphs[0], norm_stats
+
+
 def load_cgt_synthetic_data(syn_path):
     """Load CGT synthetic data from a .pt file."""
     try:

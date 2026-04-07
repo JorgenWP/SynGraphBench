@@ -5,6 +5,9 @@ post-processing graphs so that the pipeline scripts stay focused on
 training and generation.
 """
 
+import random
+from collections import deque
+
 import dgl
 import torch
 import networkx as nx
@@ -52,6 +55,124 @@ def bfs_reorder(graph_nx, node_data):
     print(f'Applied BFS ordering from node {start_node} '
           f'(degree {graph_nx.degree(mapping[start_node])})')
     return graph_nx, node_data, perm
+
+
+# ---------------------------------------------------------------------------
+# BFS subsampling
+# ---------------------------------------------------------------------------
+
+def bfs_subsample(graph_nx, node_data, target_size, max_neighbors, seed_node=None):
+    """Sample a connected subgraph via BFS with a per-node neighbor cap.
+
+    Starting from *seed_node* (random if None), expands outward via BFS.
+    At each node, at most *max_neighbors* unvisited neighbors are randomly
+    selected and enqueued. Stops once *target_size* nodes are collected.
+
+    Parameters
+    ----------
+    graph_nx : nx.Graph
+        Source graph. Nodes must be integers 0..N-1.
+    node_data : torch.Tensor
+        Per-node feature/label tensor of shape (N, D).
+    target_size : int
+        Maximum number of nodes to collect.
+    max_neighbors : int
+        Maximum neighbors to enqueue from each BFS node.
+    seed_node : int or None
+        Starting node. Chosen uniformly at random if None.
+
+    Returns
+    -------
+    sub_graph_nx : nx.Graph
+        Induced subgraph with nodes reindexed 0..n-1 in BFS-visit order.
+    sub_node_data : torch.Tensor
+        Node data rows corresponding to the sampled nodes.
+    original_indices : torch.Tensor
+        1-D tensor of original node IDs in BFS-visit order.
+    """
+    nodes = list(graph_nx.nodes())
+    if seed_node is None:
+        seed_node = random.choice(nodes)
+
+    visited = [seed_node]
+    visited_set = {seed_node}
+    queue = deque([seed_node])
+
+    while queue and len(visited) < target_size:
+        node = queue.popleft()
+        neighbors = [n for n in graph_nx.neighbors(node) if n not in visited_set]
+        remaining = target_size - len(visited)
+        if len(neighbors) > max_neighbors:
+            neighbors = random.sample(neighbors, min(max_neighbors, remaining))
+        else:
+            neighbors = neighbors[:remaining]
+        for n in neighbors:
+            visited_set.add(n)
+            visited.append(n)
+            queue.append(n)
+
+    # Induced subgraph reindexed 0..n-1
+    subgraph = graph_nx.subgraph(visited).copy()
+    mapping = {old: new for new, old in enumerate(visited)}
+    subgraph = nx.relabel_nodes(subgraph, mapping)
+
+    original_indices = torch.tensor(visited, dtype=torch.long)
+    sub_node_data = node_data[original_indices]
+
+    return subgraph, sub_node_data, original_indices
+
+
+def partition_graph_bfs(graph_nx, node_data, target_size, max_neighbors):
+    """Exhaustively partition *graph_nx* into non-overlapping BFS subgraphs.
+
+    Every node in the original graph appears in exactly one subgraph.
+    Subgraphs are formed by successive BFS expansions from random unvisited
+    seeds. The final partition may contain a smaller residual subgraph if
+    the node count is not evenly divisible by *target_size*.
+
+    Parameters
+    ----------
+    graph_nx : nx.Graph
+        Source graph.
+    node_data : torch.Tensor
+        Per-node feature/label tensor of shape (N, D).
+    target_size : int
+        Target number of nodes per subgraph.
+    max_neighbors : int
+        Per-node BFS neighbor cap (controls edge density).
+
+    Returns
+    -------
+    list of (sub_graph_nx, sub_node_data, original_indices)
+        One tuple per subgraph, in sampling order.
+    """
+    min_size = max(2, target_size // 4)
+
+    unvisited = set(graph_nx.nodes())
+    partitions = []
+    n_skipped = 0
+
+    while unvisited:
+        seed = random.choice(list(unvisited))
+        sub_view = graph_nx.subgraph(unvisited)
+        sg, sub_nd, orig_idx = bfs_subsample(
+            sub_view, node_data, target_size, max_neighbors, seed_node=seed
+        )
+        collected = set(orig_idx.tolist())
+        unvisited -= collected
+
+        if len(collected) >= min_size:
+            partitions.append((sg, sub_nd, orig_idx))
+        else:
+            # Node(s) are stranded — all their neighbours consumed by earlier
+            # partitions. They can't form a meaningful subgraph, so skip them.
+            n_skipped += len(collected)
+
+    if n_skipped:
+        print(f'  Skipped {n_skipped} stranded node(s) '
+              f'(neighborhood fully consumed by other partitions)')
+
+    return partitions
 
 
 # ---------------------------------------------------------------------------
@@ -147,19 +268,27 @@ def apply_normalization(features, stats):
 # ---------------------------------------------------------------------------
 
 def create_split_masks(original_graph, num_nodes):
-    """Create random train/val/test masks matching the split sizes of *original_graph*.
+    """Create random train/val/test masks matching the split ratios of *original_graph*.
+
+    Uses proportions rather than absolute counts so that subgraphs smaller than
+    the original graph receive the correct fraction of train/val nodes.
 
     Returns (train_masks, val_masks, test_masks) each of shape (num_nodes, num_splits).
     """
     num_splits = original_graph.ndata['train_masks'].shape[1]
+    orig_n = original_graph.num_nodes()
 
     train_masks = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
     val_masks   = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
     test_masks  = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
 
     for col in range(num_splits):
-        n_train = int(original_graph.ndata['train_masks'][:, col].sum().item())
-        n_val   = int(original_graph.ndata['val_masks'][:, col].sum().item())
+        train_frac = original_graph.ndata['train_masks'][:, col].sum().item() / orig_n
+        val_frac   = original_graph.ndata['val_masks'][:, col].sum().item()   / orig_n
+        n_train = max(1, round(train_frac * num_nodes))
+        n_val   = max(1, round(val_frac   * num_nodes))
+        if n_train + n_val > num_nodes:
+            n_val = num_nodes - n_train
         perm = torch.randperm(num_nodes)
         train_masks[perm[:n_train],              col] = 1
         val_masks  [perm[n_train:n_train+n_val], col] = 1
@@ -183,7 +312,7 @@ def build_generated_dgl(gen_nx, original_graph, features=None, labels=None):
         gen_dgl.ndata['feature'] = torch.zeros(num_nodes, feat_dim)
 
     if labels is not None:
-        gen_dgl.ndata['label'] = labels.squeeze().long().cpu()
+        gen_dgl.ndata['label'] = labels.reshape(-1).long().cpu()
     else:
         gen_dgl.ndata['label'] = torch.zeros(num_nodes, dtype=torch.long)
 

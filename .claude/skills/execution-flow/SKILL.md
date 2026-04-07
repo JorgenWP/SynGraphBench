@@ -32,8 +32,11 @@ Examples:
 # CGT on reddit, 3 trials
 bash scripts/benchmark/run_anomaly_benchmark.sh reddit GCN,GIN 3 cgt
 
-# BiGG on tolokers
+# BiGG on tolokers (single graph)
 bash scripts/benchmark/run_anomaly_benchmark.sh tolokers GCN,GIN 1 bigg blksize_1024_b_1_lr_0.001_epochs_50 hidden_labels
+
+# BiGG subsampled run — benchmark auto-combines subgraph_* files into a block-diagonal graph
+bash scripts/benchmark/run_anomaly_benchmark.sh tolokers GCN,GIN 1 bigg blksize_-1_b_1_lr_0.001_epochs_50_..._sub6_size2000_k10 hidden_labels
 ```
 
 **`bash scripts/benchmark/run_link_benchmark.sh [datasets] [models] [trials] [generator] [neg_sampling] [decoder] [synthetic_name]`**
@@ -53,8 +56,8 @@ bash scripts/benchmark/run_link_benchmark.sh tolokers GCN,GIN 1 bigg random mlp 
 
 ### Training
 
-**`bash scripts/train/train_bigg.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels]`**
-Train BiGG conditional model (features + labels). Defaults: `tolokers 1024 1 50 0.001 256 0.0 0.0 0 False none 1,1 false false`.
+**`bash scripts/train/train_bigg.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [subsample] [subsample_size] [subsample_k] [num_subgraphs]`**
+Train BiGG conditional model (features + labels). Defaults: `tolokers 1024 1 50 0.001 256 0.0 0.0 0 False none 1,1 false false false 2000 10 ""`.
 * `noise_std`: Gaussian noise std added to hidden state during training (0.0 = disabled).
 * `ss_max_prob`: Max scheduled-sampling probability (0.0 = disabled; uses teacher forcing only).
 * `ss_start_epoch`: Epoch at which scheduled sampling begins ramping up.
@@ -63,6 +66,10 @@ Train BiGG conditional model (features + labels). Defaults: `tolokers 1024 1 50 
 * `loss_weights`: Comma-separated cont,label weights relative to struct (e.g., `0.1,0.1`).
 * `hetero_feat`: `true` for heteroscedastic feature prediction (mean + variance).
 * `mask_test_labels`: `true` to exclude test node labels (split 0) from label loss, preventing data leakage in anomaly benchmarks. Appends `_masked` to save name.
+* `subsample`: `true` to partition the graph into BFS subgraphs for VRAM-limited training. Outputs a directory of `subgraph_N` files; benchmark auto-combines via `dgl.batch()`. Appends `_subM_sizeS_kK` to save name.
+* `subsample_size`: target nodes per subgraph (default: 2000).
+* `subsample_k`: max neighbors added per BFS node — controls edge density (default: 10).
+* `num_subgraphs`: number of subgraphs to generate (default: `ceil(N / subsample_size)`).
 
 **`bash scripts/train/train_bigg_structure.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim]`**
 Train BiGG structure-only baseline. Defaults: `tolokers 128 1 100 0.001 256`.
