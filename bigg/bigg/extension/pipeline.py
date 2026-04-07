@@ -128,8 +128,10 @@ def main():
         subgraphs = []  # list of (gid, sub_node_data, sub_label_mask, sub_num_nodes)
         for sg, sub_nd, orig_idx in raw_partitions:
             if pipeline_args.bfs_preprocess:
-                sg, sub_nd, _ = bfs_reorder(sg, sub_nd)
-            sub_lm = label_mask[orig_idx] if label_mask is not None else None
+                sg, sub_nd, perm = bfs_reorder(sg, sub_nd)
+                sub_lm = label_mask[orig_idx[perm]] if label_mask is not None else None
+            else:
+                sub_lm = label_mask[orig_idx] if label_mask is not None else None
             gid = TreeLib.InsertGraph(sg)
             subgraphs.append((gid, sub_nd.to(cmd_args.device), sub_lm, sg.number_of_nodes()))
     else:

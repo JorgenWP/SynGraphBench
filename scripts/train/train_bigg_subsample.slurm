@@ -1,6 +1,6 @@
 #!/bin/sh
 #SBATCH --account=share-ie-idi      # "share-ie-idi" "ie-idi"
-#SBATCH --job-name="BiGG_TRAIN_<something>"
+#SBATCH --job-name="BiGG_SUBSAMPLE_<something>"
 #SBATCH --time=04:00:00             # Time limit (hh:mm:ss)
 
 #SBATCH --partition=GPUQ            # Asking for GPU
@@ -31,20 +31,23 @@ module load Anaconda3/2024.02-1
 conda activate bigg
 
 # Arguments
-DATASET="tolokers"
-BLKSIZE=1024
+DATASET="reddit"
+BLKSIZE=-1
 BSIZE=1
-EPOCHS=50
+EPOCHS=300
 LR=0.001
 EMBED_DIM=256
-NOISE_STD=0.1
-SS_MAX_PROB=0.5
+NOISE_STD=0.3
+SS_MAX_PROB=0.0
 SS_START_EPOCH=0
 BFS_PREPROCESS=True
-NORMALIZE=none          # "zscore", "minmax", "row", or "none"
-LOSS_WEIGHTS="1,1"      # cont,label weights relative to struct (applied after dynamic normalization)
-HETERO_FEAT=false       # "true" for heteroscedastic feature prediction (mean + variance), "false" for deterministic MSE
-MASK_TEST_LABELS=false  # "true" to exclude test node labels (split 0) from label loss
+NORMALIZE=zscore        # "zscore", "minmax", "row", or "none"
+LOSS_WEIGHTS="0.1,0.1"  # cont,label weights relative to struct (applied after dynamic normalization)
+HETERO_FEAT=true        # "true" for heteroscedastic feature prediction (mean + variance), "false" for deterministic MSE
+MASK_TEST_LABELS=true   # "true" to exclude test node labels (split 0) from label loss
+SUBSAMPLE_SIZE=2000     # target number of nodes per BFS subgraph
+SUBSAMPLE_K=10          # max neighbors per BFS step (controls edge density within subgraphs)
+NUM_SUBGRAPHS=""        # number of subgraphs to use (leave empty for auto = ceil(N / subsample_size))
 
-# Run the BiGG training and generation script
-bash scripts/train/train_bigg.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS"
+# Run the BiGG subsampled training and generation script
+bash scripts/train/train_bigg_subsample.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$SUBSAMPLE_SIZE" "$SUBSAMPLE_K" "$NUM_SUBGRAPHS"

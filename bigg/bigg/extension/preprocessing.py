@@ -268,19 +268,27 @@ def apply_normalization(features, stats):
 # ---------------------------------------------------------------------------
 
 def create_split_masks(original_graph, num_nodes):
-    """Create random train/val/test masks matching the split sizes of *original_graph*.
+    """Create random train/val/test masks matching the split ratios of *original_graph*.
+
+    Uses proportions rather than absolute counts so that subgraphs smaller than
+    the original graph receive the correct fraction of train/val nodes.
 
     Returns (train_masks, val_masks, test_masks) each of shape (num_nodes, num_splits).
     """
     num_splits = original_graph.ndata['train_masks'].shape[1]
+    orig_n = original_graph.num_nodes()
 
     train_masks = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
     val_masks   = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
     test_masks  = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
 
     for col in range(num_splits):
-        n_train = int(original_graph.ndata['train_masks'][:, col].sum().item())
-        n_val   = int(original_graph.ndata['val_masks'][:, col].sum().item())
+        train_frac = original_graph.ndata['train_masks'][:, col].sum().item() / orig_n
+        val_frac   = original_graph.ndata['val_masks'][:, col].sum().item()   / orig_n
+        n_train = max(1, round(train_frac * num_nodes))
+        n_val   = max(1, round(val_frac   * num_nodes))
+        if n_train + n_val > num_nodes:
+            n_val = num_nodes - n_train
         perm = torch.randperm(num_nodes)
         train_masks[perm[:n_train],              col] = 1
         val_masks  [perm[n_train:n_train+n_val], col] = 1
