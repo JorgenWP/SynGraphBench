@@ -65,6 +65,8 @@ class BaseGNNDetector(BaseDetector):
     def train(self):
         optimizer = torch.optim.Adam(self.model.parameters(), lr=self.model_config['lr'])
         train_labels, val_labels, test_labels = self.labels[self.train_mask], self.labels[self.val_mask], self.labels[self.test_mask]
+        val_auprc_curve  = []
+        test_auprc_curve = []
         for e in range(self.train_config['epochs']):
             self.model.train()
             logits = self.model(self.train_graph)
@@ -82,13 +84,18 @@ class BaseGNNDetector(BaseDetector):
                 logits = self.model(self.val_graph)
             probs = logits.softmax(1)[:, 1]
             val_score = self.eval(val_labels, probs[self.val_graph.ndata['val_mask']])
+            if self.train_config['inductive']:
+                with torch.no_grad():
+                    src_probs = self.model(self.source_graph).softmax(1)[:, 1]
+                epoch_test = self.eval(test_labels, src_probs[self.test_mask])
+            else:
+                epoch_test = self.eval(test_labels, probs[self.test_mask])
+            val_auprc_curve.append(val_score['AUPRC'])
+            test_auprc_curve.append(epoch_test['AUPRC'])
             if val_score[self.train_config['metric']] > self.best_score:
-                if self.train_config['inductive']:
-                    logits = self.model(self.source_graph)
-                    probs = logits.softmax(1)[:, 1]
                 self.patience_knt = 0
                 self.best_score = val_score[self.train_config['metric']]
-                test_score = self.eval(test_labels, probs[self.test_mask])
+                test_score = epoch_test
                 print('Epoch {}, Loss {:.4f}, Val AUC {:.4f}, PRC {:.4f}, RecK {:.4f}, test AUC {:.4f}, PRC {:.4f}, RecK {:.4f}'.format(
                     e, loss, val_score['AUROC'], val_score['AUPRC'], val_score['RecK'],
                     test_score['AUROC'], test_score['AUPRC'], test_score['RecK']))
@@ -96,6 +103,8 @@ class BaseGNNDetector(BaseDetector):
                 self.patience_knt += 1
                 if self.patience_knt > self.train_config['patience']:
                     break
+        test_score['val_auprc_curve']  = val_auprc_curve
+        test_score['test_auprc_curve'] = test_auprc_curve
         return test_score
 
 # RGCN, HGT
