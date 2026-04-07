@@ -45,6 +45,7 @@ from bench_utils import (
     parse_args,
     load_cgt_synthetic_data, build_cgt_datasets,
     build_original_cg_datasets, print_comparison,
+    load_bigg_synthetic_graph, apply_normalization,
 )
 from models.anomaly_detection.cgt_detector import CompGraphDetector, CG_SUPPORTED_MODELS
 
@@ -468,9 +469,24 @@ def main():
                 semi_supervised=bool(args.semi_supervised))
         else:
             # Full graph (BiGG, etc.): train+val on synthetic, test on original.
+            # For subsampled runs (directory), combine subgraphs into one file.
+            eval_stem = stem
             norm_stats_path = os.path.join(task_dir, stem + '_norm_stats.pt')
+            if os.path.isdir(syn_path):
+                combined_path = os.path.join(task_dir, stem + '_combined')
+                if not os.path.exists(combined_path):
+                    print(f'  Combining subgraphs → {combined_path}')
+                    combined_graph, norm_stats = load_bigg_synthetic_graph(syn_path)
+                    dgl.save_graphs(combined_path, [combined_graph])
+                    if norm_stats is not None:
+                        torch.save(norm_stats, combined_path + '_norm_stats.pt')
+                else:
+                    print(f'  Using cached combined graph: {combined_path}')
+                eval_stem = stem + '_combined'
+                norm_stats_path = combined_path + '_norm_stats.pt'
+
             results = evaluate_models_cross_graph(
-                dataset_name, models, args.data_dir, task_dir, stem,
+                dataset_name, models, args.data_dir, task_dir, eval_stem,
                 args.trials, args.semi_supervised, args.trial_id,
                 args.epochs, args.patience,
                 args.lr, args.drop_rate, args.h_feats, args.num_layers,
