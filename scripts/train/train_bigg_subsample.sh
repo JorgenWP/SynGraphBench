@@ -1,24 +1,25 @@
 #!/bin/bash
-# Train BiGG model on a dataset using BFS subgraph partitioning.
+# Train BiGG model on a dataset using forest fire subsampling.
 #
-# Use this script when the full graph does not fit in VRAM. The graph is
-# partitioned into non-overlapping BFS subgraphs, each trained independently.
-# At generation time, one synthetic subgraph is produced per training subgraph.
+# Use this script when the full graph does not fit in VRAM. Subgraphs are
+# sampled independently via forest fire (with replacement), each trained
+# independently. At generation time, one synthetic subgraph is produced per
+# training subgraph.
 #
 # Usage:
-#   bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [subsample_size] [subsample_k] [num_subgraphs]
+#   bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [subsample_size] [burn_prob] [num_subgraphs]
 #
 # normalize:        feature normalisation — one of "zscore", "minmax", "row", or "none" (default: none)
 # loss_weights:     comma-separated cont,label weights relative to struct, applied after dynamic normalization (default: 1,1)
 # hetero_feat:      "true" to enable heteroscedastic feature prediction (mean + variance), "false" for deterministic MSE (default: false)
 # mask_test_labels: "true" to exclude test node labels (split 0) from label loss (default: false)
-# subsample_size:   target number of nodes per BFS subgraph (default: 2000)
-# subsample_k:      max neighbors added per BFS step — controls edge density within subgraphs (default: 10)
+# subsample_size:   target number of nodes per subgraph (default: 2000)
+# burn_prob:        forest fire burn probability — controls subgraph density (default: 0.3)
 # num_subgraphs:    number of subgraphs to use (default: auto = ceil(N / subsample_size))
 #
 # Examples:
-#   bash scripts/train/train_bigg_subsample.sh reddit -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true 2000 10
-#   bash scripts/train/train_bigg_subsample.sh reddit -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true 2000 10 3
+#   bash scripts/train/train_bigg_subsample.sh reddit -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true 2000 0.3
+#   bash scripts/train/train_bigg_subsample.sh reddit -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true 2000 0.3 3
 #
 
 set -e
@@ -39,7 +40,7 @@ LOSS_WEIGHTS="${12:-1,1}"
 HETERO_FEAT="${13:-false}"
 MASK_TEST_LABELS="${14:-false}"
 SUBSAMPLE_SIZE="${15:-2000}"
-SUBSAMPLE_K="${16:-10}"
+BURN_PROB="${16:-0.3}"
 NUM_SUBGRAPHS="${17:-}"
 
 cd "$(dirname "$0")/../../bigg"
@@ -60,7 +61,7 @@ echo "Loss weights:    $LOSS_WEIGHTS"
 echo "Hetero feat:     $HETERO_FEAT"
 echo "Mask test labels: $MASK_TEST_LABELS"
 echo "Subsample size:  $SUBSAMPLE_SIZE"
-echo "Subsample k:     $SUBSAMPLE_K"
+echo "Burn prob:       $BURN_PROB"
 echo "Num subgraphs:   ${NUM_SUBGRAPHS:-auto}"
 echo ""
 
@@ -105,6 +106,6 @@ python -m bigg.extension.pipeline \
   $MASK_FLAG \
   --subsample \
   -subsample_size "$SUBSAMPLE_SIZE" \
-  -subsample_k "$SUBSAMPLE_K" \
+  -burn_prob "$BURN_PROB" \
   $NUM_SUBGRAPHS_FLAG \
-  -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LOSS_WEIGHTS}_${HETERO_FEAT}_sub${SUBSAMPLE_SIZE}_k${SUBSAMPLE_K}"
+  -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LOSS_WEIGHTS}_${HETERO_FEAT}_sub${SUBSAMPLE_SIZE}_p${BURN_PROB}"

@@ -46,8 +46,8 @@ LOSS_WEIGHTS="0.1,0.1"  # cont,label weights relative to struct (applied after d
 HETERO_FEAT=true        # "true" for heteroscedastic feature prediction (mean + variance), "false" for deterministic MSE
 MASK_TEST_LABELS=true   # "true" to exclude test node labels (split 0) from label loss
 SUBSAMPLE_SIZE=2000     # target number of nodes per BFS subgraph
-SUBSAMPLE_K=10          # max neighbors per BFS step (controls edge density within subgraphs)
+BURN_PROB=0.3           # forest fire burn probability (controls subgraph density)
 NUM_SUBGRAPHS=""        # number of subgraphs to use (leave empty for auto = ceil(N / subsample_size))
 
 # Run the BiGG subsampled training and generation script
-bash scripts/train/train_bigg_subsample.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$SUBSAMPLE_SIZE" "$SUBSAMPLE_K" "$NUM_SUBGRAPHS"
+bash scripts/train/train_bigg_subsample.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$SUBSAMPLE_SIZE" "$BURN_PROB" "$NUM_SUBGRAPHS"

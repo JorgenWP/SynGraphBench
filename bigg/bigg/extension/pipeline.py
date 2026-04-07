@@ -23,6 +23,7 @@ from bigg.extension.preprocessing import (
     normalize_features,
     build_generated_dgl,
     partition_graph_bfs,
+    forest_fire_subsample,
     NORMALIZATION_METHODS,
 )
 
@@ -56,11 +57,11 @@ def main():
                                  help='Exclude test node labels (split 0) from label loss to prevent '
                                       'data leakage in anomaly detection benchmarks')
     pipeline_parser.add_argument('--subsample', action='store_true', default=False,
-                                 help='Partition graph into BFS subgraphs for VRAM-limited training')
+                                 help='Sample subgraphs via forest fire for VRAM-limited training')
     pipeline_parser.add_argument('-subsample_size', type=int, default=2000,
                                  help='Target number of nodes per subgraph (default: 2000)')
-    pipeline_parser.add_argument('-subsample_k', type=int, default=10,
-                                 help='Max neighbors added per BFS step — controls edge density (default: 10)')
+    pipeline_parser.add_argument('-burn_prob', type=float, default=0.3,
+                                 help='Forest fire burn probability — controls subgraph density (default: 0.3)')
     pipeline_parser.add_argument('-num_subgraphs', type=int, default=None,
                                  help='Number of subgraphs to generate. Default: ceil(N / subsample_size)')
 
@@ -113,16 +114,16 @@ def main():
         import math
         n_total = graph_nx.number_of_nodes()
         num_subgraphs = pipeline_args.num_subgraphs or math.ceil(n_total / pipeline_args.subsample_size)
-        print(f'Subsampling enabled: {num_subgraphs} subgraphs, '
-              f'target_size={pipeline_args.subsample_size}, k={pipeline_args.subsample_k}')
-        raw_partitions = partition_graph_bfs(
-            graph_nx, node_data,
-            target_size=pipeline_args.subsample_size,
-            max_neighbors=pipeline_args.subsample_k,
-        )
-        # Trim or keep only the requested number of subgraphs
-        raw_partitions = raw_partitions[:num_subgraphs]
-        print(f'  Produced {len(raw_partitions)} partitions '
+        print(f'Subsampling enabled: {num_subgraphs} forest fire samples, '
+              f'target_size={pipeline_args.subsample_size}, burn_prob={pipeline_args.burn_prob}')
+        raw_partitions = []
+        for _ in range(num_subgraphs):
+            raw_partitions.append(forest_fire_subsample(
+                graph_nx, node_data,
+                target_size=pipeline_args.subsample_size,
+                burn_prob=pipeline_args.burn_prob,
+            ))
+        print(f'  Produced {len(raw_partitions)} samples '
               f'(sizes: {[sg.number_of_nodes() for sg, _, _ in raw_partitions]})')
 
         subgraphs = []  # list of (gid, sub_node_data, sub_label_mask, sub_num_nodes)
@@ -273,7 +274,7 @@ def main():
     lw_tag = pipeline_args.loss_weights.replace(',', '_')
     hetero_tag = 'hetero' if pipeline_args.hetero_feat else 'det'
     mask_tag = '_masked' if pipeline_args.mask_test_labels else ''
-    sub_tag = f'_sub{len(subgraphs)}_size{pipeline_args.subsample_size}_k{pipeline_args.subsample_k}' if pipeline_args.subsample else ''
+    sub_tag = f'_sub{len(subgraphs)}_size{pipeline_args.subsample_size}_p{pipeline_args.burn_prob}' if pipeline_args.subsample else ''
     save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{mask_tag}{sub_tag}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
 
