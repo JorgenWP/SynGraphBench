@@ -2,16 +2,17 @@
 # Train BiGG model on a dataset.
 #
 # Usage:
-#   bash scripts/train/train_bigg.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels]
+#   bash scripts/train/train_bigg.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor]
 #
 # normalize:        feature normalisation — one of "zscore", "minmax", "row", or "none" (default: none)
 # loss_weights:     comma-separated cont,label weights relative to struct, applied after dynamic normalization (default: 1,1)
 # hetero_feat:      "true" to enable heteroscedastic feature prediction (mean + variance), "false" for deterministic MSE (default: false)
 # mask_test_labels: "true" to exclude test node labels (split 0) from label loss (default: false)
+# logvar_floor:     lower clamp for log-variance in hetero_feat mode (default: -4.0)
 #
 # Examples:
 #   bash scripts/train/train_bigg.sh tolokers 1024 1 50 0.001 256
-#   bash scripts/train/train_bigg.sh reddit 512 2 100 0.0005 128 0.1 0.5 50 True zscore 1,1 true true
+#   bash scripts/train/train_bigg.sh reddit 512 2 100 0.0005 128 0.1 0.5 50 True zscore 1,1 true true -10.0
 #
 
 set -e
@@ -31,6 +32,7 @@ NORMALIZE="${11:-none}"
 LOSS_WEIGHTS="${12:-1,1}"
 HETERO_FEAT="${13:-false}"
 MASK_TEST_LABELS="${14:-false}"
+LOGVAR_FLOOR="${15:--4.0}"
 
 cd "$(dirname "$0")/../../bigg"
 
@@ -49,6 +51,7 @@ echo "Normalize:       $NORMALIZE"
 echo "Loss weights:    $LOSS_WEIGHTS"
 echo "Hetero feat:     $HETERO_FEAT"
 echo "Mask test labels: $MASK_TEST_LABELS"
+echo "Logvar floor:    $LOGVAR_FLOOR"
 echo ""
 
 NORM_FLAG=""
@@ -85,4 +88,5 @@ python -m bigg.extension.pipeline \
   -loss_weights "$LOSS_WEIGHTS" \
   $HETERO_FLAG \
   $MASK_FLAG \
+  -logvar_floor "$LOGVAR_FLOOR" \
   -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LOSS_WEIGHTS}_${HETERO_FEAT}"

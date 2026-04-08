@@ -53,6 +53,9 @@ def main():
     pipeline_parser.add_argument('--hetero_feat', action='store_true', default=False,
                                  help='Heteroscedastic feature prediction: predict mean + log-variance '
                                       'and sample at generation time (default: deterministic MSE)')
+    pipeline_parser.add_argument('-logvar_floor', type=float, default=-4.0,
+                                 help='Lower clamp for log-variance in hetero_feat mode. '
+                                      'Lower values allow tighter distributions (default: -4.0)')
     pipeline_parser.add_argument('--mask_test_labels', action='store_true', default=False,
                                  help='Exclude test node labels (split 0) from label loss to prevent '
                                       'data leakage in anomaly detection benchmarks')
@@ -152,12 +155,14 @@ def main():
         model = BiggWithConditionedFeats(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
                                          label_temp=pipeline_args.label_temp,
                                          noise_std=pipeline_args.noise_std,
-                                         hetero_feat=pipeline_args.hetero_feat).to(cmd_args.device)
+                                         hetero_feat=pipeline_args.hetero_feat,
+                                         logvar_floor=pipeline_args.logvar_floor).to(cmd_args.device)
     elif pipeline_args.model_type == 'independent':
         model = BiggWithFeatsAndLabels(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
                                        label_temp=pipeline_args.label_temp,
                                        noise_std=pipeline_args.noise_std,
-                                       hetero_feat=pipeline_args.hetero_feat).to(cmd_args.device)
+                                       hetero_feat=pipeline_args.hetero_feat,
+                                       logvar_floor=pipeline_args.logvar_floor).to(cmd_args.device)
 
     optimizer = optim.Adam(model.parameters(), lr=cmd_args.learning_rate, weight_decay=1e-4)
 

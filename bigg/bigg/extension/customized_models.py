@@ -84,7 +84,7 @@ class BiggWithEdgeLen(RecurTreeGen):
 
 class BiggWithFeatsAndLabels(RecurTreeGen):
 
-    def __init__(self, args, feat_dim, num_classes, label_temp=1.0, noise_std=0.0, ss_prob=0.0, hetero_feat=False):
+    def __init__(self, args, feat_dim, num_classes, label_temp=1.0, noise_std=0.0, ss_prob=0.0, hetero_feat=False, logvar_floor=-4.0):
         super().__init__(args)
         self.feat_dim = feat_dim
         self.num_classes = num_classes
@@ -92,6 +92,7 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
         self.noise_std = noise_std    # Gaussian noise std on hidden state during training
         self.ss_prob = ss_prob        # scheduled sampling probability (swap GT with prediction)
         self.hetero_feat = hetero_feat  # predict mean + log-variance for continuous features
+        self.logvar_floor = logvar_floor
 
         # 1. Continuous feature encoders/decoders
         self.nodefeat_encoding = MLP(feat_dim, [2 * args.embed_dim, args.embed_dim])
@@ -150,7 +151,7 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
 
         if self.hetero_feat:
             pred_cont = raw_cont[:, :self.feat_dim]
-            log_var = torch.clamp(raw_cont[:, self.feat_dim:], -4.0, 2.0)
+            log_var = torch.clamp(raw_cont[:, self.feat_dim:], self.logvar_floor, 2.0)
         else:
             pred_cont = raw_cont
 
@@ -212,7 +213,7 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
 
 class BiggWithConditionedFeats(RecurTreeGen):
 
-    def __init__(self, args, feat_dim, num_classes, label_temp=1.0, noise_std=0.0, ss_prob=0.0, hetero_feat=False):
+    def __init__(self, args, feat_dim, num_classes, label_temp=1.0, noise_std=0.0, ss_prob=0.0, hetero_feat=False, logvar_floor=-4.0):
         super().__init__(args)
         self.feat_dim = feat_dim
         self.num_classes = num_classes
@@ -220,6 +221,7 @@ class BiggWithConditionedFeats(RecurTreeGen):
         self.noise_std = noise_std    # Gaussian noise std on hidden state during training
         self.ss_prob = ss_prob        # scheduled sampling probability (swap GT with prediction)
         self.hetero_feat = hetero_feat  # predict mean + log-variance for continuous features
+        self.logvar_floor = logvar_floor
 
         # 1. Label encoders/decoders
         self.nodelabel_encoding = nn.Embedding(num_classes, args.embed_dim)
@@ -291,7 +293,7 @@ class BiggWithConditionedFeats(RecurTreeGen):
 
             if self.hetero_feat:
                 pred_cont = raw_cont[:, :self.feat_dim]
-                log_var = torch.clamp(raw_cont[:, self.feat_dim:], -4.0, 2.0)
+                log_var = torch.clamp(raw_cont[:, self.feat_dim:], self.logvar_floor, 2.0)
                 std = torch.exp(0.5 * log_var)
                 sampled_cont = pred_cont + std * torch.randn_like(pred_cont)
             else:
@@ -315,7 +317,7 @@ class BiggWithConditionedFeats(RecurTreeGen):
 
             if self.hetero_feat:
                 pred_cont = raw_cont[:, :self.feat_dim]
-                log_var = torch.clamp(raw_cont[:, self.feat_dim:], -4.0, 2.0)
+                log_var = torch.clamp(raw_cont[:, self.feat_dim:], self.logvar_floor, 2.0)
             else:
                 pred_cont = raw_cont
 

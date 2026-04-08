@@ -7,19 +7,20 @@
 # training subgraph.
 #
 # Usage:
-#   bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [subsample_size] [burn_prob] [num_subgraphs]
+#   bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs]
 #
 # normalize:        feature normalisation — one of "zscore", "minmax", "row", or "none" (default: none)
 # loss_weights:     comma-separated cont,label weights relative to struct, applied after dynamic normalization (default: 1,1)
 # hetero_feat:      "true" to enable heteroscedastic feature prediction (mean + variance), "false" for deterministic MSE (default: false)
 # mask_test_labels: "true" to exclude test node labels (split 0) from label loss (default: false)
+# logvar_floor:     lower clamp for log-variance in hetero_feat mode (default: -4.0)
 # subsample_size:   target number of nodes per subgraph (default: 2000)
 # burn_prob:        forest fire burn probability — controls subgraph density (default: 0.3)
 # num_subgraphs:    number of subgraphs to use (default: auto = ceil(N / subsample_size))
 #
 # Examples:
-#   bash scripts/train/train_bigg_subsample.sh reddit -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true 2000 0.3
-#   bash scripts/train/train_bigg_subsample.sh reddit -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true 2000 0.3 3
+#   bash scripts/train/train_bigg_subsample.sh reddit -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true -4.0 2000 0.3
+#   bash scripts/train/train_bigg_subsample.sh reddit -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true -4.0 2000 0.3 3
 #
 
 set -e
@@ -39,9 +40,10 @@ NORMALIZE="${11:-none}"
 LOSS_WEIGHTS="${12:-1,1}"
 HETERO_FEAT="${13:-false}"
 MASK_TEST_LABELS="${14:-false}"
-SUBSAMPLE_SIZE="${15:-2000}"
-BURN_PROB="${16:-0.3}"
-NUM_SUBGRAPHS="${17:-}"
+LOGVAR_FLOOR="${15:--4.0}"
+SUBSAMPLE_SIZE="${16:-2000}"
+BURN_PROB="${17:-0.3}"
+NUM_SUBGRAPHS="${18:-}"
 
 cd "$(dirname "$0")/../../bigg"
 
@@ -60,6 +62,7 @@ echo "Normalize:       $NORMALIZE"
 echo "Loss weights:    $LOSS_WEIGHTS"
 echo "Hetero feat:     $HETERO_FEAT"
 echo "Mask test labels: $MASK_TEST_LABELS"
+echo "Logvar floor:    $LOGVAR_FLOOR"
 echo "Subsample size:  $SUBSAMPLE_SIZE"
 echo "Burn prob:       $BURN_PROB"
 echo "Num subgraphs:   ${NUM_SUBGRAPHS:-auto}"
@@ -104,6 +107,7 @@ python -m bigg.extension.pipeline \
   -loss_weights "$LOSS_WEIGHTS" \
   $HETERO_FLAG \
   $MASK_FLAG \
+  -logvar_floor "$LOGVAR_FLOOR" \
   --subsample \
   -subsample_size "$SUBSAMPLE_SIZE" \
   -burn_prob "$BURN_PROB" \
