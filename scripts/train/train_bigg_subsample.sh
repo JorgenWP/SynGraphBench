@@ -112,4 +112,4 @@ python -m bigg.extension.pipeline \
   -subsample_size "$SUBSAMPLE_SIZE" \
   -burn_prob "$BURN_PROB" \
   $NUM_SUBGRAPHS_FLAG \
-  -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LOSS_WEIGHTS}_${HETERO_FEAT}_sub${SUBSAMPLE_SIZE}_p${BURN_PROB}"
+  -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LOSS_WEIGHTS}_${HETERO_FEAT}_lvf${LOGVAR_FLOOR}_sub${SUBSAMPLE_SIZE}_p${BURN_PROB}"

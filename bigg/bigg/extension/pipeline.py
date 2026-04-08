@@ -278,9 +278,10 @@ def main():
     bfs_tag = 'bfs' if pipeline_args.bfs_preprocess else 'nobfs'
     lw_tag = pipeline_args.loss_weights.replace(',', '_')
     hetero_tag = 'hetero' if pipeline_args.hetero_feat else 'det'
+    lvf_tag = f'_lvf{pipeline_args.logvar_floor}' if pipeline_args.hetero_feat else ''
     mask_tag = '_masked' if pipeline_args.mask_test_labels else ''
     sub_tag = f'_sub{len(subgraphs)}_size{pipeline_args.subsample_size}_p{pipeline_args.burn_prob}' if pipeline_args.subsample else ''
-    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{mask_tag}{sub_tag}'
+    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{sub_tag}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
 
     model.eval()
