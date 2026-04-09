@@ -176,6 +176,81 @@ def partition_graph_bfs(graph_nx, node_data, target_size, max_neighbors):
 
 
 # ---------------------------------------------------------------------------
+# Forest fire subsampling
+# ---------------------------------------------------------------------------
+
+def forest_fire_subsample(graph_nx, node_data, target_size, burn_prob, seed_node=None):
+    """Sample a subgraph via forest fire with burn probability *burn_prob*.
+
+    Starting from *seed_node* (random if None), each unburned neighbor of a
+    burning node is independently ignited with probability *burn_prob*.
+    Burning propagates recursively until *target_size* nodes are collected.
+    If the fire dies before reaching *target_size*, a new random unburned
+    seed is chosen and burning continues.
+
+    Parameters
+    ----------
+    graph_nx : nx.Graph
+        Source graph. Nodes must be integers 0..N-1.
+    node_data : torch.Tensor
+        Per-node feature/label tensor of shape (N, D).
+    target_size : int
+        Maximum number of nodes to collect.
+    burn_prob : float
+        Probability of burning each unburned neighbor (controls density).
+    seed_node : int or None
+        Starting node. Chosen uniformly at random if None.
+
+    Returns
+    -------
+    sub_graph_nx : nx.Graph
+        Induced subgraph with nodes reindexed 0..n-1 in burn order.
+    sub_node_data : torch.Tensor
+        Node data rows corresponding to the sampled nodes.
+    original_indices : torch.Tensor
+        1-D tensor of original node IDs in burn order.
+    """
+    nodes = list(graph_nx.nodes())
+    if seed_node is None:
+        seed_node = random.choice(nodes)
+
+    burned = [seed_node]
+    burned_set = {seed_node}
+    stack = [seed_node]
+
+    while len(burned) < target_size:
+        if not stack:
+            # Fire died — restart from a random unburned node
+            unburned = [n for n in nodes if n not in burned_set]
+            if not unburned:
+                break
+            new_seed = random.choice(unburned)
+            burned.append(new_seed)
+            burned_set.add(new_seed)
+            stack.append(new_seed)
+
+        node = stack.pop()
+        neighbors = [n for n in graph_nx.neighbors(node) if n not in burned_set]
+        for n in neighbors:
+            if len(burned) >= target_size:
+                break
+            if random.random() < burn_prob:
+                burned_set.add(n)
+                burned.append(n)
+                stack.append(n)
+
+    # Induced subgraph reindexed 0..n-1
+    subgraph = graph_nx.subgraph(burned).copy()
+    mapping = {old: new for new, old in enumerate(burned)}
+    subgraph = nx.relabel_nodes(subgraph, mapping)
+
+    original_indices = torch.tensor(burned, dtype=torch.long)
+    sub_node_data = node_data[original_indices]
+
+    return subgraph, sub_node_data, original_indices
+
+
+# ---------------------------------------------------------------------------
 # Feature normalisation
 # ---------------------------------------------------------------------------
 

@@ -65,7 +65,8 @@ def set_seed(seed=3407):
 
 def evaluate_models(dataset_name, models, data_dir,
                     trials, semi_supervised, trial_id,
-                    epochs, patience, lr, drop_rate, h_feats, num_layers):
+                    epochs, patience, lr, drop_rate, h_feats, num_layers,
+                    curve_records=None):
     """Train and evaluate all specified models on the original dataset."""
     results = []
 
@@ -79,6 +80,7 @@ def evaluate_models(dataset_name, models, data_dir,
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
+        val_curves, test_curves = [], []
         time_cost = 0
 
         for t in range(trials):
@@ -124,6 +126,10 @@ def evaluate_models(dataset_name, models, data_dir,
             pre_list.append(test_score['AUPRC'])
             rec_list.append(test_score['RecK'])
 
+            if 'val_auprc_curve' in test_score:
+                val_curves.append(test_score['val_auprc_curve'])
+                test_curves.append(test_score['test_auprc_curve'])
+
             print(f"  -> AUROC={test_score['AUROC']:.4f}, "
                   f"AUPRC={test_score['AUPRC']:.4f}, "
                   f"RecK={test_score['RecK']:.4f}")
@@ -145,6 +151,22 @@ def evaluate_models(dataset_name, models, data_dir,
                 'RecK_std': np.std(rec_list),
                 'time_per_trial': time_cost / len(auc_list),
             })
+
+        if val_curves and curve_records is not None:
+            max_len = max(len(c) for c in val_curves)
+            def pad(curve):
+                return curve + [curve[-1]] * (max_len - len(curve))
+            val_arr  = np.array([pad(c) for c in val_curves])
+            test_arr = np.array([pad(c) for c in test_curves])
+            for epoch in range(max_len):
+                curve_records.append({
+                    'source': 'original',
+                    'dataset': dataset_name, 'model': model_name, 'epoch': epoch,
+                    'val_auprc_mean':  float(val_arr[:, epoch].mean()),
+                    'val_auprc_std':   float(val_arr[:, epoch].std()),
+                    'test_auprc_mean': float(test_arr[:, epoch].mean()),
+                    'test_auprc_std':  float(test_arr[:, epoch].std()),
+                })
 
     return results
 
@@ -309,8 +331,12 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
 def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn_file_name,
                                 trials, semi_supervised, trial_id,
                                 epochs, patience, lr, drop_rate, h_feats, num_layers,
-                                norm_stats_path=None):
-    """Train GNNs on synthetic graph, validate on synthetic val, test on original test nodes."""
+                                norm_stats_path=None, curve_records=None):
+    """Train GNNs on synthetic graph, validate on synthetic val, test on original test nodes.
+
+    Per-epoch val/test AUPRC curves are appended to curve_records (if provided),
+    averaged across trials, for val/test divergence analysis.
+    """
     from models.cross_graph_detector import (CrossGraphGNNDetector,
                                                 CrossGraphXGBGraphDetector,
                                                 CROSS_GRAPH_SUPPORTED_MODELS)
@@ -333,6 +359,7 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
+        val_curves, test_curves = [], []
         time_cost = 0
 
         for t in range(trials):
@@ -379,6 +406,11 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
             pre_list.append(test_score['AUPRC'])
             rec_list.append(test_score['RecK'])
             print(f"  -> AUROC={test_score['AUROC']:.4f}, AUPRC={test_score['AUPRC']:.4f}, RecK={test_score['RecK']:.4f}")
+
+            if 'val_auprc_curve' in test_score:
+                val_curves.append(test_score['val_auprc_curve'])
+                test_curves.append(test_score['test_auprc_curve'])
+
             del detector, syn_data, orig_data
 
         if auc_list:
@@ -389,6 +421,23 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
                 'RecK_mean':  np.mean(rec_list),  'RecK_std':  np.std(rec_list),
                 'time_per_trial': time_cost / len(auc_list),
             })
+
+        if val_curves and curve_records is not None:
+            max_len = max(len(c) for c in val_curves)
+            def pad(curve):
+                return curve + [curve[-1]] * (max_len - len(curve))
+            val_arr  = np.array([pad(c) for c in val_curves])
+            test_arr = np.array([pad(c) for c in test_curves])
+            for epoch in range(max_len):
+                curve_records.append({
+                    'source': 'synthetic-graph',
+                    'dataset': dataset_name, 'model': model_name, 'epoch': epoch,
+                    'val_auprc_mean':  float(val_arr[:, epoch].mean()),
+                    'val_auprc_std':   float(val_arr[:, epoch].std()),
+                    'test_auprc_mean': float(test_arr[:, epoch].mean()),
+                    'test_auprc_std':  float(test_arr[:, epoch].std()),
+                })
+
     return results
 
 
@@ -401,7 +450,18 @@ def main():
     if args.synthetic_dir is None:
         args.synthetic_dir = os.path.join(_project_root, 'datasets', 'synthetic')
     if args.output_dir is None:
-        args.output_dir = os.path.join(_project_root, 'results', 'evaluate')
+        # Auto-derive: results/evaluate/{generator}/{dataset}/{synthetic_name}
+        # For multi-dataset runs, dataset level is omitted.
+        datasets_tmp = [d.strip() for d in args.datasets.split(',')]
+        stem = args.synthetic_name or 'original'
+        if len(datasets_tmp) == 1:
+            args.output_dir = os.path.join(
+                _project_root, 'results', 'evaluate',
+                args.generator, datasets_tmp[0], stem)
+        else:
+            args.output_dir = os.path.join(
+                _project_root, 'results', 'evaluate',
+                args.generator, stem)
 
     args.data_dir = os.path.abspath(args.data_dir)
     args.synthetic_dir = os.path.abspath(args.synthetic_dir)
@@ -439,6 +499,7 @@ def main():
     print(f"  Num layers:     {args.num_layers}  (must equal cg_depth in CGT .pt)")
 
     all_results = []
+    all_curve_records = []
 
     # --- Phase 1: Evaluate on original data ---
     print("\n" + "#" * 80)
@@ -450,7 +511,8 @@ def main():
             dataset_name, models, args.data_dir,
             args.trials, args.semi_supervised, args.trial_id,
             args.epochs, args.patience,
-            args.lr, args.drop_rate, args.h_feats, args.num_layers)
+            args.lr, args.drop_rate, args.h_feats, args.num_layers,
+            curve_records=all_curve_records)
         all_results.extend(results)
 
     # --- Phase 2: Evaluate on synthetic data ---
@@ -516,7 +578,8 @@ def main():
                 args.trials, args.semi_supervised, args.trial_id,
                 args.epochs, args.patience,
                 args.lr, args.drop_rate, args.h_feats, args.num_layers,
-                norm_stats_path=norm_stats_path)
+                norm_stats_path=norm_stats_path,
+                curve_records=all_curve_records)
         all_results.extend(results)
 
     # --- Save and display results ---
@@ -533,6 +596,12 @@ def main():
         print_comparison(all_results, datasets, models)
     else:
         print("\nNo results to save.")
+
+    if all_curve_records:
+        curves_df = pd.DataFrame(all_curve_records)
+        curves_path = os.path.join(args.output_dir, 'divergence_curves.csv')
+        curves_df.to_csv(curves_path, index=False)
+        print(f"  Divergence curves saved to: {curves_path}")
 
 
 if __name__ == '__main__':

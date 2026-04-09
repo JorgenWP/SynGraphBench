@@ -72,6 +72,9 @@ class CrossGraphGNNDetector(BaseDetector):
         test_labels  = self.orig_labels[self.test_mask]
 
         test_score = None
+        val_auprc_curve  = []
+        test_auprc_curve = []
+
         for e in range(self.train_config['epochs']):
             # Train on synthetic graph
             self.model.train()
@@ -82,16 +85,19 @@ class CrossGraphGNNDetector(BaseDetector):
             loss.backward()
             optimizer.step()
 
-            # Validate on synthetic val nodes
+            # Evaluate val (synthetic) and test (original) every epoch
             self.model.eval()
             with torch.no_grad():
-                val_probs = self.model(self.syn_graph).softmax(1)[:, 1]
-                val_score = self.eval(val_labels, val_probs[self.syn_val_mask])
+                val_probs  = self.model(self.syn_graph).softmax(1)[:, 1]
+                val_score  = self.eval(val_labels,  val_probs[self.syn_val_mask])
+                test_probs = self.model(self.orig_graph).softmax(1)[:, 1]
+                epoch_test = self.eval(test_labels, test_probs[self.test_mask])
+
+            val_auprc_curve.append(val_score['AUPRC'])
+            test_auprc_curve.append(epoch_test['AUPRC'])
 
             if val_score[metric] > self.best_score:
-                with torch.no_grad():
-                    test_probs = self.model(self.orig_graph).softmax(1)[:, 1]
-                    test_score = self.eval(test_labels, test_probs[self.test_mask])
+                test_score        = epoch_test
                 self.best_score   = val_score[metric]
                 self.patience_knt = 0
                 print(f'  Epoch {e}, Loss {loss:.4f}, '
@@ -102,6 +108,8 @@ class CrossGraphGNNDetector(BaseDetector):
                 if self.patience_knt > patience:
                     break
 
+        test_score['val_auprc_curve']  = val_auprc_curve
+        test_score['test_auprc_curve'] = test_auprc_curve
         return test_score
 
 
