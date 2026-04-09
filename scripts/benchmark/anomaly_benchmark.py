@@ -46,6 +46,7 @@ from bench_utils import (
     load_cgt_synthetic_data, build_cgt_datasets,
     build_original_cg_datasets, print_comparison,
     load_bigg_synthetic_graph, apply_normalization,
+    resolve_cgt_trial_paths, make_cgt_rebuild_fn,
 )
 from models.anomaly_detection.cgt_detector import CompGraphDetector, CG_SUPPORTED_MODELS
 
@@ -277,13 +278,29 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
             trial_id=trial_id + t, semi_supervised=semi_supervised)))
 
     # --- CGT synthetic computation graphs ---
-    # The synthetic train/val split is baked into the .pt file, so it cannot
-    # vary across trials; only the random seed changes.
-    syn_train, syn_val, test_ds = build_cgt_datasets(data.graph, syn_data)
-    results.extend(_run_cg_trials(
-        dataset_name, cg_models, syn_train, syn_val, test_ds,
-        feat_dim, 'synthetic-cgt', trials, epochs, patience,
-        batch_size, lr, drop_rate, h_feats, num_layers))
+    # When per-trial .pt files exist (one per split), load a different file
+    # each trial so the synthetic split varies — matching the original-CG
+    # baseline. Otherwise fall back to single-file mode (seed-only variation).
+    trial_paths = resolve_cgt_trial_paths(syn_path, trials)
+
+    if trial_paths is not None:
+        print(f"  Found {len(trial_paths)} per-trial .pt files — varying splits across trials.")
+        syn_data_0 = load_cgt_synthetic_data(trial_paths[0])
+        syn_train0, syn_val0, test_ds0 = build_cgt_datasets(data.graph, syn_data_0)
+        rebuild_fn = make_cgt_rebuild_fn(
+            data.graph, trial_paths,
+            trial_id_offset=trial_id, semi_supervised=semi_supervised)
+        results.extend(_run_cg_trials(
+            dataset_name, cg_models, syn_train0, syn_val0, test_ds0,
+            feat_dim, 'synthetic-cgt', trials, epochs, patience,
+            batch_size, lr, drop_rate, h_feats, num_layers,
+            rebuild_datasets_fn=rebuild_fn))
+    else:
+        syn_train, syn_val, test_ds = build_cgt_datasets(data.graph, syn_data)
+        results.extend(_run_cg_trials(
+            dataset_name, cg_models, syn_train, syn_val, test_ds,
+            feat_dim, 'synthetic-cgt', trials, epochs, patience,
+            batch_size, lr, drop_rate, h_feats, num_layers))
 
     del data
     return results
@@ -453,10 +470,19 @@ def main():
             syn_path = os.path.join(task_dir, stem)
 
         if not os.path.exists(syn_path):
-            print(f"\n  Skipping {dataset_name}: {syn_path} not found")
-            continue
-
-        print(f"\n  Found {args.synthetic_type} synthetic data: {syn_path}")
+            # Check for per-trial files before skipping (CGT multi-trial)
+            if args.synthetic_type == 'comp-graph':
+                trial_paths = resolve_cgt_trial_paths(syn_path, args.trials)
+                if trial_paths is not None:
+                    print(f"\n  Found {len(trial_paths)} per-trial .pt files for {dataset_name}")
+                else:
+                    print(f"\n  Skipping {dataset_name}: {syn_path} not found")
+                    continue
+            else:
+                print(f"\n  Skipping {dataset_name}: {syn_path} not found")
+                continue
+        else:
+            print(f"\n  Found {args.synthetic_type} synthetic data: {syn_path}")
 
         if args.synthetic_type == 'comp-graph':
             # CGT: use computation graph trees with GADBench GNNs

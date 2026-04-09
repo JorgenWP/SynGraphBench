@@ -327,6 +327,70 @@ def _extract_cg_params(syn_data):
     return step_num, sample_num, noise_num, self_conn
 
 
+def resolve_cgt_trial_paths(syn_path, num_trials):
+    """Check for per-trial .pt files: {stem}_t{t}.pt for t in 0..num_trials-1.
+
+    Returns list of paths if all num_trials files exist, else None.
+    """
+    base, ext = os.path.splitext(syn_path)
+    paths = [f"{base}_t{t}{ext}" for t in range(num_trials)]
+    found = [p for p in paths if os.path.exists(p)]
+
+    if len(found) == num_trials:
+        return paths
+    elif len(found) > 0:
+        print(f"  WARNING: found {len(found)}/{num_trials} per-trial .pt files. "
+              f"Need all {num_trials}. Falling back to single-file mode.")
+    return None
+
+
+def make_cgt_rebuild_fn(original_graph, trial_paths,
+                        trial_id_offset=0, semi_supervised=False):
+    """Return a rebuild_datasets_fn(t) that loads per-trial .pt files.
+
+    For trial t: loads trial_paths[t], builds synthetic train/val from it,
+    and builds the test set from the original graph using mask column
+    (trial_id_offset + t) so the test split varies across trials.
+    """
+    # Precompute graph data shared across trials
+    adj_list = dgl_to_adj_list(original_graph)
+    features = original_graph.ndata['feature'].cpu().numpy().astype(np.float32)
+    features = normalize(features, axis=1, norm='l2')
+    labels = original_graph.ndata['label'].cpu().numpy().astype(np.int64)
+
+    def rebuild(t):
+        syn_data = load_cgt_synthetic_data(trial_paths[t])
+        step_num, sample_num, noise_num, self_conn = _extract_cg_params(syn_data)
+        total_sample = sample_num + noise_num
+
+        # Test set from original graph with matching mask column
+        mask_col = (trial_id_offset + t) + (10 if semi_supervised else 0)
+        test_ids = original_graph.ndata['test_masks'][:, mask_col].bool().nonzero(
+            as_tuple=True)[0].numpy()
+
+        test_ds = OriginalCompGraphDataset(
+            adj_list, features, labels, test_ids,
+            step_num, sample_num, noise_num, self_conn)
+
+        cluster_centers = syn_data['cluster_centers']
+        if not isinstance(cluster_centers, torch.Tensor):
+            cluster_centers = torch.tensor(cluster_centers)
+
+        syn_train = SyntheticCompGraphDataset(
+            syn_data['gen_train_ids'], syn_data['train_labels'],
+            cluster_centers, step_num, total_sample, self_conn)
+        syn_val = SyntheticCompGraphDataset(
+            syn_data['gen_val_ids'], syn_data['val_labels'],
+            cluster_centers, step_num, total_sample, self_conn)
+
+        print(f"  Trial {t}: syn_train={len(syn_train)}, syn_val={len(syn_val)}, "
+              f"test={len(test_ds)}")
+
+        return syn_train, syn_val, test_ds
+
+    return rebuild
+
+
 def build_cgt_datasets(original_graph, syn_data):
     """Build CGT computation graph datasets for synthetic training.
 

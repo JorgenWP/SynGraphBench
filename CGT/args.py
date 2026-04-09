@@ -24,10 +24,15 @@ def get_parser():
     # Dataset-related hyperparameters
     parser.add_argument('--data_dir', type=str, default="./data",
                         help='Dataset location.')
+    parser.add_argument('--trial_id', type=int, default=0,
+                        help='GADBench mask column index for train/val/test split (0-9)')
     parser.add_argument('--save_dir', type=str, default="save",
                         help='Save location.')
     parser.add_argument('--dataset', type=str, default="cora",
                         help='Dataset to use.')
+    parser.add_argument('--task', type=str, default="hidden_labels",
+                        choices=['hidden_labels', 'hidden_links'],
+                        help='Pipeline task (determines output subdirectory).')
 
     # GNN structure-related hyperparameters
     parser.add_argument('--hidden_dim', type=int, default=64,

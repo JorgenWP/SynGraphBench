@@ -45,7 +45,7 @@ def main():
 
     # Use pre-defined splits for DGL/GADBench datasets, random splits otherwise
     if is_dgl_dataset(args):
-        ids = split_ids_from_dgl(args)
+        ids = split_ids_from_dgl(args, trial_id=args.trial_id)
         print(f"Using GADBench splits: train={len(ids['train'])}, val={len(ids['val'])}, test={len(ids['test'])}")
     else:
         ids = split_ids(args, feat.shape[0])
@@ -57,7 +57,7 @@ def main():
     print('Total CGT time: {:.3f}'.format(perf_counter() - start_time))
 
     # Save synthetic data
-    save_dir = os.path.join(args.data_dir, '..', 'synthetic', 'cgt')
+    save_dir = os.path.join(args.data_dir, '..', 'synthetic', 'cgt', args.dataset, args.task)
     os.makedirs(save_dir, exist_ok=True)
     save_name = (
         f"{args.dataset}"
@@ -65,6 +65,7 @@ def main():
         f"_k{args.cluster_num}"
         f"_d{args.cg_depth}"
         f"_f{args.cg_fanout}"
+        f"_t{args.trial_id}"
         f".pt"
     )
     save_path = os.path.join(save_dir, save_name)

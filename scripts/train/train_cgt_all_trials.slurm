@@ -1,16 +1,16 @@
 #!/bin/sh
-#SBATCH --account=share-ie-idi      # "share-ie-idi" "ie-idi" 
-#SBATCH --job-name="CGT_TRAIN"
-#SBATCH --time=00:45:00             # Time limit (hh:mm:ss)
+#SBATCH --account=share-ie-idi      # "share-ie-idi" "ie-idi"
+#SBATCH --job-name="CGT_ALL_TRIALS"
+#SBATCH --time=08:00:00             # Time limit (hh:mm:ss)
 
 #SBATCH --partition=GPUQ            # Asking for GPU
-#SBATCH --gres=gpu:2                # Number of GPUs 
+#SBATCH --gres=gpu:2                # Number of GPUs
 #SBATCH --mem=10G                   # Gigabytes of system memory (not GPU memory)
 #SBATCH --nodes=2                   # Number of compute nodes
 #SBATCH --ntasks-per-node=2         # Number of tasks per node
 
-#SBATCH --output=output/cgt/train/output.txt    # Specifying 'stdout'
-#SBATCH --error=output/cgt/train/error.txt      # Specifying 'stderr'
+#SBATCH --output=output/cgt/train_all_trials/output.txt    # Specifying 'stdout'
+#SBATCH --error=output/cgt/train_all_trials/error.txt      # Specifying 'stderr'
 
 #SBATCH --mail-user=<email>@stud.ntnu.no         # The email to send notifications to
 #SBATCH --mail-type=ALL
@@ -37,7 +37,8 @@ CLUSTER_SIZE=1
 GPT_BATCH_SIZE=128
 CG_DEPTH=2
 CG_FANOUT=5
+NUM_TRIALS=10
 TASK="hidden_labels"
 
-# Run the CGT training and generation script
-bash scripts/train/train_cgt.sh "$DATASET" "$GPT_EPOCHS" "$CLUSTER_NUM" "$CLUSTER_SIZE" "$GPT_BATCH_SIZE" "$CG_DEPTH" "$CG_FANOUT" 0 "$TASK"
+# Run CGT training on all trials
+bash scripts/train/train_cgt_all_trials.sh "$DATASET" "$GPT_EPOCHS" "$CLUSTER_NUM" "$CLUSTER_SIZE" "$GPT_BATCH_SIZE" "$CG_DEPTH" "$CG_FANOUT" "$NUM_TRIALS" "$TASK"
