@@ -41,11 +41,12 @@ NOISE_STD=0.1
 SS_MAX_PROB=0.5
 SS_START_EPOCH=0
 BFS_PREPROCESS=True
-NORMALIZE=none          # "zscore", "minmax", "row", or "none"
+NORMALIZE=none          # "zscore", "minmax", "row", "quantile", or "none"
 LOSS_WEIGHTS="1,1"      # cont,label weights relative to struct (applied after dynamic normalization)
 HETERO_FEAT=false       # "true" for heteroscedastic feature prediction (mean + variance), "false" for deterministic MSE
 MASK_TEST_LABELS=false  # "true" to exclude test node labels (split 0) from label loss
 LOGVAR_FLOOR=-4.0       # lower clamp for log-variance in hetero_feat mode
+BINARY_FEAT=false       # "true" to auto-detect binary features and use BCE loss + Bernoulli sampling
 
 # Run the BiGG training and generation script
-bash scripts/train/train_bigg.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$LOGVAR_FLOOR"
+bash scripts/train/train_bigg.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$LOGVAR_FLOOR" "$BINARY_FEAT"

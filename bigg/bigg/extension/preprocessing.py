@@ -5,6 +5,7 @@ post-processing graphs so that the pipeline scripts stay focused on
 training and generation.
 """
 
+import math
 import random
 from collections import deque
 
@@ -254,7 +255,7 @@ def forest_fire_subsample(graph_nx, node_data, target_size, burn_prob, seed_node
 # Feature normalisation
 # ---------------------------------------------------------------------------
 
-NORMALIZATION_METHODS = ('zscore', 'minmax', 'row')
+NORMALIZATION_METHODS = ('zscore', 'minmax', 'row', 'quantile')
 
 
 def normalize_features(features, method):
@@ -306,6 +307,25 @@ def normalize_features(features, method):
         norms[norms == 0] = 1.0
         features = features / norms
 
+    elif method == 'quantile':
+        # Rank-based inverse normal transform: any distribution → N(0,1)
+        N, D = features.shape
+        sorted_values, _ = features.sort(dim=0)
+        stats['sorted_values'] = sorted_values  # (N, D) — the empirical CDF
+
+        eps = 1e-6
+        transformed = torch.empty_like(features)
+        for d in range(D):
+            col = features[:, d]
+            sv = sorted_values[:, d]
+            # Rank each value in the sorted order → uniform [0, 1]
+            ranks = torch.searchsorted(sv, col).clamp(0, N - 1).float()
+            uniform = (ranks + 0.5) / N  # midpoint rank for continuity
+            uniform = uniform.clamp(eps, 1.0 - eps)
+            # Inverse normal CDF: uniform → N(0,1)
+            transformed[:, d] = math.sqrt(2) * torch.erfinv(2 * uniform - 1)
+        features = transformed
+
     return features, stats
 
 
@@ -334,8 +354,97 @@ def apply_normalization(features, stats):
         norms = features.norm(p=2, dim=1, keepdim=True)
         norms[norms == 0] = 1.0
         features = features / norms
+    elif method == 'quantile':
+        sorted_values = stats['sorted_values']  # (N_train, D)
+        N_train = sorted_values.shape[0]
+        D = features.shape[1]
+        eps = 1e-6
+        transformed = torch.empty_like(features)
+        for d in range(D):
+            col = features[:, d]
+            sv = sorted_values[:, d]
+            ranks = torch.searchsorted(sv, col).clamp(0, N_train - 1).float()
+            uniform = (ranks + 0.5) / N_train
+            uniform = uniform.clamp(eps, 1.0 - eps)
+            transformed[:, d] = math.sqrt(2) * torch.erfinv(2 * uniform - 1)
+        features = transformed
 
     return features
+
+
+def invert_normalization(features, stats):
+    """Invert a previously computed normalization to recover original-space features.
+
+    Only lossless methods (zscore, minmax, quantile) are invertible.
+    Raises ``ValueError`` for ``'row'`` normalization (lossy).
+
+    Parameters
+    ----------
+    features : torch.Tensor
+        Normalised feature matrix of shape (N, D).
+    stats : dict
+        Stats dict returned by :func:`normalize_features`.
+
+    Returns
+    -------
+    torch.Tensor
+        Features in the original (pre-normalisation) space.
+    """
+    method = stats['method']
+
+    if method == 'zscore':
+        features = features * stats['std'] + stats['mean']
+    elif method == 'minmax':
+        features = features * stats['denom'] + stats['min']
+    elif method == 'quantile':
+        sorted_values = stats['sorted_values']  # (N_train, D)
+        N_train = sorted_values.shape[0]
+        D = features.shape[1]
+        inverted = torch.empty_like(features)
+        for d in range(D):
+            col = features[:, d]
+            sv = sorted_values[:, d]
+            # Normal CDF: N(0,1) → uniform [0, 1]
+            uniform = 0.5 * (1.0 + torch.erf(col / math.sqrt(2)))
+            # Uniform → index into sorted training values
+            indices = (uniform * (N_train - 1)).clamp(0, N_train - 1)
+            lo = indices.long().clamp(0, N_train - 2)
+            hi = lo + 1
+            frac = indices - lo.float()
+            inverted[:, d] = sv[lo] * (1 - frac) + sv[hi] * frac
+        features = inverted
+    elif method == 'row':
+        raise ValueError(
+            "Row (L2) normalization is lossy and cannot be inverted — "
+            "original magnitudes are not stored."
+        )
+
+    return features
+
+
+# ---------------------------------------------------------------------------
+# Binary feature detection
+# ---------------------------------------------------------------------------
+
+def detect_binary_columns(features):
+    """Return sorted indices of columns containing only values 0 and 1.
+
+    Parameters
+    ----------
+    features : torch.Tensor
+        Node feature matrix of shape (N, D).
+
+    Returns
+    -------
+    list[int]
+        Sorted column indices where every value is either 0.0 or 1.0.
+    """
+    binary_idx = []
+    for d in range(features.shape[1]):
+        unique = features[:, d].unique()
+        if len(unique) <= 2 and all(v.item() in (0.0, 1.0) for v in unique):
+            binary_idx.append(d)
+    return binary_idx
 
 
 # ---------------------------------------------------------------------------

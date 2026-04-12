@@ -26,6 +26,7 @@ The generative model captures the joint distribution of graph structure and node
   * *Gaussian noise* (`noise_std`): Adds random noise to hidden state during training to improve generalization. Default `0.0` (disabled).
   * *Scheduled self-sampling* (`ss_max_prob`, `ss_start_epoch`): Gradually replaces teacher-forced inputs with the model's own predictions during training, reducing exposure bias. `ss_max_prob` controls the max probability (default `0.0` = disabled); `ss_start_epoch` controls when ramp-up begins.
 * **Label Masking (optional):** `--mask_test_labels` excludes test node labels (split 0) from the label loss during training, preventing data leakage in anomaly detection benchmarks. The model still sees test node features and structure (and uses test labels for teacher forcing / state updates) — only the label *loss* is masked. Appends `_masked` to the save name.
+* **Binary Feature Head (optional):** `--binary_feat` auto-detects binary {0,1} feature columns and uses a separate BCE loss + Bernoulli sampling head for them, instead of the Gaussian head. Binary columns also skip normalization. Appends `_binfeat` to the save name.
 * **Output format:** A full DGL graph stored as a file under `datasets/synthetic/bigg/<dataset>/<task>/`.
 * **Important Files:**
   * `bigg/extension/pipeline.py`: Conditional model training (features + labels).

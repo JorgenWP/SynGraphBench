@@ -57,9 +57,10 @@ An extension added to this project that reuses existing GNN architectures for ed
 
 When BiGG trains with feature normalization (e.g., `-normalize zscore`), the synthetic graph's features are in normalized space. The benchmarks must apply the same transform to the original graph's features before testing, otherwise the model trains on one feature distribution and tests on another.
 
-* `bigg/bigg/extension/preprocessing.py`: `normalize_features()` returns `(features, stats)` — stats dict contains the method and parameters (e.g., mean/std for zscore). `apply_normalization()` applies saved stats to new data.
-* `bigg/bigg/extension/pipeline.py`: Saves `_norm_stats.pt` alongside the synthetic graph.
-* `scripts/benchmark/bench_utils.py`: `apply_normalization()` duplicated here for benchmark imports.
+* `bigg/bigg/extension/preprocessing.py`: `normalize_features()` returns `(features, stats)` — stats dict contains the method and parameters (e.g., mean/std for zscore, sorted_values for quantile). `apply_normalization()` applies saved stats to new data. `invert_normalization()` reverses lossless normalizations (zscore, minmax, quantile; errors on row).
+* Normalization methods: `zscore` (zero mean, unit variance), `minmax` ([0,1] scaling), `row` (L2 row norm, lossy), `quantile` (rank-based inverse normal transform — maps any distribution to N(0,1)).
+* `bigg/bigg/extension/pipeline.py`: Saves `_norm_stats.pt` alongside the synthetic graph. When `--binary_feat` is enabled, also saves `_binary_idx.pt`.
+* `scripts/benchmark/bench_utils.py`: `apply_normalization()` duplicated here for benchmark imports. When stats contain `binary_idx`, only non-binary columns are normalized.
 * Both anomaly and link prediction benchmarks: load stats if the `_norm_stats.pt` file exists, apply to original graph features before cross-graph evaluation. If no stats file exists (non-normalized runs), features are used as-is.
 
 This only affects the BiGG full-graph path. CGT handles its own L2 normalization internally (`build_cgt_datasets` in `bench_utils.py`).

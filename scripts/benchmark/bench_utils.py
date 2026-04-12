@@ -1,4 +1,5 @@
 import argparse
+import math
 import os
 import numpy as np
 import torch
@@ -163,17 +164,104 @@ def apply_normalization(features, stats):
         Node feature matrix of shape (N, D).
     stats : dict
         Stats dict saved by BiGG pipeline (contains 'method' and params).
+        If stats contains ``'binary_idx'``, those columns are left untouched.
     """
+    binary_idx = stats.get('binary_idx', [])
+    if binary_idx:
+        all_idx = list(range(features.shape[1]))
+        cont_idx = sorted(set(all_idx) - set(binary_idx))
+        cont_features = features[:, cont_idx]
+    else:
+        cont_features = features
+
     method = stats['method']
 
     if method == 'zscore':
-        features = (features - stats['mean']) / stats['std']
+        cont_features = (cont_features - stats['mean']) / stats['std']
     elif method == 'minmax':
-        features = (features - stats['min']) / stats['denom']
+        cont_features = (cont_features - stats['min']) / stats['denom']
     elif method == 'row':
-        norms = features.norm(p=2, dim=1, keepdim=True)
+        norms = cont_features.norm(p=2, dim=1, keepdim=True)
         norms[norms == 0] = 1.0
-        features = features / norms
+        cont_features = cont_features / norms
+    elif method == 'quantile':
+        sorted_values = stats['sorted_values']  # (N_train, D_cont)
+        N_train = sorted_values.shape[0]
+        D = cont_features.shape[1]
+        eps = 1e-6
+        transformed = torch.empty_like(cont_features)
+        for d in range(D):
+            col = cont_features[:, d]
+            sv = sorted_values[:, d]
+            ranks = torch.searchsorted(sv, col).clamp(0, N_train - 1).float()
+            uniform = (ranks + 0.5) / N_train
+            uniform = uniform.clamp(eps, 1.0 - eps)
+            transformed[:, d] = math.sqrt(2) * torch.erfinv(2 * uniform - 1)
+        cont_features = transformed
+
+    if binary_idx:
+        features = features.clone()
+        features[:, cont_idx] = cont_features
+    else:
+        features = cont_features
+
+    return features
+
+
+def invert_normalization(features, stats):
+    """Invert a previously computed normalization to recover original-space features.
+
+    Only lossless methods (zscore, minmax, quantile) are invertible.
+    Raises ``ValueError`` for ``'row'`` normalization (lossy).
+
+    Parameters
+    ----------
+    features : torch.Tensor
+        Normalised feature matrix of shape (N, D).
+    stats : dict
+        Stats dict saved by BiGG pipeline.
+        If stats contains ``'binary_idx'``, those columns are left untouched.
+    """
+    binary_idx = stats.get('binary_idx', [])
+    if binary_idx:
+        all_idx = list(range(features.shape[1]))
+        cont_idx = sorted(set(all_idx) - set(binary_idx))
+        cont_features = features[:, cont_idx]
+    else:
+        cont_features = features
+
+    method = stats['method']
+
+    if method == 'zscore':
+        cont_features = cont_features * stats['std'] + stats['mean']
+    elif method == 'minmax':
+        cont_features = cont_features * stats['denom'] + stats['min']
+    elif method == 'quantile':
+        sorted_values = stats['sorted_values']  # (N_train, D_cont)
+        N_train = sorted_values.shape[0]
+        D = cont_features.shape[1]
+        inverted = torch.empty_like(cont_features)
+        for d in range(D):
+            col = cont_features[:, d]
+            sv = sorted_values[:, d]
+            uniform = 0.5 * (1.0 + torch.erf(col / math.sqrt(2)))
+            indices = (uniform * (N_train - 1)).clamp(0, N_train - 1)
+            lo = indices.long().clamp(0, N_train - 2)
+            hi = lo + 1
+            frac = indices - lo.float()
+            inverted[:, d] = sv[lo] * (1 - frac) + sv[hi] * frac
+        cont_features = inverted
+    elif method == 'row':
+        raise ValueError(
+            "Row (L2) normalization is lossy and cannot be inverted — "
+            "original magnitudes are not stored."
+        )
+
+    if binary_idx:
+        features = features.clone()
+        features[:, cont_idx] = cont_features
+    else:
+        features = cont_features
 
     return features
 

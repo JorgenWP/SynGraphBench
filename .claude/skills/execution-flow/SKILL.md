@@ -56,17 +56,21 @@ bash scripts/benchmark/run_link_benchmark.sh tolokers GCN,GIN 1 bigg random mlp 
 
 ### Training
 
-**`bash scripts/train/train_bigg.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [subsample] [subsample_size] [burn_prob] [num_subgraphs]`**
-Train BiGG conditional model (features + labels). Defaults: `tolokers 1024 1 50 0.001 256 0.0 0.0 0 False none 1,1 false false false 2000 0.3 ""`.
+**`bash scripts/train/train_bigg.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [binary_feat]`**
+Train BiGG conditional model (features + labels). Defaults: `tolokers 1024 1 50 0.001 256 0.0 0.0 0 False none 1,1 false false -4.0 false`.
 * `noise_std`: Gaussian noise std added to hidden state during training (0.0 = disabled).
 * `ss_max_prob`: Max scheduled-sampling probability (0.0 = disabled; uses teacher forcing only).
 * `ss_start_epoch`: Epoch at which scheduled sampling begins ramping up.
 * `bfs_preprocess`: Apply fixed BFS node ordering before training (`True`/`False`).
-* `normalize`: Feature normalisation method (`zscore`, `minmax`, `row`, or `none`).
+* `normalize`: Feature normalisation method (`zscore`, `minmax`, `row`, `quantile`, or `none`). Quantile uses rank-based inverse normal transform — maps any distribution to N(0,1).
 * `loss_weights`: Comma-separated cont,label weights relative to struct (e.g., `0.1,0.1`).
 * `hetero_feat`: `true` for heteroscedastic feature prediction (mean + variance).
 * `mask_test_labels`: `true` to exclude test node labels (split 0) from label loss, preventing data leakage in anomaly benchmarks. Appends `_masked` to save name.
-* `subsample`: `true` to sample subgraphs via forest fire for VRAM-limited training. Samples are independent (with replacement). Outputs a directory of `subgraph_N` files; benchmark auto-combines via `dgl.batch()`. Appends `_subM_sizeS_pP` to save name.
+* `logvar_floor`: Lower clamp for log-variance in hetero_feat mode (default: -4.0).
+* `binary_feat`: `true` to auto-detect binary feature columns and use BCE loss + Bernoulli sampling instead of Gaussian head. Appends `_binfeat` to save name. Binary columns skip normalization.
+
+**`bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat]`**
+Train BiGG with forest fire subsampling for VRAM-limited training. Same args as above, plus:
 * `subsample_size`: target nodes per subgraph (default: 2000).
 * `burn_prob`: forest fire burn probability — controls subgraph density (default: 0.3).
 * `num_subgraphs`: number of subgraphs to generate (default: `ceil(N / subsample_size)`).

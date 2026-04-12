@@ -41,7 +41,7 @@ NOISE_STD=0.3
 SS_MAX_PROB=0.0
 SS_START_EPOCH=0
 BFS_PREPROCESS=True
-NORMALIZE=zscore        # "zscore", "minmax", "row", or "none"
+NORMALIZE=zscore        # "zscore", "minmax", "row", "quantile", or "none"
 LOSS_WEIGHTS="0.1,0.1"  # cont,label weights relative to struct (applied after dynamic normalization)
 HETERO_FEAT=true        # "true" for heteroscedastic feature prediction (mean + variance), "false" for deterministic MSE
 MASK_TEST_LABELS=true   # "true" to exclude test node labels (split 0) from label loss
@@ -49,6 +49,7 @@ LOGVAR_FLOOR=-4.0       # lower clamp for log-variance in hetero_feat mode
 SUBSAMPLE_SIZE=2000     # target number of nodes per BFS subgraph
 BURN_PROB=0.3           # forest fire burn probability (controls subgraph density)
 NUM_SUBGRAPHS=""        # number of subgraphs to use (leave empty for auto = ceil(N / subsample_size))
+BINARY_FEAT=false       # "true" to auto-detect binary features and use BCE loss + Bernoulli sampling
 
 # Run the BiGG subsampled training and generation script
-bash scripts/train/train_bigg_subsample.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$LOGVAR_FLOOR" "$SUBSAMPLE_SIZE" "$BURN_PROB" "$NUM_SUBGRAPHS"
+bash scripts/train/train_bigg_subsample.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$LOGVAR_FLOOR" "$SUBSAMPLE_SIZE" "$BURN_PROB" "$NUM_SUBGRAPHS" "$BINARY_FEAT"

@@ -21,6 +21,7 @@ from bigg.extension.preprocessing import (
     dgl_to_networkx,
     bfs_reorder,
     normalize_features,
+    detect_binary_columns,
     build_generated_dgl,
     partition_graph_bfs,
     forest_fire_subsample,
@@ -56,6 +57,9 @@ def main():
     pipeline_parser.add_argument('-logvar_floor', type=float, default=-4.0,
                                  help='Lower clamp for log-variance in hetero_feat mode. '
                                       'Lower values allow tighter distributions (default: -4.0)')
+    pipeline_parser.add_argument('--binary_feat', action='store_true', default=False,
+                                 help='Auto-detect binary feature columns and use BCE loss + '
+                                      'Bernoulli sampling instead of Gaussian head (default: off)')
     pipeline_parser.add_argument('--mask_test_labels', action='store_true', default=False,
                                  help='Exclude test node labels (split 0) from label loss to prevent '
                                       'data leakage in anomaly detection benchmarks')
@@ -86,10 +90,24 @@ def main():
     cont_feats = graph.ndata['feature']
     labels = graph.ndata['label']
 
-    # Optionally normalise features
+    # Detect binary columns before normalization (binary features skip normalization)
+    binary_idx = []
+    if pipeline_args.binary_feat:
+        binary_idx = detect_binary_columns(cont_feats)
+        print(f'Binary feature columns detected: {binary_idx} '
+              f'({len(binary_idx)} binary, {cont_feats.shape[1] - len(binary_idx)} continuous)')
+
+    # Optionally normalise features (only non-binary columns)
     norm_stats = None
     if pipeline_args.normalize is not None:
-        cont_feats, norm_stats = normalize_features(cont_feats, pipeline_args.normalize)
+        if binary_idx:
+            cont_idx = sorted(set(range(cont_feats.shape[1])) - set(binary_idx))
+            normed, norm_stats = normalize_features(cont_feats[:, cont_idx], pipeline_args.normalize)
+            cont_feats = cont_feats.clone()
+            cont_feats[:, cont_idx] = normed
+            norm_stats['binary_idx'] = binary_idx
+        else:
+            cont_feats, norm_stats = normalize_features(cont_feats, pipeline_args.normalize)
         print(f'Applied {pipeline_args.normalize} normalisation to features')
 
     #Determine dimensions of features
@@ -156,13 +174,17 @@ def main():
                                          label_temp=pipeline_args.label_temp,
                                          noise_std=pipeline_args.noise_std,
                                          hetero_feat=pipeline_args.hetero_feat,
-                                         logvar_floor=pipeline_args.logvar_floor).to(cmd_args.device)
+                                         logvar_floor=pipeline_args.logvar_floor,
+                                         binary_feat=pipeline_args.binary_feat,
+                                         binary_idx=binary_idx).to(cmd_args.device)
     elif pipeline_args.model_type == 'independent':
         model = BiggWithFeatsAndLabels(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
                                        label_temp=pipeline_args.label_temp,
                                        noise_std=pipeline_args.noise_std,
                                        hetero_feat=pipeline_args.hetero_feat,
-                                       logvar_floor=pipeline_args.logvar_floor).to(cmd_args.device)
+                                       logvar_floor=pipeline_args.logvar_floor,
+                                       binary_feat=pipeline_args.binary_feat,
+                                       binary_idx=binary_idx).to(cmd_args.device)
 
     optimizer = optim.Adam(model.parameters(), lr=cmd_args.learning_rate, weight_decay=1e-4)
 
@@ -196,15 +218,17 @@ def main():
         calib_loss = (-ll / calib_num).item()
 
     calib_cont = abs(model._ll_cont / calib_num) or 1.0
+    calib_bin = abs(model._ll_bin / calib_num) or 1.0
     calib_label = abs(model._ll_label / calib_num) or 1.0
-    calib_struct = abs(calib_loss - calib_cont - calib_label) or 1.0
+    calib_struct = abs(calib_loss - calib_cont - calib_bin - calib_label) or 1.0
 
     model.w_cont = (calib_struct / calib_cont) * user_w_cont
+    model.w_bin = (calib_struct / calib_bin) * user_w_cont  # binary shares cont weight
     model.w_label = (calib_struct / calib_label) * user_w_label
 
     print(f'Calibration magnitudes — struct: {calib_struct:.4f}, '
-          f'cont: {calib_cont:.4f}, label: {calib_label:.4f}')
-    print(f'Dynamic weights — w_cont: {model.w_cont:.4f}, w_label: {model.w_label:.4f}')
+          f'cont: {calib_cont:.4f}, bin: {calib_bin:.4f}, label: {calib_label:.4f}')
+    print(f'Dynamic weights — w_cont: {model.w_cont:.4f}, w_bin: {model.w_bin:.4f}, w_label: {model.w_label:.4f}')
 
     pbar = tqdm(range(cmd_args.num_epochs))
     print(f'Start learn ({len(subgraphs)} subgraph(s), loss weights relative to struct: cont={user_w_cont}, label={user_w_label})')
@@ -217,6 +241,7 @@ def main():
 
         epoch_loss_val = 0.0
         epoch_ll_cont = 0.0
+        epoch_ll_bin = 0.0
         epoch_ll_label = 0.0
         epoch_nodes = 0
 
@@ -248,14 +273,16 @@ def main():
 
             epoch_loss_val += sg_loss_val
             epoch_ll_cont  += model._ll_cont
+            epoch_ll_bin   += model._ll_bin
             epoch_ll_label += model._ll_label
             epoch_nodes    += sub_num_nodes
 
         # Epoch-level monitoring (averaged across subgraphs)
         avg_loss    = epoch_loss_val / len(subgraphs)
         ll_cont_val  = -epoch_ll_cont  / epoch_nodes
+        ll_bin_val   = -epoch_ll_bin   / epoch_nodes
         ll_label_val = -epoch_ll_label / epoch_nodes
-        ll_struct_val = avg_loss - ll_cont_val - ll_label_val
+        ll_struct_val = avg_loss - ll_cont_val - ll_bin_val - ll_label_val
 
         # Track memory usage
         ram_mb = process.memory_info().rss / 1024 ** 2
@@ -264,8 +291,9 @@ def main():
             vram_mb = torch.cuda.max_memory_allocated() / 1024 ** 2
             peak_vram_mb = max(peak_vram_mb, vram_mb)
 
+        bin_desc = f" | bin: {ll_bin_val:.4f}" if model.bin_feat_dim > 0 else ""
         pbar.set_description(
-            f"Loss: {avg_loss:.4f} | struct: {ll_struct_val:.4f} | cont: {ll_cont_val:.4f} | label: {ll_label_val:.4f}"
+            f"Loss: {avg_loss:.4f} | struct: {ll_struct_val:.4f} | cont: {ll_cont_val:.4f}{bin_desc} | label: {ll_label_val:.4f}"
         )
 
     print(f'\n=== Memory usage (training) ===')
@@ -280,8 +308,9 @@ def main():
     hetero_tag = 'hetero' if pipeline_args.hetero_feat else 'det'
     lvf_tag = f'_lvf{pipeline_args.logvar_floor}' if pipeline_args.hetero_feat else ''
     mask_tag = '_masked' if pipeline_args.mask_test_labels else ''
+    bin_tag = '_binfeat' if pipeline_args.binary_feat else ''
     sub_tag = f'_sub{len(subgraphs)}_size{pipeline_args.subsample_size}_p{pipeline_args.burn_prob}' if pipeline_args.subsample else ''
-    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{sub_tag}'
+    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{sub_tag}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
 
     model.eval()
@@ -312,6 +341,8 @@ def main():
 
         if norm_stats is not None:
             torch.save(norm_stats, os.path.join(out_dir, 'norm_stats.pt'))
+        if binary_idx:
+            torch.save(binary_idx, os.path.join(out_dir, 'binary_idx.pt'))
 
     else:
         # Single full graph — original code path
@@ -336,6 +367,8 @@ def main():
 
         if norm_stats is not None:
             torch.save(norm_stats, os.path.join(save_dir, save_name + '_norm_stats.pt'))
+        if binary_idx:
+            torch.save(binary_idx, os.path.join(save_dir, save_name + '_binary_idx.pt'))
 
 
 if __name__ == '__main__':
