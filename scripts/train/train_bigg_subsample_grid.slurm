@@ -1,7 +1,7 @@
 #!/bin/sh
 #SBATCH --account=share-ie-idi      # "share-ie-idi" "ie-idi"
-#SBATCH --job-name="BiGG_SUBSAMPLE_tolokers_grid"
-#SBATCH --time=01:30:00             # Per-task time limit (hh:mm:ss)
+#SBATCH --job-name="BiGG_SUBSAMPLE_questions_grid"
+#SBATCH --time=01:00:00             # Per-task time limit (hh:mm:ss)
 
 #SBATCH --partition=GPUQ            # Asking for GPU
 #SBATCH --gres=gpu:1                # Number of GPUs
@@ -12,8 +12,8 @@
 
 #SBATCH --array=1-12%4              # 12 combos, max 4 running concurrently
 
-#SBATCH --output=output/bigg/train/grid_%A_%a.out   # %A=parent job id, %a=array task id
-#SBATCH --error=output/bigg/train/grid_%A_%a.err
+#SBATCH --output=output/bigg/train/questions_grid_%A_%a.out   # %A=parent job id, %a=array task id
+#SBATCH --error=output/bigg/train/questions_grid_%A_%a.err
 
 #SBATCH --mail-user=eirimhau@stud.ntnu.no
 #SBATCH --mail-type=ALL
@@ -34,7 +34,7 @@ module load Anaconda3/2024.02-1
 conda activate bigg
 
 # Pick the parameter line for this array task (skipping comment / blank lines)
-PARAMS_FILE="scripts/train/bigg_tolokers_grid.txt"
+PARAMS_FILE="scripts/train/grid_config/bigg_questions_grid.txt"
 LINE=$(grep -v '^[[:space:]]*\(#\|$\)' "$PARAMS_FILE" | sed -n "${SLURM_ARRAY_TASK_ID}p")
 
 if [ -z "$LINE" ]; then
