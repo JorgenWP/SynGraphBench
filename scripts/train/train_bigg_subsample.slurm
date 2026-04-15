@@ -50,6 +50,9 @@ SUBSAMPLE_SIZE=2000     # target number of nodes per BFS subgraph
 BURN_PROB=0.7           # forest fire burn probability (controls subgraph density)
 NUM_SUBGRAPHS=15        # number of subgraphs to use (leave empty for auto = ceil(N / subsample_size))
 BINARY_FEAT=false       # "true" to auto-detect binary features and use BCE loss + Bernoulli sampling
+VAE_FEAT=false          # "true" to add a per-node label-agnostic CVAE latent shared across feature decoders
+VAE_DIM=16              # latent dimensionality when VAE_FEAT is on
+KL_WEIGHT=1.0           # coefficient on the KL term in the VAE ELBO
 
 # Run the BiGG subsampled training and generation script
-bash scripts/train/train_bigg_subsample.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$LOGVAR_FLOOR" "$SUBSAMPLE_SIZE" "$BURN_PROB" "$NUM_SUBGRAPHS" "$BINARY_FEAT"
+bash scripts/train/train_bigg_subsample.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$LOGVAR_FLOOR" "$SUBSAMPLE_SIZE" "$BURN_PROB" "$NUM_SUBGRAPHS" "$BINARY_FEAT" "$VAE_FEAT" "$VAE_DIM" "$KL_WEIGHT"

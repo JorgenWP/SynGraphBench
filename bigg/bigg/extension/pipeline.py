@@ -60,6 +60,14 @@ def main():
     pipeline_parser.add_argument('--binary_feat', action='store_true', default=False,
                                  help='Auto-detect binary feature columns and use BCE loss + '
                                       'Bernoulli sampling instead of Gaussian head (default: off)')
+    pipeline_parser.add_argument('--vae_feat', action='store_true', default=False,
+                                 help='Add a per-node label-agnostic CVAE latent shared across feature '
+                                      'decoders to capture cross-feature covariance (default: off)')
+    pipeline_parser.add_argument('-vae_dim', type=int, default=16,
+                                 help='Latent dimensionality when --vae_feat is on (default: 16)')
+    pipeline_parser.add_argument('-kl_weight', type=float, default=1.0,
+                                 help='Coefficient on the KL term in the VAE ELBO (default: 1.0). '
+                                      'Not subject to dynamic calibration.')
     pipeline_parser.add_argument('--mask_test_labels', action='store_true', default=False,
                                  help='Exclude test node labels (split 0) from label loss to prevent '
                                       'data leakage in anomaly detection benchmarks')
@@ -176,7 +184,10 @@ def main():
                                          hetero_feat=pipeline_args.hetero_feat,
                                          logvar_floor=pipeline_args.logvar_floor,
                                          binary_feat=pipeline_args.binary_feat,
-                                         binary_idx=binary_idx).to(cmd_args.device)
+                                         binary_idx=binary_idx,
+                                         vae_feat=pipeline_args.vae_feat,
+                                         vae_dim=pipeline_args.vae_dim,
+                                         kl_weight=pipeline_args.kl_weight).to(cmd_args.device)
     elif pipeline_args.model_type == 'independent':
         model = BiggWithFeatsAndLabels(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
                                        label_temp=pipeline_args.label_temp,
@@ -184,7 +195,10 @@ def main():
                                        hetero_feat=pipeline_args.hetero_feat,
                                        logvar_floor=pipeline_args.logvar_floor,
                                        binary_feat=pipeline_args.binary_feat,
-                                       binary_idx=binary_idx).to(cmd_args.device)
+                                       binary_idx=binary_idx,
+                                       vae_feat=pipeline_args.vae_feat,
+                                       vae_dim=pipeline_args.vae_dim,
+                                       kl_weight=pipeline_args.kl_weight).to(cmd_args.device)
 
     optimizer = optim.Adam(model.parameters(), lr=cmd_args.learning_rate, weight_decay=1e-4)
 
@@ -220,7 +234,9 @@ def main():
     calib_cont = abs(model._ll_cont / calib_num) or 1.0
     calib_bin = abs(model._ll_bin / calib_num) or 1.0
     calib_label = abs(model._ll_label / calib_num) or 1.0
-    calib_struct = abs(calib_loss - calib_cont - calib_bin - calib_label) or 1.0
+    # KL is in calib_loss when VAE is on; strip it out so it isn't baked into w_cont/w_bin/w_label.
+    calib_kl_contrib = pipeline_args.kl_weight * abs(model._kl / calib_num) if pipeline_args.vae_feat else 0.0
+    calib_struct = abs(calib_loss - calib_cont - calib_bin - calib_label - calib_kl_contrib) or 1.0
 
     model.w_cont = (calib_struct / calib_cont) * user_w_cont
     model.w_bin = (calib_struct / calib_bin) * user_w_cont  # binary shares cont weight
@@ -243,6 +259,7 @@ def main():
         epoch_ll_cont = 0.0
         epoch_ll_bin = 0.0
         epoch_ll_label = 0.0
+        epoch_kl = 0.0
         epoch_nodes = 0
 
         for gid, sub_nd, sub_lm, sub_num_nodes in subgraphs:
@@ -275,6 +292,7 @@ def main():
             epoch_ll_cont  += model._ll_cont
             epoch_ll_bin   += model._ll_bin
             epoch_ll_label += model._ll_label
+            epoch_kl       += model._kl
             epoch_nodes    += sub_num_nodes
 
         # Epoch-level monitoring (averaged across subgraphs)
@@ -282,7 +300,10 @@ def main():
         ll_cont_val  = -epoch_ll_cont  / epoch_nodes
         ll_bin_val   = -epoch_ll_bin   / epoch_nodes
         ll_label_val = -epoch_ll_label / epoch_nodes
-        ll_struct_val = avg_loss - ll_cont_val - ll_bin_val - ll_label_val
+        kl_val       = epoch_kl / epoch_nodes
+        # KL adds kl_weight*kl_val to the displayed loss; strip it out for the structure residual.
+        kl_loss_contrib = pipeline_args.kl_weight * kl_val if pipeline_args.vae_feat else 0.0
+        ll_struct_val = avg_loss - ll_cont_val - ll_bin_val - ll_label_val - kl_loss_contrib
 
         # Track memory usage
         ram_mb = process.memory_info().rss / 1024 ** 2
@@ -292,8 +313,9 @@ def main():
             peak_vram_mb = max(peak_vram_mb, vram_mb)
 
         bin_desc = f" | bin: {ll_bin_val:.4f}" if model.bin_feat_dim > 0 else ""
+        kl_desc = f" | kl: {kl_val:.4f}" if pipeline_args.vae_feat else ""
         pbar.set_description(
-            f"Loss: {avg_loss:.4f} | struct: {ll_struct_val:.4f} | cont: {ll_cont_val:.4f}{bin_desc} | label: {ll_label_val:.4f}"
+            f"Loss: {avg_loss:.4f} | struct: {ll_struct_val:.4f} | cont: {ll_cont_val:.4f}{bin_desc} | label: {ll_label_val:.4f}{kl_desc}"
         )
 
     print(f'\n=== Memory usage (training) ===')
@@ -309,8 +331,9 @@ def main():
     lvf_tag = f'_lvf{pipeline_args.logvar_floor}' if pipeline_args.hetero_feat else ''
     mask_tag = '_masked' if pipeline_args.mask_test_labels else ''
     bin_tag = '_binfeat' if pipeline_args.binary_feat else ''
+    vae_tag = f'_vae{pipeline_args.vae_dim}_kl{pipeline_args.kl_weight}' if pipeline_args.vae_feat else ''
     sub_tag = f'_sub{len(subgraphs)}_size{pipeline_args.subsample_size}_p{pipeline_args.burn_prob}' if pipeline_args.subsample else ''
-    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{sub_tag}'
+    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{vae_tag}{sub_tag}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
 
     model.eval()

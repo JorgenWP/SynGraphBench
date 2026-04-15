@@ -7,7 +7,7 @@
 # training subgraph.
 #
 # Usage:
-#   bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat]
+#   bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight]
 #
 # normalize:        feature normalisation — one of "zscore", "minmax", "row", "quantile", or "none" (default: none)
 # loss_weights:     comma-separated cont,label weights relative to struct, applied after dynamic normalization (default: 1,1)
@@ -18,10 +18,14 @@
 # burn_prob:        forest fire burn probability — controls subgraph density (default: 0.3)
 # num_subgraphs:    number of subgraphs to use (default: auto = ceil(N / subsample_size))
 # binary_feat:      "true" to auto-detect binary features and use BCE loss + Bernoulli sampling (default: false)
+# vae_feat:         "true" to add a per-node label-agnostic CVAE latent shared across feature decoders (default: false)
+# vae_dim:          latent dimensionality when vae_feat is on (default: 16)
+# kl_weight:        coefficient on the KL term in the VAE ELBO (default: 1.0)
 #
 # Examples:
 #   bash scripts/train/train_bigg_subsample.sh reddit -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true -4.0 2000 0.3
 #   bash scripts/train/train_bigg_subsample.sh reddit -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true -4.0 2000 0.3 3 true
+#   bash scripts/train/train_bigg_subsample.sh tolokers -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true -10.0 500 0.2 15 false true 16 1.0
 #
 
 set -e
@@ -46,6 +50,9 @@ SUBSAMPLE_SIZE="${16:-2000}"
 BURN_PROB="${17:-0.3}"
 NUM_SUBGRAPHS="${18:-}"
 BINARY_FEAT="${19:-false}"
+VAE_FEAT="${20:-false}"
+VAE_DIM="${21:-16}"
+KL_WEIGHT="${22:-1.0}"
 
 cd "$(dirname "$0")/../../bigg"
 
@@ -69,6 +76,9 @@ echo "Subsample size:  $SUBSAMPLE_SIZE"
 echo "Burn prob:       $BURN_PROB"
 echo "Num subgraphs:   ${NUM_SUBGRAPHS:-auto}"
 echo "Binary feat:     $BINARY_FEAT"
+echo "VAE feat:        $VAE_FEAT"
+echo "VAE dim:         $VAE_DIM"
+echo "KL weight:       $KL_WEIGHT"
 echo ""
 
 NORM_FLAG=""
@@ -96,6 +106,11 @@ if [ "$BINARY_FEAT" = "true" ]; then
   BINARY_FLAG="--binary_feat"
 fi
 
+VAE_FLAG=""
+if [ "$VAE_FEAT" = "true" ]; then
+  VAE_FLAG="--vae_feat"
+fi
+
 python -m bigg.extension.pipeline \
   -data_dir "$DATASET" \
   -model_type conditional \
@@ -121,4 +136,7 @@ python -m bigg.extension.pipeline \
   -burn_prob "$BURN_PROB" \
   $NUM_SUBGRAPHS_FLAG \
   $BINARY_FLAG \
-  -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LOSS_WEIGHTS}_${HETERO_FEAT}_lvf${LOGVAR_FLOOR}_bin${BINARY_FEAT}_sub${SUBSAMPLE_SIZE}_p${BURN_PROB}"
+  $VAE_FLAG \
+  -vae_dim "$VAE_DIM" \
+  -kl_weight "$KL_WEIGHT" \
+  -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LOSS_WEIGHTS}_${HETERO_FEAT}_lvf${LOGVAR_FLOOR}_bin${BINARY_FEAT}_vae${VAE_FEAT}_vd${VAE_DIM}_kl${KL_WEIGHT}_sub${SUBSAMPLE_SIZE}_p${BURN_PROB}"
