@@ -1,6 +1,6 @@
 #!/bin/sh
 #SBATCH --account=share-ie-idi      # "share-ie-idi" "ie-idi"
-#SBATCH --job-name="BiGG_SUBSAMPLE_questions>"
+#SBATCH --job-name="BiGG_SUBSAMPLE_<something>"
 #SBATCH --time=01:30:00             # Time limit (hh:mm:ss)
 
 #SBATCH --partition=GPUQ            # Asking for GPU
@@ -10,10 +10,10 @@
 #SBATCH --nodes=2                   # Number of compute nodes
 #SBATCH --ntasks-per-node=2         # Number of tasks per node
 
-#SBATCH --output=output/bigg/train/output_questions2k.txt    # Specifying 'stdout'
-#SBATCH --error=output/bigg/train/error_questions2k.txt      # Specifying 'stderr'
+#SBATCH --output=output/bigg/train/output_<something>.txt    # Specifying 'stdout'
+#SBATCH --error=output/bigg/train/error_<something>.txt      # Specifying 'stderr'
 
-#SBATCH --mail-user=eirimhau@stud.ntnu.no         # The email to send notifications to
+#SBATCH --mail-user=<something>@stud.ntnu.no         # The email to send notifications to
 #SBATCH --mail-type=ALL
 
 WORKDIR=${SLURM_SUBMIT_DIR}
@@ -49,6 +49,7 @@ LOGVAR_FLOOR=-10.0       # lower clamp for log-variance in hetero_feat mode
 SUBSAMPLE_SIZE=2000     # target number of nodes per BFS subgraph
 BURN_PROB=0.7           # forest fire burn probability (controls subgraph density)
 NUM_SUBGRAPHS=15        # number of subgraphs to use (leave empty for auto = ceil(N / subsample_size))
+BINARY_FEAT=false       # "true" to auto-detect binary features and use BCE loss + Bernoulli sampling
 
 # Run the BiGG subsampled training and generation script
-bash scripts/train/train_bigg_subsample.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$LOGVAR_FLOOR" "$SUBSAMPLE_SIZE" "$BURN_PROB" "$NUM_SUBGRAPHS"
+bash scripts/train/train_bigg_subsample.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$LOGVAR_FLOOR" "$SUBSAMPLE_SIZE" "$BURN_PROB" "$NUM_SUBGRAPHS" "$BINARY_FEAT"
