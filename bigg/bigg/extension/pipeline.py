@@ -339,6 +339,19 @@ def main():
                 dgl.save_graphs(os.path.join(out_dir, f'subgraph_{i}'), [gen_dgl])
                 print(f'  Saved subgraph {i} ({sub_num_nodes} nodes)')
 
+        # Persist the real training subsamples alongside the synthetic outputs
+        # so EDA and the future training-source ablation can load them directly.
+        train_dir = os.path.join(out_dir, 'training_subsamples')
+        os.makedirs(train_dir, exist_ok=True)
+        for i, (sg_nx, sub_nd, orig_idx) in enumerate(raw_partitions):
+            train_dgl = dgl.from_networkx(sg_nx)
+            sub_nd_cpu = sub_nd.detach().cpu()
+            train_dgl.ndata['feature'] = sub_nd_cpu[:, :feat_dim]
+            train_dgl.ndata['label'] = sub_nd_cpu[:, feat_dim].long()
+            train_dgl.ndata['original_indices'] = orig_idx.cpu().long()
+            dgl.save_graphs(os.path.join(train_dir, f'subgraph_{i}'), [train_dgl])
+        print(f'  Saved {len(raw_partitions)} real training subsamples to {train_dir}')
+
         if norm_stats is not None:
             torch.save(norm_stats, os.path.join(out_dir, 'norm_stats.pt'))
         if binary_idx:
