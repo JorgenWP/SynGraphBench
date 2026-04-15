@@ -186,8 +186,10 @@ def forest_fire_subsample(graph_nx, node_data, target_size, burn_prob, seed_node
     Starting from *seed_node* (random if None), each unburned neighbor of a
     burning node is independently ignited with probability *burn_prob*.
     Burning propagates recursively until *target_size* nodes are collected.
-    If the fire dies before reaching *target_size*, a new random unburned
-    seed is chosen and burning continues.
+    If the fire dies before reaching *target_size*, it resumes from an
+    already-burned node that still has at least one unburned neighbor, which
+    keeps the sampled subgraph within a single connected component. The loop
+    exits early if the reachable connected component is exhausted.
 
     Parameters
     ----------
@@ -221,14 +223,15 @@ def forest_fire_subsample(graph_nx, node_data, target_size, burn_prob, seed_node
 
     while len(burned) < target_size:
         if not stack:
-            # Fire died — restart from a random unburned node
-            unburned = [n for n in nodes if n not in burned_set]
-            if not unburned:
+            # Fire died — resume from a burned node that still has unburned
+            # neighbors so the sampled subgraph stays connected.
+            candidates = [
+                n for n in burned
+                if any(nb not in burned_set for nb in graph_nx.neighbors(n))
+            ]
+            if not candidates:
                 break
-            new_seed = random.choice(unburned)
-            burned.append(new_seed)
-            burned_set.add(new_seed)
-            stack.append(new_seed)
+            stack.append(random.choice(candidates))
 
         node = stack.pop()
         neighbors = [n for n in graph_nx.neighbors(node) if n not in burned_set]
