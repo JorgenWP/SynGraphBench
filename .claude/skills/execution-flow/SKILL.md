@@ -82,7 +82,7 @@ Checkpoints saved with `structure_` prefix.
 **`bash scripts/train/train_cgt.sh [dataset] [gpt_epochs] [cluster_num] [cluster_size] [gpt_batch_size] [cg_depth] [cg_fanout] [trial_id] [task]`**
 Train CGT on a dataset. Defaults: `reddit 50 512 1 128 2 5 0 hidden_labels`. Calls `CGT/train.py`.
 `trial_id` selects which GADBench mask column (0-9) to use for the train/val/test split.
-Output saved to `datasets/synthetic/cgt/<dataset>/<task>/<dataset>_e{epochs}_k{clusters}_c{cluster_size}_d{depth}_f{fanout}_t{trial_id}.pt`.
+Output saved to `datasets/synthetic/cgt/<dataset>/<task>/<variant>/<variant>_t{trial_id}.pt` where variant = `{dataset}_e{epochs}_k{clusters}_c{cluster_size}_d{depth}_f{fanout}`.
 
 **`bash scripts/train/train_cgt_all_trials.sh [dataset] [gpt_epochs] [cluster_num] [cluster_size] [gpt_batch_size] [cg_depth] [cg_fanout] [num_trials]`**
 Train CGT on all GADBench splits (trials 0 to num_trials-1). Defaults: same as `train_cgt.sh`, `num_trials=10`. Loops over `train_cgt.sh` with each trial_id.

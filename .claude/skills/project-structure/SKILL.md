@@ -38,7 +38,8 @@ SynGraphBench/
 │       ├── cgt/            # CGT outputs: .pt files with cluster centers + sequence indices
 │       │   └── <dataset>/
 │       │       └── <task>/
-│       │           └── <dataset>_e<epochs>_k<clusters>_c<cluster_size>_d<depth>_f<fanout>.pt
+│       │           └── <variant>/          # Hyperparameter variant grouping trials
+│       │               └── <variant>_t<trial_id>.pt
 │       └── bigg/           # BiGG outputs: full DGL graph files
 │           └── <dataset>/
 │               └── <task>/
@@ -61,19 +62,19 @@ SynGraphBench/
 
 ## Synthetic Dataset Naming Convention
 
-All synthetic outputs follow the structure `datasets/synthetic/<generative_model>/<dataset>/<task>/<file_name>`. The dataset and task are encoded in the directory hierarchy; filenames contain only the arguments that define the generated data.
+All synthetic outputs follow the structure `datasets/synthetic/<generative_model>/<dataset>/<task>/<file_name>`. For CGT, an additional variant subdirectory groups per-trial `.pt` files by hyperparameter config: `datasets/synthetic/cgt/<dataset>/<task>/<variant>/<variant>_t<trial_id>.pt`. The dataset and task are encoded in the directory hierarchy; filenames contain only the arguments that define the generated data.
 
 **Supported tasks:** `hidden_labels` (anomaly detection — labels withheld from the generative model), `hidden_links` (link prediction — test edges withheld from the generative model). The task level exists because the generative model has different information available during training per task, so the generated datasets are fundamentally different.
 
 | Generator | Task folder | Type | Example path |
 |-----------|-------------|------|--------------|
-| `cgt` | `hidden_labels` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/hidden_labels/reddit_e50_k512_c1_d2_f5.pt` |
-| `cgt` | `hidden_links` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/hidden_links/reddit_e50_k512_c1_d2_f5.pt` |
+| `cgt` | `hidden_labels` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/hidden_labels/reddit_e50_k512_c1_d2_f5/reddit_e50_k512_c1_d2_f5_t0.pt` |
+| `cgt` | `hidden_links` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/hidden_links/reddit_e50_k512_c1_d2_f5/reddit_e50_k512_c1_d2_f5_t0.pt` |
 | `bigg` | `hidden_labels` | Full DGL graph — conditional (features + labels) | `synthetic/bigg/tolokers/hidden_labels/blksize_1024_b_1_lr_0.001_epochs_50` |
 | `bigg` | `hidden_labels` | Structure-only baseline | `synthetic/bigg/tolokers/hidden_labels/structure_blksize_128_lr_0.001_epochs_100` |
 
 **Filename patterns:**
-- CGT: `{dataset}_e{epochs}_k{clusters}_c{cluster_size}_d{depth}_f{fanout}.pt`
+- CGT: `{variant}/{variant}_t{trial_id}.pt` where variant = `{dataset}_e{epochs}_k{clusters}_c{cluster_size}_d{depth}_f{fanout}`
 - BiGG conditional: `blksize_{blksize}_b_{batch}_lr_{lr}_epochs_{epochs}_noise_{noise}_ss_{ss}_norm_{method}_{bfs}_lw_{cw}_{lw}_{hetero|det}`
 - BiGG structure-only: `structure_blksize_{blksize}_lr_{lr}_epochs_{epochs}`
 

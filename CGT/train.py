@@ -57,18 +57,18 @@ def main():
     print('Total CGT time: {:.3f}'.format(perf_counter() - start_time))
 
     # Save synthetic data
-    save_dir = os.path.join(args.data_dir, '..', 'synthetic', 'cgt', args.dataset, args.task)
-    os.makedirs(save_dir, exist_ok=True)
-    save_name = (
+    variant = (
         f"{args.dataset}"
         f"_e{args.gpt_epochs}"
         f"_k{args.cluster_num}"
         f"_c{args.cluster_size}"
         f"_d{args.cg_depth}"
         f"_f{args.cg_fanout}"
-        f"_t{args.trial_id}"
-        f".pt"
     )
+    save_dir = os.path.join(args.data_dir, '..', 'synthetic', 'cgt',
+                            args.dataset, args.task, variant)
+    os.makedirs(save_dir, exist_ok=True)
+    save_name = f"{variant}_t{args.trial_id}.pt"
     save_path = os.path.join(save_dir, save_name)
 
     torch.save({

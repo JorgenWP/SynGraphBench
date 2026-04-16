@@ -536,7 +536,8 @@ def main():
         task_dir = os.path.join(dataset_dir, args.task)
         stem = args.synthetic_name
         if args.synthetic_type == 'comp-graph':
-            syn_path = os.path.join(task_dir, f'{stem}.pt')
+            variant_dir = os.path.join(task_dir, stem)
+            syn_path = os.path.join(variant_dir, f'{stem}.pt')
         else:
             syn_path = os.path.join(task_dir, stem)
 
