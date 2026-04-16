@@ -276,7 +276,16 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
 
     # Load data once per dataset
     data = GADBenchDataset(dataset_name, prefix=data_dir + '/')
-    syn_data = load_cgt_synthetic_data(syn_path)
+    # Prefer per-trial files (_t0.pt, _t1.pt, …); fall back to single file.
+    trial_paths_probe = resolve_cgt_trial_paths(syn_path, trials)
+    if trial_paths_probe is not None:
+        syn_data = load_cgt_synthetic_data(trial_paths_probe[0])
+    elif os.path.exists(syn_path):
+        syn_data = load_cgt_synthetic_data(syn_path)
+    else:
+        raise FileNotFoundError(
+            f"Synthetic data not found: {syn_path}\n"
+            f"Also could not find per-trial files (_t0..t{trials-1}.pt).")
 
     feat_dim = data.graph.ndata['feature'].shape[1]
 
@@ -531,18 +540,19 @@ def main():
         else:
             syn_path = os.path.join(task_dir, stem)
 
-        if not os.path.exists(syn_path):
-            # Check for per-trial files before skipping (CGT multi-trial)
-            if args.synthetic_type == 'comp-graph':
-                trial_paths = resolve_cgt_trial_paths(syn_path, args.trials)
-                if trial_paths is not None:
-                    print(f"\n  Found {len(trial_paths)} per-trial .pt files for {dataset_name}")
-                else:
-                    print(f"\n  Skipping {dataset_name}: {syn_path} not found")
-                    continue
+        # Prefer per-trial files; fall back to single file.
+        if args.synthetic_type == 'comp-graph':
+            trial_paths = resolve_cgt_trial_paths(syn_path, args.trials)
+            if trial_paths is not None:
+                print(f"\n  Found {len(trial_paths)} per-trial .pt files for {dataset_name}")
+            elif os.path.exists(syn_path):
+                print(f"\n  Found {args.synthetic_type} synthetic data: {syn_path}")
             else:
                 print(f"\n  Skipping {dataset_name}: {syn_path} not found")
                 continue
+        elif not os.path.exists(syn_path):
+            print(f"\n  Skipping {dataset_name}: {syn_path} not found")
+            continue
         else:
             print(f"\n  Found {args.synthetic_type} synthetic data: {syn_path}")
 
