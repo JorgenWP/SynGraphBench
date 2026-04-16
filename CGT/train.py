@@ -63,6 +63,7 @@ def main():
         f"{args.dataset}"
         f"_e{args.gpt_epochs}"
         f"_k{args.cluster_num}"
+        f"_c{args.cluster_size}"
         f"_d{args.cg_depth}"
         f"_f{args.cg_fanout}"
         f"_t{args.trial_id}"
