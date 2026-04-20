@@ -68,12 +68,13 @@ def DP_kmeans(feats, cluster_num, cluster_sample_num, epsilon=10, delta=1e-6):
     centers = pca.inverse_transform(clustering_result.centers)
     return centers, centers.shape[0]
 
-def cluster_feats(args, feats):
+def cluster_feats(args, feats, fit_ids=None):
     """
     Cluster feature vectors
 
     Input:
         org_feats: original feature matrices
+        fit_ids: optional node id subset used to fit k-means (e.g. train+val); assignment still covers all nodes
     Return:
         cluster_ids: list of cluster ids where each feature belongs to
         cluster_centers: centers of clusters
@@ -81,11 +82,12 @@ def cluster_feats(args, feats):
     """
     # Define cluster centers
     start_time = perf_counter()
+    fit_feats = feats if fit_ids is None else feats[fit_ids]
     if args.dp_feature:
-        cluster_centers, cluster_num = DP_kmeans(feats, args.cluster_num, args.cluster_sample_num)
+        cluster_centers, cluster_num = DP_kmeans(fit_feats, args.cluster_num, args.cluster_sample_num)
         args.cluster_num = cluster_num
     else:
-        cluster_centers = kmeans(feats, args.cluster_num, args.cluster_size, args.cluster_sample_num)
+        cluster_centers = kmeans(fit_feats, args.cluster_num, args.cluster_size, args.cluster_sample_num)
 
     # Cluster the original dataset
     batch_size = 1000

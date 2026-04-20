@@ -144,7 +144,7 @@ def train_and_generate(args, graphs, feats, labels, ids):
         os.makedirs(save_dir)
 
     # Quantize features into cluster IDs
-    cluster_ids, cluster_centers = cluster_feats(args, feats)
+    cluster_ids, cluster_centers = cluster_feats(args, feats, fit_ids=ids["train"] + ids["val"])
 
     # Train CGT on train+val nodes
     target_ids = ids["train"] + ids["val"]
