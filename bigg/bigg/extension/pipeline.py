@@ -13,7 +13,11 @@ from bigg.model.tree_clib.tree_lib import setup_treelib, TreeLib
 from bigg.experiments.train_utils import sqrtn_forward_backward
 
 # Import both custom models
-from bigg.extension.customized_models import BiggWithConditionedFeats, BiggWithFeatsAndLabels
+from bigg.extension.customized_models import (
+    BiggWithConditionedFeats,
+    BiggWithFeatsAndLabels,
+    BiggWithARCatFeats,
+)
 
 # Preprocessing utilities
 from bigg.extension.preprocessing import (
@@ -25,6 +29,8 @@ from bigg.extension.preprocessing import (
     build_generated_dgl,
     partition_graph_bfs,
     forest_fire_subsample,
+    fit_feature_bins,
+    default_bin_sigma,
     NORMALIZATION_METHODS,
 )
 
@@ -68,6 +74,16 @@ def main():
     pipeline_parser.add_argument('-kl_weight', type=float, default=1.0,
                                  help='Coefficient on the KL term in the VAE ELBO (default: 1.0). '
                                       'Not subject to dynamic calibration.')
+    pipeline_parser.add_argument('--cat_feat', action='store_true', default=False,
+                                 help='Use autoregressive categorical feature predictor: per-feature '
+                                      'quantile bins, value-space Gaussian soft-label cross-entropy. '
+                                      'Mutually exclusive with --hetero_feat and --vae_feat.')
+    pipeline_parser.add_argument('-n_bins', type=int, default=32,
+                                 help='Number of quantile bins per continuous feature when --cat_feat '
+                                      'is on (default: 32)')
+    pipeline_parser.add_argument('-bin_sigma', type=float, default=None,
+                                 help='Gaussian soft-label std in feature-value units when --cat_feat '
+                                      'is on. Default: 0.5 x median bin-center spacing.')
     pipeline_parser.add_argument('--mask_test_labels', action='store_true', default=False,
                                  help='Exclude test node labels (split 0) from label loss to prevent '
                                       'data leakage in anomaly detection benchmarks')
@@ -86,6 +102,10 @@ def main():
     lw = [float(x) for x in pipeline_args.loss_weights.split(',')]
     assert len(lw) == 2, f'Expected 2 loss weights (cont,label), got {len(lw)}'
     user_w_cont, user_w_label = lw
+
+    # AR categorical is its own predictor; reject combinations that don't apply.
+    if pipeline_args.cat_feat and (pipeline_args.hetero_feat or pipeline_args.vae_feat):
+        raise ValueError('--cat_feat is mutually exclusive with --hetero_feat and --vae_feat')
 
     set_device(cmd_args.gpu)
     setup_treelib(cmd_args)
@@ -177,7 +197,29 @@ def main():
     cmd_args.has_node_feats = True
     cmd_args.max_num_nodes = max(sub_num_nodes for _, _, _, sub_num_nodes in subgraphs)
 
-    if pipeline_args.model_type == 'conditional':
+    # Fit per-feature quantile bins on continuous (non-binary) columns of the full
+    # training feature matrix. Fit once on all subgraphs combined so every subgraph
+    # sees the same binning (which also stores on the model for generation-time use).
+    bin_edges = bin_centers = None
+    if pipeline_args.cat_feat:
+        cont_for_bins = cont_feats[:, [i for i in range(feat_dim) if i not in binary_idx]]
+        bin_edges, bin_centers = fit_feature_bins(cont_for_bins, pipeline_args.n_bins)
+        if pipeline_args.bin_sigma is None:
+            pipeline_args.bin_sigma = default_bin_sigma(bin_centers)
+        print(f'Fit {pipeline_args.n_bins} quantile bins on {cont_for_bins.shape[1]} continuous columns; '
+              f'bin_sigma={pipeline_args.bin_sigma:.4f}')
+
+    if pipeline_args.cat_feat:
+        model = BiggWithARCatFeats(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
+                                   n_bins=pipeline_args.n_bins,
+                                   bin_edges=bin_edges,
+                                   bin_centers=bin_centers,
+                                   bin_sigma=pipeline_args.bin_sigma,
+                                   label_temp=pipeline_args.label_temp,
+                                   noise_std=pipeline_args.noise_std,
+                                   binary_feat=pipeline_args.binary_feat,
+                                   binary_idx=binary_idx).to(cmd_args.device)
+    elif pipeline_args.model_type == 'conditional':
         model = BiggWithConditionedFeats(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
                                          label_temp=pipeline_args.label_temp,
                                          noise_std=pipeline_args.noise_std,
@@ -332,8 +374,9 @@ def main():
     mask_tag = '_masked' if pipeline_args.mask_test_labels else ''
     bin_tag = '_binfeat' if pipeline_args.binary_feat else ''
     vae_tag = f'_vae{pipeline_args.vae_dim}_kl{pipeline_args.kl_weight}' if pipeline_args.vae_feat else ''
+    cat_tag = f'_cat{pipeline_args.n_bins}_s{pipeline_args.bin_sigma:.2f}' if pipeline_args.cat_feat else ''
     sub_tag = f'_sub{len(subgraphs)}_size{pipeline_args.subsample_size}_p{pipeline_args.burn_prob}' if pipeline_args.subsample else ''
-    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{vae_tag}{sub_tag}'
+    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{vae_tag}{cat_tag}{sub_tag}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
 
     model.eval()
@@ -379,6 +422,12 @@ def main():
             torch.save(norm_stats, os.path.join(out_dir, 'norm_stats.pt'))
         if binary_idx:
             torch.save(binary_idx, os.path.join(out_dir, 'binary_idx.pt'))
+        if pipeline_args.cat_feat:
+            torch.save({'bin_edges': bin_edges,
+                        'bin_centers': bin_centers,
+                        'bin_sigma': pipeline_args.bin_sigma,
+                        'n_bins': pipeline_args.n_bins},
+                       os.path.join(out_dir, 'cat_bins.pt'))
 
     else:
         # Single full graph — original code path
@@ -405,6 +454,12 @@ def main():
             torch.save(norm_stats, os.path.join(save_dir, save_name + '_norm_stats.pt'))
         if binary_idx:
             torch.save(binary_idx, os.path.join(save_dir, save_name + '_binary_idx.pt'))
+        if pipeline_args.cat_feat:
+            torch.save({'bin_edges': bin_edges,
+                        'bin_centers': bin_centers,
+                        'bin_sigma': pipeline_args.bin_sigma,
+                        'n_bins': pipeline_args.n_bins},
+                       os.path.join(save_dir, save_name + '_cat_bins.pt'))
 
 
 if __name__ == '__main__':

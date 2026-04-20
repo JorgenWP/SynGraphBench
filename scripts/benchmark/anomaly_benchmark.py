@@ -339,6 +339,7 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
     """
     from models.cross_graph_detector import (CrossGraphGNNDetector,
                                                 CrossGraphXGBGraphDetector,
+                                                CrossGraphXGBDetector,
                                                 CROSS_GRAPH_SUPPORTED_MODELS)
 
     # Load normalization stats if available
@@ -394,6 +395,8 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
             print(f"  Trial {t}, seed={seed}")
             if model_name == 'XGBGraph':
                 detector = CrossGraphXGBGraphDetector(train_config, model_config, syn_data, orig_data)
+            elif model_name == 'XGBoost':
+                detector = CrossGraphXGBDetector(train_config, model_config, syn_data, orig_data)
             else:
                 detector = CrossGraphGNNDetector(train_config, model_config, syn_data, orig_data)
 

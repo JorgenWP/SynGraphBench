@@ -53,6 +53,9 @@ BINARY_FEAT=false       # "true" to auto-detect binary features and use BCE loss
 VAE_FEAT=false          # "true" to add a per-node label-agnostic CVAE latent shared across feature decoders
 VAE_DIM=16              # latent dimensionality when VAE_FEAT is on
 KL_WEIGHT=1.0           # coefficient on the KL term in the VAE ELBO
+CAT_FEAT=false          # "true" to use AR categorical feature predictor (quantile bins + soft labels). Mutually exclusive with HETERO_FEAT / VAE_FEAT.
+N_BINS=32               # number of quantile bins per continuous feature when CAT_FEAT is on
+BIN_SIGMA=              # Gaussian soft-label std in feature-value units (leave empty for auto)
 
 # Run the BiGG subsampled training and generation script
-bash scripts/train/train_bigg_subsample.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$LOGVAR_FLOOR" "$SUBSAMPLE_SIZE" "$BURN_PROB" "$NUM_SUBGRAPHS" "$BINARY_FEAT" "$VAE_FEAT" "$VAE_DIM" "$KL_WEIGHT"
+bash scripts/train/train_bigg_subsample.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$LOGVAR_FLOOR" "$SUBSAMPLE_SIZE" "$BURN_PROB" "$NUM_SUBGRAPHS" "$BINARY_FEAT" "$VAE_FEAT" "$VAE_DIM" "$KL_WEIGHT" "$CAT_FEAT" "$N_BINS" "$BIN_SIGMA"

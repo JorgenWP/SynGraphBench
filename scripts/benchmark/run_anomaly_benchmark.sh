@@ -6,7 +6,9 @@
 #
 # Arguments:
 #   datasets        Comma-separated dataset names (default: reddit)
-#   models          Comma-separated model names (default: GCN,GIN,GraphSAGE,XGBGraph)
+#   models          Comma-separated model names (default: GCN,GIN,GraphSAGE,XGBGraph,XGBoost)
+#                   XGBoost is the feature-only diagnostic row (trains on syn raw features,
+#                   tests on orig raw features — no graph either side).
 #   trials          Number of evaluation trials (default: 1)
 #   generator       Generative model folder under datasets/synthetic/ (default: cgt)
 #                   Supported: cgt, bigg
@@ -24,7 +26,7 @@ set -e
 
 # Configuration with defaults
 DATASETS="${1:-reddit}"
-MODELS="${2:-GCN,GIN,GraphSAGE,XGBGraph}"
+MODELS="${2:-GCN,GIN,GraphSAGE,XGBGraph,XGBoost}"
 TRIALS="${3:-1}"
 GENERATOR="${4:-cgt}"
 SYNTHETIC_NAME="${5:-}"

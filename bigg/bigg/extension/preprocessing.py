@@ -509,3 +509,102 @@ def build_generated_dgl(gen_nx, original_graph, features=None, labels=None):
     gen_dgl.ndata['test_masks']  = test_masks
 
     return gen_dgl
+
+
+# ---------------------------------------------------------------------------
+# Per-feature quantile binning (for AR categorical feature predictor)
+# ---------------------------------------------------------------------------
+
+def fit_feature_bins(cont_feats, n_bins):
+    """Fit per-feature quantile bin edges and centers.
+
+    Parameters
+    ----------
+    cont_feats : torch.Tensor
+        (N, F) continuous feature matrix, in whatever space the predictor will
+        operate on (typically post-normalisation).
+    n_bins : int
+        Number of bins per feature.
+
+    Returns
+    -------
+    edges : torch.Tensor
+        (F, n_bins - 1) inner bin boundaries, monotone increasing along dim=1.
+        Suitable for ``torch.searchsorted`` / ``torch.bucketize``.
+    centers : torch.Tensor
+        (F, n_bins) per-bin representative values. When a bin is non-empty the
+        center is the empirical mean of the training values assigned to it;
+        empty bins fall back to the nearest non-empty bin's center so that
+        every bin position emits a valid in-distribution value (important
+        under k-means-privatized inputs, where mass collapses to k centroids
+        and most bins are empty).
+
+    Notes
+    -----
+    Edges are inner quantiles (probs 1/B..(B-1)/B), so the outer bins extend to
+    +/- infinity at inference. Duplicate quantiles (from mass points) produce
+    zero-width bins by design — value-space soft labels handle this correctly.
+    """
+    assert cont_feats.dim() == 2, f"expected (N, F), got {cont_feats.shape}"
+    assert n_bins >= 2, f"n_bins must be >= 2, got {n_bins}"
+
+    feats = cont_feats.detach().float()
+    N, F = feats.shape
+
+    # Inner quantile probabilities: 1/B, 2/B, ..., (B-1)/B
+    probs = torch.linspace(0.0, 1.0, n_bins + 1)[1:-1]  # (n_bins - 1,)
+    # torch.quantile: (probs, F) when we pass feats as (N, F) with dim=0
+    edges = torch.quantile(feats, probs, dim=0).T.contiguous()  # (F, n_bins - 1)
+
+    # Assign each value to a bin via searchsorted
+    # values.T: (F, N); edges: (F, B-1) -> idx: (F, N) in [0, B]
+    idx = torch.searchsorted(edges, feats.T.contiguous())
+    idx = idx.clamp(max=n_bins - 1)
+
+    # Per-bin empirical mean, with nearest-non-empty fallback for empty bins.
+    centers = torch.zeros(F, n_bins)
+    for f in range(F):
+        col = feats[:, f]
+        col_idx = idx[f]
+        populated = []
+        for b in range(n_bins):
+            mask = col_idx == b
+            if mask.any():
+                centers[f, b] = col[mask].mean()
+                populated.append(b)
+
+        if len(populated) == 0:
+            # Degenerate: no values assigned to any bin. Fall back to 0.
+            continue
+        if len(populated) == n_bins:
+            continue
+
+        # Fill empty bins with the center of the nearest populated bin.
+        # Ties (equidistant left/right) go to the left.
+        pop_tensor = torch.tensor(populated)
+        for b in range(n_bins):
+            if b in populated:
+                continue
+            dists = (pop_tensor - b).abs()
+            nearest = populated[int(dists.argmin().item())]
+            centers[f, b] = centers[f, nearest]
+
+    return edges, centers
+
+
+def default_bin_sigma(centers, fraction=0.5):
+    """Heuristic bin sigma: *fraction* of the median spacing between bin centers.
+
+    Keeps the Gaussian soft-label kernel a sensible width relative to the local
+    bin scale (narrow in dense regions, wider in sparse regions). Operates on
+    the *centers* tensor from ``fit_feature_bins``.
+    """
+    # spacings shape: (F, n_bins - 1)
+    spacings = centers[:, 1:] - centers[:, :-1]
+    # Median across all feature/bin spacings as a single scalar sigma.
+    # (Per-feature sigma is cleaner but scalar is compatible with the model
+    # field; swap to per-feature later if needed.)
+    positive = spacings[spacings > 0]
+    if positive.numel() == 0:
+        return 1.0  # degenerate: all centers collapsed — treat as no smoothing
+    return float(fraction * positive.median().item())

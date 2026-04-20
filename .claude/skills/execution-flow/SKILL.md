@@ -21,7 +21,9 @@ description: End-to-end pipeline steps, key shell scripts with their CLI argumen
 ### Benchmark
 
 **`bash scripts/benchmark/run_anomaly_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [task]`**
-Anomaly detection benchmark. Defaults: `reddit`, `GCN,GIN,GraphSAGE,XGBGraph`, `1`, `cgt`, `""` (uses dataset name), `hidden_labels`. Calls `scripts/benchmark/anomaly_benchmark.py`.
+Anomaly detection benchmark. Defaults: `reddit`, `GCN,GIN,GraphSAGE,XGBGraph,XGBoost`, `1`, `cgt`, `""` (uses dataset name), `hidden_labels`. Calls `scripts/benchmark/anomaly_benchmark.py`.
+
+`XGBoost` is the feature-only diagnostic row: trains on synthetic raw features and tests on original raw features, no graph structure either side. A synthetic >> original AUROC gap means the generator over-encoded the label into features, so downstream GNN wins aren't measuring topology use.
 
 `scripts/benchmark/anomaly_benchmark.py` has two evaluation modes, selected via `--synthetic_type`:
 * `graph` — loads a full DGL graph from `synthetic/bigg/`; trains/tests standard GNNs.
@@ -69,7 +71,7 @@ Train BiGG conditional model (features + labels). Defaults: `tolokers 1024 1 50 
 * `logvar_floor`: Lower clamp for log-variance in hetero_feat mode (default: -4.0).
 * `binary_feat`: `true` to auto-detect binary feature columns and use BCE loss + Bernoulli sampling instead of Gaussian head. Appends `_binfeat` to save name. Binary columns skip normalization.
 
-**`bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight]`**
+**`bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma]`**
 Train BiGG with forest fire subsampling for VRAM-limited training. Same args as above, plus:
 * `subsample_size`: target nodes per subgraph (default: 2000).
 * `burn_prob`: forest fire burn probability — controls subgraph density (default: 0.3).
@@ -77,6 +79,9 @@ Train BiGG with forest fire subsampling for VRAM-limited training. Same args as 
 * `vae_feat`: `true` to add a per-node label-agnostic CVAE latent shared across feature decoders (default: false). Appends `_vae{dim}_kl{weight}` to save name.
 * `vae_dim`: latent dimensionality when `vae_feat` is on (default: 16).
 * `kl_weight`: coefficient on the KL term in the VAE ELBO (default: 1.0). Not subject to dynamic calibration.
+* `cat_feat`: `true` to use the AR categorical feature predictor (quantile bins + value-space soft-label cross-entropy). Mutually exclusive with `hetero_feat` and `vae_feat`. Appends `_cat{n_bins}_s{bin_sigma}` to save name and persists `cat_bins.pt` alongside the generated graph(s).
+* `n_bins`: number of quantile bins per continuous feature when `cat_feat` is on (default: 32).
+* `bin_sigma`: Gaussian soft-label std in feature-value units. Leave empty for auto (0.5 × median bin-center spacing).
 
 **`bash scripts/train/train_bigg_structure.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim]`**
 Train BiGG structure-only baseline. Defaults: `tolokers 128 1 100 0.001 256`.

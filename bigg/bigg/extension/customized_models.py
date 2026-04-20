@@ -313,6 +313,7 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
 
         return new_state, ll, return_data
 
+
 class BiggWithConditionedFeats(RecurTreeGen):
 
     def __init__(self, args, feat_dim, num_classes, label_temp=1.0, noise_std=0.0, ss_prob=0.0,
@@ -556,4 +557,234 @@ class BiggWithConditionedFeats(RecurTreeGen):
 
         new_state = self.node_state_update(state_update, (h, c))
 
+        return new_state, ll, return_data
+
+
+class BiggWithARCatFeats(RecurTreeGen):
+    """BiGG with autoregressive categorical feature prediction.
+
+    Continuous feature columns are binned per-feature with fixed (pre-fit) quantile
+    edges. At each node the label is predicted from h, then continuous features are
+    generated autoregressively across feature positions, conditioned on
+    [h, label_embed, feat_pos_embed, prev_bin_embed].
+
+    Training: parallel over feature positions (teacher-forced previous bins).
+    Generation: sequential loop over feature positions.
+
+    Binary columns keep the Bernoulli/BCE head from the baseline models.
+
+    Continuous loss is value-space Gaussian soft-label cross-entropy, so the
+    penalty reflects feature-space distance (not bin-index distance) and handles
+    mass-point duplicates naturally.
+    """
+
+    def __init__(self, args, feat_dim, num_classes, n_bins, bin_edges, bin_centers,
+                 bin_sigma, label_temp=1.0, noise_std=0.0,
+                 binary_feat=False, binary_idx=None):
+        super().__init__(args)
+        self.feat_dim = feat_dim
+        self.num_classes = num_classes
+        self.n_bins = n_bins
+        self.bin_sigma = bin_sigma
+        self.label_temp = label_temp
+        self.noise_std = noise_std
+
+        # Binary / continuous split (same convention as sister classes)
+        if binary_feat and binary_idx:
+            self.binary_idx = sorted(binary_idx)
+            self.cont_idx = sorted(set(range(feat_dim)) - set(self.binary_idx))
+        else:
+            self.binary_idx = []
+            self.cont_idx = list(range(feat_dim))
+        self.cont_feat_dim = len(self.cont_idx)
+        self.bin_feat_dim = len(self.binary_idx)
+
+        # Bin buffers come from a fitted FeatureBinner; saved with state_dict and
+        # move with .to(device). Shapes:
+        #   bin_edges:   (cont_feat_dim, n_bins - 1)
+        #   bin_centers: (cont_feat_dim, n_bins)
+        if self.cont_feat_dim > 0:
+            assert bin_edges.shape == (self.cont_feat_dim, n_bins - 1), \
+                f"bin_edges shape {bin_edges.shape} != ({self.cont_feat_dim}, {n_bins - 1})"
+            assert bin_centers.shape == (self.cont_feat_dim, n_bins), \
+                f"bin_centers shape {bin_centers.shape} != ({self.cont_feat_dim}, {n_bins})"
+            self.register_buffer('bin_edges', bin_edges.float())
+            self.register_buffer('bin_centers', bin_centers.float())
+
+        # 1. Label head (from h)
+        self.nodelabel_encoding = nn.Embedding(num_classes, args.embed_dim)
+        self.nodelabel_pred = MLP(args.embed_dim, [2 * args.embed_dim, num_classes])
+
+        # 2. AR head: shared MLP over (h, label_embed, feat_pos_embed, prev_bin_embed).
+        # prev_bin vocabulary is n_bins + 1 to reserve <BOS> at feature position 0.
+        if self.cont_feat_dim > 0:
+            self.feat_pos_embed = nn.Embedding(self.cont_feat_dim, args.embed_dim)
+            self.prev_bin_embed = nn.Embedding(n_bins + 1, args.embed_dim)
+            ar_in_dim = args.embed_dim * 4
+            self.ar_head = MLP(ar_in_dim, [2 * args.embed_dim, n_bins])
+
+        # 3. Binary head (conditioned on h + label_embed only)
+        if self.bin_feat_dim > 0:
+            self.binfeat_pred = MLP(args.embed_dim * 2, [2 * args.embed_dim, self.bin_feat_dim])
+
+        # 4. State update path (matches sister classes)
+        self.nodefeat_encoding = MLP(feat_dim, [2 * args.embed_dim, args.embed_dim])
+        self.combiner = nn.Linear(args.embed_dim * 2, args.embed_dim)
+        self.node_state_update = nn.LSTMCell(args.embed_dim, args.embed_dim)
+
+        # Loss tracking (_kl kept at 0 for pipeline compat)
+        self._ll_cont = 0.0
+        self._ll_bin = 0.0
+        self._ll_label = 0.0
+        self._kl = 0.0
+
+        self.w_cont = 1.0
+        self.w_bin = 1.0
+        self.w_label = 1.0
+
+    def reset_loss_trackers(self):
+        self._ll_cont = 0.0
+        self._ll_bin = 0.0
+        self._ll_label = 0.0
+        self._kl = 0.0
+
+    def _assemble_features(self, cont_vals, bin_vals):
+        if cont_vals.numel() > 0:
+            batch, device = cont_vals.shape[0], cont_vals.device
+        else:
+            batch, device = bin_vals.shape[0], bin_vals.device
+        full = torch.empty(batch, self.feat_dim, device=device)
+        if self.cont_feat_dim > 0:
+            full[:, self.cont_idx] = cont_vals
+        if self.bin_feat_dim > 0:
+            full[:, self.binary_idx] = bin_vals
+        return full
+
+    def _values_to_bins(self, values):
+        """Map continuous values to bin indices using fitted edges.
+
+        values: (N, cont_feat_dim) in the same space as fitted edges.
+        returns: (N, cont_feat_dim) long tensor of bin indices in [0, n_bins).
+        """
+        # searchsorted needs boundaries and values with matching shape except
+        # on the last axis. Work in (F, N) orientation, then transpose back.
+        idx = torch.searchsorted(self.bin_edges, values.T.contiguous())
+        return idx.clamp(max=self.n_bins - 1).T
+
+    def _value_space_soft_targets(self, values):
+        """Gaussian soft-label distribution over bins, in value space.
+
+        values: (N, cont_feat_dim)
+        returns: (N, cont_feat_dim, n_bins) probability distribution centered at
+        the true value with std bin_sigma (in feature-value units).
+        """
+        centers = self.bin_centers.unsqueeze(0)          # (1, F, B)
+        vals = values.unsqueeze(-1)                      # (N, F, 1)
+        log_kernel = -((centers - vals) ** 2) / (2 * self.bin_sigma ** 2)
+        return F.softmax(log_kernel, dim=-1)
+
+    def embed_node_feats(self, node_data):
+        cont_feats = node_data[:, :self.feat_dim]
+        node_labels = node_data[:, self.feat_dim].long()
+        embed_cont = self.nodefeat_encoding(cont_feats)
+        embed_label = self.nodelabel_encoding(node_labels)
+        combined_embed = torch.cat([embed_cont, embed_label], dim=-1)
+        return self.combiner(combined_embed)
+
+    def predict_node_feats(self, state, node_data=None, label_mask=None):
+        h, c = state
+        N, D = h.shape
+
+        if self.training and self.noise_std > 0:
+            h = h + torch.randn_like(h) * self.noise_std
+
+        pred_logits = self.nodelabel_pred(h)
+
+        if node_data is None:
+            # --- Generation Mode ---
+            probs = F.softmax(pred_logits / self.label_temp, dim=-1)
+            pred_labels = torch.multinomial(probs, num_samples=1).squeeze(-1)
+            label_embed = self.nodelabel_encoding(pred_labels)
+
+            if self.cont_feat_dim > 0:
+                sampled_cont = torch.empty(N, self.cont_feat_dim, device=h.device)
+                prev_bin = torch.full((N,), self.n_bins, dtype=torch.long, device=h.device)
+                for f in range(self.cont_feat_dim):
+                    feat_pos = torch.full((N,), f, dtype=torch.long, device=h.device)
+                    ar_in = torch.cat([h, label_embed,
+                                       self.feat_pos_embed(feat_pos),
+                                       self.prev_bin_embed(prev_bin)], dim=-1)
+                    logits = self.ar_head(ar_in)
+                    bin_idx = torch.multinomial(F.softmax(logits, dim=-1), num_samples=1).squeeze(-1)
+                    sampled_cont[:, f] = self.bin_centers[f, bin_idx]
+                    prev_bin = bin_idx
+            else:
+                sampled_cont = torch.empty(N, 0, device=h.device)
+
+            if self.bin_feat_dim > 0:
+                bin_logits = self.binfeat_pred(torch.cat([h, label_embed], dim=-1))
+                sampled_bin = torch.bernoulli(torch.sigmoid(bin_logits))
+            else:
+                sampled_bin = torch.empty(N, 0, device=h.device)
+
+            all_feats = self._assemble_features(sampled_cont, sampled_bin)
+            return_data = torch.cat([all_feats, pred_labels.unsqueeze(-1).float()], dim=-1)
+            state_update = self.embed_node_feats(return_data)
+            ll = 0
+
+        else:
+            # --- Training Mode ---
+            target_all = node_data[:, :self.feat_dim]
+            target_labels = node_data[:, self.feat_dim].long()
+            label_embed = self.nodelabel_encoding(target_labels)
+
+            target_cont = target_all[:, self.cont_idx] if self.cont_feat_dim > 0 else None
+            target_bin = target_all[:, self.binary_idx] if self.bin_feat_dim > 0 else None
+
+            # 1. Continuous AR loss (batched across feature positions via teacher forcing)
+            if target_cont is not None and self.cont_feat_dim > 0:
+                F_cont = self.cont_feat_dim
+                true_bins = self._values_to_bins(target_cont)           # (N, F_cont)
+                bos = torch.full((N, 1), self.n_bins, dtype=torch.long, device=h.device)
+                prev_bins = torch.cat([bos, true_bins[:, :-1]], dim=1)  # (N, F_cont)
+
+                h_exp = h.unsqueeze(1).expand(-1, F_cont, -1).reshape(N * F_cont, D)
+                label_exp = label_embed.unsqueeze(1).expand(-1, F_cont, -1).reshape(N * F_cont, D)
+                feat_pos = torch.arange(F_cont, device=h.device).unsqueeze(0).expand(N, -1).reshape(-1)
+                pos_embed = self.feat_pos_embed(feat_pos)
+                prev_embed = self.prev_bin_embed(prev_bins.reshape(-1))
+
+                ar_in = torch.cat([h_exp, label_exp, pos_embed, prev_embed], dim=-1)
+                logits = self.ar_head(ar_in).reshape(N, F_cont, self.n_bins)
+
+                soft_targets = self._value_space_soft_targets(target_cont)  # (N, F_cont, n_bins)
+                log_probs = F.log_softmax(logits, dim=-1)
+                ll_cont = (soft_targets * log_probs).sum() / F_cont
+            else:
+                ll_cont = torch.tensor(0.0, device=h.device)
+
+            # 2. Binary BCE
+            if target_bin is not None and self.bin_feat_dim > 0:
+                bin_logits = self.binfeat_pred(torch.cat([h, label_embed], dim=-1))
+                ll_bin = -F.binary_cross_entropy_with_logits(bin_logits, target_bin, reduction='sum')
+                ll_bin = ll_bin / self.bin_feat_dim
+            else:
+                ll_bin = torch.tensor(0.0, device=h.device)
+
+            # 3. Label cross-entropy
+            if label_mask is not None and not label_mask.all():
+                ll_label = -F.cross_entropy(pred_logits[label_mask], target_labels[label_mask], reduction='sum')
+            else:
+                ll_label = -F.cross_entropy(pred_logits, target_labels, reduction='sum')
+
+            ll = self.w_cont * ll_cont + self.w_bin * ll_bin + self.w_label * ll_label
+
+            self._ll_cont += ll_cont.item()
+            self._ll_bin += ll_bin.item()
+            self._ll_label += ll_label.item()
+
+            state_update = self.embed_node_feats(node_data)
+            return_data = node_data
+
+        new_state = self.node_state_update(state_update, (h, c))
         return new_state, ll, return_data

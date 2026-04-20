@@ -21,11 +21,17 @@
 # vae_feat:         "true" to add a per-node label-agnostic CVAE latent shared across feature decoders (default: false)
 # vae_dim:          latent dimensionality when vae_feat is on (default: 16)
 # kl_weight:        coefficient on the KL term in the VAE ELBO (default: 1.0)
+# cat_feat:         "true" to use AR categorical feature predictor (quantile bins + value-space soft labels).
+#                   Mutually exclusive with hetero_feat and vae_feat (default: false)
+# n_bins:           number of quantile bins per continuous feature when cat_feat is on (default: 32)
+# bin_sigma:        Gaussian soft-label std in feature-value units. Leave empty for auto
+#                   (0.5 x median bin-center spacing) (default: auto)
 #
 # Examples:
 #   bash scripts/train/train_bigg_subsample.sh reddit -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true -4.0 2000 0.3
 #   bash scripts/train/train_bigg_subsample.sh reddit -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true -4.0 2000 0.3 3 true
 #   bash scripts/train/train_bigg_subsample.sh tolokers -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true -10.0 500 0.2 15 false true 16 1.0
+#   bash scripts/train/train_bigg_subsample.sh tolokers -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 false true -10.0 500 0.2 15 false false 16 1.0 true 32
 #
 
 set -e
@@ -53,6 +59,9 @@ BINARY_FEAT="${19:-false}"
 VAE_FEAT="${20:-false}"
 VAE_DIM="${21:-16}"
 KL_WEIGHT="${22:-1.0}"
+CAT_FEAT="${23:-false}"
+N_BINS="${24:-32}"
+BIN_SIGMA="${25:-}"
 
 cd "$(dirname "$0")/../../bigg"
 
@@ -79,6 +88,9 @@ echo "Binary feat:     $BINARY_FEAT"
 echo "VAE feat:        $VAE_FEAT"
 echo "VAE dim:         $VAE_DIM"
 echo "KL weight:       $KL_WEIGHT"
+echo "Cat feat:        $CAT_FEAT"
+echo "N bins:          $N_BINS"
+echo "Bin sigma:       ${BIN_SIGMA:-auto}"
 echo ""
 
 NORM_FLAG=""
@@ -111,6 +123,16 @@ if [ "$VAE_FEAT" = "true" ]; then
   VAE_FLAG="--vae_feat"
 fi
 
+CAT_FLAG=""
+if [ "$CAT_FEAT" = "true" ]; then
+  CAT_FLAG="--cat_feat"
+fi
+
+BIN_SIGMA_FLAG=""
+if [ -n "$BIN_SIGMA" ]; then
+  BIN_SIGMA_FLAG="-bin_sigma $BIN_SIGMA"
+fi
+
 python -m bigg.extension.pipeline \
   -data_dir "$DATASET" \
   -model_type conditional \
@@ -139,4 +161,7 @@ python -m bigg.extension.pipeline \
   $VAE_FLAG \
   -vae_dim "$VAE_DIM" \
   -kl_weight "$KL_WEIGHT" \
-  -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LOSS_WEIGHTS}_${HETERO_FEAT}_lvf${LOGVAR_FLOOR}_bin${BINARY_FEAT}_vae${VAE_FEAT}_vd${VAE_DIM}_kl${KL_WEIGHT}_sub${SUBSAMPLE_SIZE}_p${BURN_PROB}"
+  $CAT_FLAG \
+  -n_bins "$N_BINS" \
+  $BIN_SIGMA_FLAG \
+  -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LOSS_WEIGHTS}_${HETERO_FEAT}_lvf${LOGVAR_FLOOR}_bin${BINARY_FEAT}_vae${VAE_FEAT}_vd${VAE_DIM}_kl${KL_WEIGHT}_cat${CAT_FEAT}_nb${N_BINS}_sub${SUBSAMPLE_SIZE}_p${BURN_PROB}"

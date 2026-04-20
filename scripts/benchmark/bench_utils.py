@@ -13,7 +13,7 @@ from data.comp_graph import (
 )
 from models.anomaly_detection.cgt_detector import CG_SUPPORTED_MODELS
 
-SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph']
+SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph', 'XGBoost']
 LP_SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE']
 
 
