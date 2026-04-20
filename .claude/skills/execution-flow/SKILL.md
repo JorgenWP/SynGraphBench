@@ -79,12 +79,13 @@ Train BiGG with forest fire subsampling for VRAM-limited training. Same args as 
 Train BiGG structure-only baseline. Defaults: `tolokers 128 1 100 0.001 256`.
 Checkpoints saved with `structure_` prefix.
 
-**`bash scripts/train/train_cgt.sh [dataset] [gpt_epochs] [cluster_num] [cluster_size] [gpt_batch_size] [cg_depth] [cg_fanout] [trial_id] [task]`**
-Train CGT on a dataset. Defaults: `reddit 50 512 1 128 2 5 0 hidden_labels`. Calls `CGT/train.py`.
+**`bash scripts/train/train_cgt.sh [dataset] [gpt_epochs] [cluster_num] [cluster_size] [gpt_batch_size] [cg_depth] [cg_fanout] [trial_id] [task] [cluster_sample_num]`**
+Train CGT on a dataset. Defaults: `reddit 50 512 1 128 2 5 0 hidden_labels 5000`. Calls `CGT/train.py`.
 `trial_id` selects which GADBench mask column (0-9) to use for the train/val/test split.
-Output saved to `datasets/synthetic/cgt/<dataset>/<task>/<variant>/<variant>_t{trial_id}.pt` where variant = `{dataset}_e{epochs}_k{clusters}_c{cluster_size}_d{depth}_f{fanout}`.
+`cluster_sample_num` caps how many nodes are subsampled to fit `KMeansConstrained`; the library requires `cluster_num × cluster_size ≤ cluster_sample_num`, so raise this to use a higher `cluster_size` (k-anonymity) without giving up cluster resolution. Set ≥ graph size to fit on all nodes.
+Output saved to `datasets/synthetic/cgt/<dataset>/<task>/<variant>/<variant>_t{trial_id}.pt` where variant = `{dataset}_e{epochs}_k{clusters}_c{cluster_size}_d{depth}_f{fanout}_s{cluster_sample_num}`.
 
-**`bash scripts/train/train_cgt_all_trials.sh [dataset] [gpt_epochs] [cluster_num] [cluster_size] [gpt_batch_size] [cg_depth] [cg_fanout] [num_trials]`**
+**`bash scripts/train/train_cgt_all_trials.sh [dataset] [gpt_epochs] [cluster_num] [cluster_size] [gpt_batch_size] [cg_depth] [cg_fanout] [num_trials] [task] [cluster_sample_num]`**
 Train CGT on all GADBench splits (trials 0 to num_trials-1). Defaults: same as `train_cgt.sh`, `num_trials=10`. Loops over `train_cgt.sh` with each trial_id.
 
 ### Environment Setup

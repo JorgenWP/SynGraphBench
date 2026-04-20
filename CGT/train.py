@@ -64,6 +64,7 @@ def main():
         f"_c{args.cluster_size}"
         f"_d{args.cg_depth}"
         f"_f{args.cg_fanout}"
+        f"_s{args.cluster_sample_num}"
     )
     save_dir = os.path.join(args.data_dir, '..', 'synthetic', 'cgt',
                             args.dataset, args.task, variant)

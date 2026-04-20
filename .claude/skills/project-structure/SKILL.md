@@ -68,13 +68,13 @@ All synthetic outputs follow the structure `datasets/synthetic/<generative_model
 
 | Generator | Task folder | Type | Example path |
 |-----------|-------------|------|--------------|
-| `cgt` | `hidden_labels` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/hidden_labels/reddit_e50_k512_c1_d2_f5/reddit_e50_k512_c1_d2_f5_t0.pt` |
-| `cgt` | `hidden_links` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/hidden_links/reddit_e50_k512_c1_d2_f5/reddit_e50_k512_c1_d2_f5_t0.pt` |
+| `cgt` | `hidden_labels` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/hidden_labels/reddit_e50_k512_c1_d2_f5_s5000/reddit_e50_k512_c1_d2_f5_s5000_t0.pt` |
+| `cgt` | `hidden_links` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/hidden_links/reddit_e50_k512_c1_d2_f5_s5000/reddit_e50_k512_c1_d2_f5_s5000_t0.pt` |
 | `bigg` | `hidden_labels` | Full DGL graph — conditional (features + labels) | `synthetic/bigg/tolokers/hidden_labels/blksize_1024_b_1_lr_0.001_epochs_50` |
 | `bigg` | `hidden_labels` | Structure-only baseline | `synthetic/bigg/tolokers/hidden_labels/structure_blksize_128_lr_0.001_epochs_100` |
 
 **Filename patterns:**
-- CGT: `{variant}/{variant}_t{trial_id}.pt` where variant = `{dataset}_e{epochs}_k{clusters}_c{cluster_size}_d{depth}_f{fanout}`
+- CGT: `{variant}/{variant}_t{trial_id}.pt` where variant = `{dataset}_e{epochs}_k{clusters}_c{cluster_size}_d{depth}_f{fanout}_s{cluster_sample_num}`. `cluster_sample_num` is the cap on nodes subsampled when fitting `KMeansConstrained` — it bounds `cluster_num × cluster_size` and affects the kmeans fit, so it's included in the variant to avoid silent collisions across runs with different sample budgets.
 - BiGG conditional: `blksize_{blksize}_b_{batch}_lr_{lr}_epochs_{epochs}_noise_{noise}_ss_{ss}_norm_{method}_{bfs}_lw_{cw}_{lw}_{hetero|det}`
 - BiGG structure-only: `structure_blksize_{blksize}_lr_{lr}_epochs_{epochs}`
 

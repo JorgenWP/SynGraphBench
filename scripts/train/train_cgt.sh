@@ -2,12 +2,13 @@
 # Train CGT model on a dataset.
 #
 # Usage:
-#   bash scripts/train/train_cgt.sh [dataset] [gpt_epochs] [cluster_num] [cluster_size] [gpt_batch_size] [cg_depth] [cg_fanout] [trial_id] [task]
+#   bash scripts/train/train_cgt.sh [dataset] [gpt_epochs] [cluster_num] [cluster_size] [gpt_batch_size] [cg_depth] [cg_fanout] [trial_id] [task] [cluster_sample_num]
 #
 # Examples:
 #   bash scripts/train/train_cgt.sh reddit 50 512 1 128 2 5
 #   bash scripts/train/train_cgt.sh reddit 50 512 1 128 2 5 3
 #   bash scripts/train/train_cgt.sh tolokers 100 256 1 64 3 10 0 hidden_links
+#   bash scripts/train/train_cgt.sh reddit 50 100 100 128 2 5 0 hidden_labels 11000
 #
 
 set -e
@@ -22,6 +23,7 @@ CG_DEPTH="${6:-2}"
 CG_FANOUT="${7:-5}"
 TRIAL_ID="${8:-0}"
 TASK="${9:-hidden_labels}"
+CLUSTER_SAMPLE_NUM="${10:-5000}"
 
 # Navigate to project root
 cd "$(dirname "$0")/../.."
@@ -36,6 +38,7 @@ echo "CG depth:       $CG_DEPTH"
 echo "CG fanout:      $CG_FANOUT"
 echo "Trial ID:       $TRIAL_ID"
 echo "Task:           $TASK"
+echo "Cluster sample: $CLUSTER_SAMPLE_NUM"
 echo ""
 
 python CGT/train.py \
@@ -48,4 +51,5 @@ python CGT/train.py \
     --cg_depth "$CG_DEPTH" \
     --cg_fanout "$CG_FANOUT" \
     --trial_id "$TRIAL_ID" \
-    --task "$TASK"
+    --task "$TASK" \
+    --cluster_sample_num "$CLUSTER_SAMPLE_NUM"
