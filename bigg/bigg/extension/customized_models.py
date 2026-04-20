@@ -585,7 +585,6 @@ class BiggWithARCatFeats(RecurTreeGen):
         self.feat_dim = feat_dim
         self.num_classes = num_classes
         self.n_bins = n_bins
-        self.bin_sigma = bin_sigma
         self.label_temp = label_temp
         self.noise_std = noise_std
 
@@ -610,6 +609,17 @@ class BiggWithARCatFeats(RecurTreeGen):
                 f"bin_centers shape {bin_centers.shape} != ({self.cont_feat_dim}, {n_bins})"
             self.register_buffer('bin_edges', bin_edges.float())
             self.register_buffer('bin_centers', bin_centers.float())
+
+            # Per-feature sigma: accept scalar (broadcast to F) or (F,) tensor.
+            if torch.is_tensor(bin_sigma):
+                sigma_tensor = bin_sigma.float()
+                if sigma_tensor.dim() == 0:
+                    sigma_tensor = sigma_tensor.expand(self.cont_feat_dim).clone()
+                assert sigma_tensor.shape == (self.cont_feat_dim,), \
+                    f"bin_sigma shape {sigma_tensor.shape} != ({self.cont_feat_dim},)"
+            else:
+                sigma_tensor = torch.full((self.cont_feat_dim,), float(bin_sigma))
+            self.register_buffer('bin_sigma', sigma_tensor)
 
         # 1. Label head (from h)
         self.nodelabel_encoding = nn.Embedding(num_classes, args.embed_dim)
@@ -678,9 +688,10 @@ class BiggWithARCatFeats(RecurTreeGen):
         returns: (N, cont_feat_dim, n_bins) probability distribution centered at
         the true value with std bin_sigma (in feature-value units).
         """
-        centers = self.bin_centers.unsqueeze(0)          # (1, F, B)
-        vals = values.unsqueeze(-1)                      # (N, F, 1)
-        log_kernel = -((centers - vals) ** 2) / (2 * self.bin_sigma ** 2)
+        centers = self.bin_centers.unsqueeze(0)           # (1, F, B)
+        vals = values.unsqueeze(-1)                       # (N, F, 1)
+        sigma = self.bin_sigma.view(1, -1, 1)             # (1, F, 1)
+        log_kernel = -((centers - vals) ** 2) / (2 * sigma ** 2)
         return F.softmax(log_kernel, dim=-1)
 
     def embed_node_feats(self, node_data):

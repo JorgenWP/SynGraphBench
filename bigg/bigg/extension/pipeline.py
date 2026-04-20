@@ -205,9 +205,19 @@ def main():
         cont_for_bins = cont_feats[:, [i for i in range(feat_dim) if i not in binary_idx]]
         bin_edges, bin_centers = fit_feature_bins(cont_for_bins, pipeline_args.n_bins)
         if pipeline_args.bin_sigma is None:
+            # Per-feature sigma (F,) — data-adaptive across feature regimes.
             pipeline_args.bin_sigma = default_bin_sigma(bin_centers)
+            sigma_summary = (f'per-feature '
+                             f'[min={pipeline_args.bin_sigma.min():.4f}, '
+                             f'median={pipeline_args.bin_sigma.median():.4f}, '
+                             f'max={pipeline_args.bin_sigma.max():.4f}]')
+        else:
+            # Scalar override from CLI — broadcast to all features.
+            pipeline_args.bin_sigma = torch.full(
+                (bin_centers.shape[0],), float(pipeline_args.bin_sigma))
+            sigma_summary = f'scalar={pipeline_args.bin_sigma[0]:.4f}'
         print(f'Fit {pipeline_args.n_bins} quantile bins on {cont_for_bins.shape[1]} continuous columns; '
-              f'bin_sigma={pipeline_args.bin_sigma:.4f}')
+              f'bin_sigma={sigma_summary}')
 
     if pipeline_args.cat_feat:
         model = BiggWithARCatFeats(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
@@ -374,7 +384,7 @@ def main():
     mask_tag = '_masked' if pipeline_args.mask_test_labels else ''
     bin_tag = '_binfeat' if pipeline_args.binary_feat else ''
     vae_tag = f'_vae{pipeline_args.vae_dim}_kl{pipeline_args.kl_weight}' if pipeline_args.vae_feat else ''
-    cat_tag = f'_cat{pipeline_args.n_bins}_s{pipeline_args.bin_sigma:.2f}' if pipeline_args.cat_feat else ''
+    cat_tag = f'_cat{pipeline_args.n_bins}_smed{pipeline_args.bin_sigma.median().item():.2f}' if pipeline_args.cat_feat else ''
     sub_tag = f'_sub{len(subgraphs)}_size{pipeline_args.subsample_size}_p{pipeline_args.burn_prob}' if pipeline_args.subsample else ''
     save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{vae_tag}{cat_tag}{sub_tag}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'

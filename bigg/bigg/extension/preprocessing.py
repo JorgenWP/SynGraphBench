@@ -593,18 +593,28 @@ def fit_feature_bins(cont_feats, n_bins):
 
 
 def default_bin_sigma(centers, fraction=0.5):
-    """Heuristic bin sigma: *fraction* of the median spacing between bin centers.
+    """Per-feature bin sigma: *fraction* of the median positive spacing between
+    that feature's bin centers.
 
-    Keeps the Gaussian soft-label kernel a sensible width relative to the local
-    bin scale (narrow in dense regions, wider in sparse regions). Operates on
-    the *centers* tensor from ``fit_feature_bins``.
+    Data-adaptive across feature regimes in a single mechanism:
+    * Binary / few-value features (wide center gaps) get large sigma.
+    * Dense continuous features (tight center gaps) get small sigma.
+    * K-means-privatized features (k centers, gaps depend on k) scale automatically.
+
+    This removes the need for a separate binary-feature head — every column is
+    handled uniformly by cat_feat with a sigma calibrated to its own scale.
+
+    Returns
+    -------
+    torch.Tensor
+        (F,) per-feature sigma values. Features whose centers are fully
+        collapsed (no positive spacing) fall back to 1.0.
     """
-    # spacings shape: (F, n_bins - 1)
-    spacings = centers[:, 1:] - centers[:, :-1]
-    # Median across all feature/bin spacings as a single scalar sigma.
-    # (Per-feature sigma is cleaner but scalar is compatible with the model
-    # field; swap to per-feature later if needed.)
-    positive = spacings[spacings > 0]
-    if positive.numel() == 0:
-        return 1.0  # degenerate: all centers collapsed — treat as no smoothing
-    return float(fraction * positive.median().item())
+    F = centers.shape[0]
+    spacings = centers[:, 1:] - centers[:, :-1]  # (F, n_bins - 1)
+    sigmas = torch.full((F,), 1.0)
+    for f in range(F):
+        positive = spacings[f][spacings[f] > 0]
+        if positive.numel() > 0:
+            sigmas[f] = fraction * positive.median()
+    return sigmas
