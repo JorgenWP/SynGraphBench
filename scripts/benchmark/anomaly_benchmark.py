@@ -47,6 +47,7 @@ from bench_utils import (
     build_original_cg_datasets, print_comparison,
     load_bigg_synthetic_graph, apply_normalization,
     resolve_cgt_trial_paths, make_cgt_rebuild_fn,
+    _assert_pt_alignment,
 )
 from models.anomaly_detection.cgt_detector import CompGraphDetector, CG_SUPPORTED_MODELS
 
@@ -327,6 +328,18 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
             batch_size, lr, drop_rate, h_feats, num_layers,
             rebuild_datasets_fn=rebuild_fn))
     else:
+        # Single-file mode: verify the .pt was trained under the same
+        # trial_id / semi_supervised the benchmark is running with.
+        mask_col = trial_id + (10 if semi_supervised else 0)
+        single_test_ids = data.graph.ndata['test_masks'][:, mask_col].bool().nonzero(
+            as_tuple=True)[0].numpy()
+        _assert_pt_alignment(
+            syn_data,
+            expected_trial_id=trial_id,
+            expected_semi_supervised=semi_supervised,
+            expected_test_ids=single_test_ids,
+            source_label='synthetic-cgt[single-file]',
+        )
         syn_train, syn_val, test_ds = build_cgt_datasets(data.graph, syn_data)
         results.extend(_run_cg_trials(
             dataset_name, cg_models, syn_train, syn_val, test_ds,

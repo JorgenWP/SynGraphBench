@@ -26,6 +26,9 @@ def get_parser():
                         help='Dataset location.')
     parser.add_argument('--trial_id', type=int, default=0,
                         help='GADBench mask column index for train/val/test split (0-9)')
+    parser.add_argument('--semi_supervised', type=int, default=0,
+                        help='Use semi-supervised GADBench mask split (0 or 1). '
+                             'Shifts mask column by +10 via split_ids_from_dgl.')
     parser.add_argument('--save_dir', type=str, default="save",
                         help='Save location.')
     parser.add_argument('--dataset', type=str, default="cora",

@@ -415,6 +415,38 @@ def _extract_cg_params(syn_data):
     return step_num, sample_num, noise_num, self_conn
 
 
+def _assert_pt_alignment(syn_data, expected_trial_id, expected_semi_supervised,
+                         expected_test_ids, source_label):
+    """Verify a CGT .pt file matches the benchmark's split configuration.
+
+    Hard-fails on metadata mismatch or structural test-id disagreement.
+    Warns + falls back to the structural check when the .pt predates
+    provenance metadata (no 'trial_id' / 'semi_supervised' keys).
+    """
+    saved_trial = syn_data.get('trial_id')
+    saved_semi = syn_data.get('semi_supervised')
+
+    if saved_trial is None or saved_semi is None:
+        print(f"  WARNING [{source_label}]: .pt lacks provenance metadata "
+              f"(trial_id/semi_supervised). Falling back to structural check. "
+              f"Re-run CGT training to embed metadata.")
+    else:
+        assert saved_trial == expected_trial_id, (
+            f"[{source_label}] trial_id mismatch: .pt was trained with "
+            f"trial_id={saved_trial}, benchmark expects {expected_trial_id}.")
+        assert bool(saved_semi) == bool(expected_semi_supervised), (
+            f"[{source_label}] semi_supervised mismatch: .pt="
+            f"{bool(saved_semi)}, benchmark={bool(expected_semi_supervised)}.")
+
+    saved_test = set(int(x) for x in syn_data['ids']['test'])
+    got_test = set(int(x) for x in expected_test_ids)
+    assert saved_test == got_test, (
+        f"[{source_label}] test split desync: .pt's ids['test'] "
+        f"(|S|={len(saved_test)}) != mask-derived test_ids "
+        f"(|S|={len(got_test)}). Likely trial_id or semi_supervised mismatch, "
+        f"or a renamed/moved .pt.")
+
+
 def resolve_cgt_trial_paths(syn_path, num_trials):
     """Check for per-trial .pt files: {stem}_t{t}.pt for t in 0..num_trials-1.
 
@@ -455,6 +487,14 @@ def make_cgt_rebuild_fn(original_graph, trial_paths,
         mask_col = (trial_id_offset + t) + (10 if semi_supervised else 0)
         test_ids = original_graph.ndata['test_masks'][:, mask_col].bool().nonzero(
             as_tuple=True)[0].numpy()
+
+        _assert_pt_alignment(
+            syn_data,
+            expected_trial_id=trial_id_offset + t,
+            expected_semi_supervised=semi_supervised,
+            expected_test_ids=test_ids,
+            source_label=f'synthetic-cgt[t={t}]',
+        )
 
         test_ds = OriginalCompGraphDataset(
             adj_list, features, labels, test_ids,

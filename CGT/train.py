@@ -45,7 +45,11 @@ def main():
 
     # Use pre-defined splits for DGL/GADBench datasets, random splits otherwise
     if is_dgl_dataset(args):
-        ids = split_ids_from_dgl(args, trial_id=args.trial_id)
+        ids = split_ids_from_dgl(
+            args,
+            semi_supervised=bool(args.semi_supervised),
+            trial_id=args.trial_id,
+        )
         print(f"Using GADBench splits: train={len(ids['train'])}, val={len(ids['val'])}, test={len(ids['test'])}")
     else:
         ids = split_ids(args, feat.shape[0])
@@ -81,6 +85,8 @@ def main():
         'cg_fanout': args.cg_fanout,
         'noise_num': args.noise_num,
         'self_connection': args.self_connection,
+        'trial_id': args.trial_id,
+        'semi_supervised': bool(args.semi_supervised),
     }, save_path)
 
     print(f"\nSynthetic dataset saved to {save_path}")
