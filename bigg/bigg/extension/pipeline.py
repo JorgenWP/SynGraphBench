@@ -295,22 +295,32 @@ def main():
     struct_skip = set(feat_head_names) | set(label_head_names) | {
         'nodefeat_encoding', 'combiner', 'node_state_update', 'vae_encoder'}
 
-    def _group_grad_norms():
-        sums = {'feat': 0.0, 'label': 0.0, 'state': 0.0, 'struct': 0.0}
+    state_head_names = {'nodefeat_encoding', 'combiner', 'node_state_update', 'vae_encoder'}
+
+    def _group_params():
+        """Return {group: [param, ...]} for per-group gradient ops."""
+        groups = {'feat': [], 'label': [], 'state': [], 'struct': []}
         for name, mod in model.named_children():
-            g_sq = 0.0
-            for p in mod.parameters():
-                if p.grad is not None:
-                    g_sq += float((p.grad ** 2).sum().item())
+            params = list(mod.parameters())
+            if not params:
+                continue
             if name in feat_head_names:
-                sums['feat'] += g_sq
+                groups['feat'].extend(params)
             elif name in label_head_names:
-                sums['label'] += g_sq
-            elif name in {'nodefeat_encoding', 'combiner', 'node_state_update', 'vae_encoder'}:
-                sums['state'] += g_sq
+                groups['label'].extend(params)
+            elif name in state_head_names:
+                groups['state'].extend(params)
             else:
-                sums['struct'] += g_sq
+                groups['struct'].extend(params)
+        return groups
+
+    def _group_grad_norms():
         import math as _m
+        sums = {k: 0.0 for k in ('feat', 'label', 'state', 'struct')}
+        for g_name, params in _group_params().items():
+            for p in params:
+                if p.grad is not None:
+                    sums[g_name] += float((p.grad ** 2).sum().item())
         return {k: _m.sqrt(v) for k, v in sums.items()}
 
     model.train()
@@ -410,8 +420,12 @@ def main():
             epoch_grad_state  += grad_groups['state']
             epoch_grad_struct += grad_groups['struct']
 
+            # Per-group gradient clipping: a struct spike no longer zeroes the
+            # feat/label/state heads. Each group is clipped to the same max_norm.
             if cmd_args.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cmd_args.grad_clip)
+                for _params in _group_params().values():
+                    if _params:
+                        torch.nn.utils.clip_grad_norm_(_params, max_norm=cmd_args.grad_clip)
             optimizer.step()
 
             epoch_loss_val += sg_loss_val
