@@ -188,8 +188,12 @@ def print_args(args):
     print(f"\n  [Clustering]")
     print(f"  cluster_num:      {args.cluster_num}")
     print(f"  cluster_size:     {args.cluster_size}")
-    print(f"  cluster_samples:  {args.cluster_sample_num}")
+    print(f"  cluster_sample_num:   {args.cluster_sample_num}")
     print(f"  dp_feature:       {args.dp_feature}")
+    if args.dp_feature:
+        print(f"    dp_epsilon:           {args.dp_epsilon}")
+        print(f"    dp_delta:             {args.dp_delta}")
+        print(f"    dp_sigma:             {args.dp_sigma}")
 
     print(f"\n  [Computation Graph]")
     print(f"  cg_depth:         {args.cg_depth}")
