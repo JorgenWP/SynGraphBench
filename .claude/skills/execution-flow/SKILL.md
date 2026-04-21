@@ -71,7 +71,7 @@ Train BiGG conditional model (features + labels). Defaults: `tolokers 1024 1 50 
 * `logvar_floor`: Lower clamp for log-variance in hetero_feat mode (default: -4.0).
 * `binary_feat`: `true` to auto-detect binary feature columns and use BCE loss + Bernoulli sampling instead of Gaussian head. Appends `_binfeat` to save name. Binary columns skip normalization.
 
-**`bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma]`**
+**`bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor]`**
 Train BiGG with forest fire subsampling for VRAM-limited training. Same args as above, plus:
 * `subsample_size`: target nodes per subgraph (default: 2000).
 * `burn_prob`: forest fire burn probability — controls subgraph density (default: 0.3).
@@ -82,6 +82,9 @@ Train BiGG with forest fire subsampling for VRAM-limited training. Same args as 
 * `cat_feat`: `true` to use the AR categorical feature predictor (quantile bins + value-space soft-label cross-entropy). Mutually exclusive with `hetero_feat` and `vae_feat`. Appends `_cat{n_bins}_s{bin_sigma}` to save name and persists `cat_bins.pt` alongside the generated graph(s).
 * `n_bins`: number of quantile bins per continuous feature when `cat_feat` is on (default: 32).
 * `bin_sigma`: Gaussian soft-label std in feature-value units. Leave empty for auto per-feature sigma (0.5 × median positive spacing of *that* feature's bin centers — adapts across regimes: small for dense continuous, large for binary-like, scales automatically under k-means privacy). Scalar override broadcast to all features.
+* `mdn_feat`: `true` to use Mixture Density Network feature head (per-feature K-component Gaussian mixture conditioned on `[h, label_embed]`). Mutually exclusive with `hetero_feat` / `vae_feat` / `cat_feat`. Appends `_mdn{K}` to save name.
+* `mdn_components`: number of mixture components per feature when `mdn_feat` is on (default: 8).
+* `mdn_logsigma_floor`: lower clamp for MDN component log-sigma (default: -4.0).
 
 **`bash scripts/train/train_bigg_structure.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim]`**
 Train BiGG structure-only baseline. Defaults: `tolokers 128 1 100 0.001 256`.

@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+
 from bigg.model.tree_model import RecurTreeGen
 import torch
 from bigg.common.pytorch_util import glorot_uniform, MLP
@@ -777,6 +779,196 @@ class BiggWithARCatFeats(RecurTreeGen):
             # 2. Binary BCE
             if target_bin is not None and self.bin_feat_dim > 0:
                 bin_logits = self.binfeat_pred(torch.cat([h, label_embed], dim=-1))
+                ll_bin = -F.binary_cross_entropy_with_logits(bin_logits, target_bin, reduction='sum')
+                ll_bin = ll_bin / self.bin_feat_dim
+            else:
+                ll_bin = torch.tensor(0.0, device=h.device)
+
+            # 3. Label cross-entropy
+            if label_mask is not None and not label_mask.all():
+                ll_label = -F.cross_entropy(pred_logits[label_mask], target_labels[label_mask], reduction='sum')
+            else:
+                ll_label = -F.cross_entropy(pred_logits, target_labels, reduction='sum')
+
+            ll = self.w_cont * ll_cont + self.w_bin * ll_bin + self.w_label * ll_label
+
+            self._ll_cont += ll_cont.item()
+            self._ll_bin += ll_bin.item()
+            self._ll_label += ll_label.item()
+
+            state_update = self.embed_node_feats(node_data)
+            return_data = node_data
+
+        new_state = self.node_state_update(state_update, (h, c))
+        return new_state, ll, return_data
+
+
+class BiggWithMDNFeats(RecurTreeGen):
+    """BiGG with a Mixture Density Network continuous feature head.
+
+    Per-feature K-component Gaussian mixture conditioned on [h, label_embed].
+    For each node and each continuous feature column, the head emits K
+    (logit_pi, mu, log_sigma) triples; training loss is the negative
+    log-likelihood of the true value under the mixture, and generation samples
+    a component index then a Gaussian.
+
+    Binary columns keep the Bernoulli/BCE head. No quantile bins, no AR chain,
+    no latent — just a direct mixture. Works uniformly across embedding / mass-
+    point / near-binary regimes because components collapse onto modes as
+    needed.
+    """
+
+    def __init__(self, args, feat_dim, num_classes, n_components,
+                 label_temp=1.0, noise_std=0.0, logsigma_floor=-4.0,
+                 binary_feat=False, binary_idx=None):
+        super().__init__(args)
+        self.feat_dim = feat_dim
+        self.num_classes = num_classes
+        self.n_components = n_components
+        self.label_temp = label_temp
+        self.noise_std = noise_std
+        self.logsigma_floor = logsigma_floor
+
+        if binary_feat and binary_idx:
+            self.binary_idx = sorted(binary_idx)
+            self.cont_idx = sorted(set(range(feat_dim)) - set(self.binary_idx))
+        else:
+            self.binary_idx = []
+            self.cont_idx = list(range(feat_dim))
+        self.cont_feat_dim = len(self.cont_idx)
+        self.bin_feat_dim = len(self.binary_idx)
+
+        # Label head (from h)
+        self.nodelabel_encoding = nn.Embedding(num_classes, args.embed_dim)
+        self.nodelabel_pred = MLP(args.embed_dim, [2 * args.embed_dim, num_classes])
+
+        # MDN head: per-node emits F * K * 3 parameters (pi_logit, mu, log_sigma).
+        # Input is [h, label_embed]: 2 * embed_dim.
+        if self.cont_feat_dim > 0:
+            mdn_out_dim = self.cont_feat_dim * n_components * 3
+            self.mdn_head = MLP(args.embed_dim * 2, [2 * args.embed_dim, mdn_out_dim])
+
+        # Binary head (same conditioning as MDN)
+        if self.bin_feat_dim > 0:
+            self.binfeat_pred = MLP(args.embed_dim * 2, [2 * args.embed_dim, self.bin_feat_dim])
+
+        # State update path
+        self.nodefeat_encoding = MLP(feat_dim, [2 * args.embed_dim, args.embed_dim])
+        self.combiner = nn.Linear(args.embed_dim * 2, args.embed_dim)
+        self.node_state_update = nn.LSTMCell(args.embed_dim, args.embed_dim)
+
+        self._ll_cont = 0.0
+        self._ll_bin = 0.0
+        self._ll_label = 0.0
+        self._kl = 0.0
+
+        self.w_cont = 1.0
+        self.w_bin = 1.0
+        self.w_label = 1.0
+
+    def reset_loss_trackers(self):
+        self._ll_cont = 0.0
+        self._ll_bin = 0.0
+        self._ll_label = 0.0
+        self._kl = 0.0
+
+    def _assemble_features(self, cont_vals, bin_vals):
+        if cont_vals.numel() > 0:
+            batch, device = cont_vals.shape[0], cont_vals.device
+        else:
+            batch, device = bin_vals.shape[0], bin_vals.device
+        full = torch.empty(batch, self.feat_dim, device=device)
+        if self.cont_feat_dim > 0:
+            full[:, self.cont_idx] = cont_vals
+        if self.bin_feat_dim > 0:
+            full[:, self.binary_idx] = bin_vals
+        return full
+
+    def _mdn_params(self, h_cond):
+        """Split MDN head output into (log_pi, mu, log_sigma), each (N, F, K)."""
+        N = h_cond.shape[0]
+        raw = self.mdn_head(h_cond).view(N, self.cont_feat_dim, self.n_components, 3)
+        pi_logits = raw[..., 0]
+        mu = raw[..., 1]
+        log_sigma = torch.clamp(raw[..., 2], min=self.logsigma_floor, max=2.0)
+        log_pi = F.log_softmax(pi_logits, dim=-1)
+        return log_pi, mu, log_sigma
+
+    def embed_node_feats(self, node_data):
+        cont_feats = node_data[:, :self.feat_dim]
+        node_labels = node_data[:, self.feat_dim].long()
+        embed_cont = self.nodefeat_encoding(cont_feats)
+        embed_label = self.nodelabel_encoding(node_labels)
+        combined_embed = torch.cat([embed_cont, embed_label], dim=-1)
+        return self.combiner(combined_embed)
+
+    def predict_node_feats(self, state, node_data=None, label_mask=None):
+        h, c = state
+        N = h.shape[0]
+
+        if self.training and self.noise_std > 0:
+            h = h + torch.randn_like(h) * self.noise_std
+
+        pred_logits = self.nodelabel_pred(h)
+
+        if node_data is None:
+            # --- Generation ---
+            probs = F.softmax(pred_logits / self.label_temp, dim=-1)
+            pred_labels = torch.multinomial(probs, num_samples=1).squeeze(-1)
+            label_embed = self.nodelabel_encoding(pred_labels)
+            h_cond = torch.cat([h, label_embed], dim=-1)
+
+            if self.cont_feat_dim > 0:
+                log_pi, mu, log_sigma = self._mdn_params(h_cond)  # (N, F, K)
+                pi = log_pi.exp()
+                # Sample one component per (node, feature) independently.
+                flat_pi = pi.reshape(N * self.cont_feat_dim, self.n_components)
+                comp_idx = torch.multinomial(flat_pi, num_samples=1).squeeze(-1)
+                comp_idx = comp_idx.view(N, self.cont_feat_dim)
+                gather_idx = comp_idx.unsqueeze(-1)
+                chosen_mu = mu.gather(-1, gather_idx).squeeze(-1)
+                chosen_log_sigma = log_sigma.gather(-1, gather_idx).squeeze(-1)
+                sampled_cont = chosen_mu + chosen_log_sigma.exp() * torch.randn_like(chosen_mu)
+            else:
+                sampled_cont = torch.empty(N, 0, device=h.device)
+
+            if self.bin_feat_dim > 0:
+                bin_logits = self.binfeat_pred(h_cond)
+                sampled_bin = torch.bernoulli(torch.sigmoid(bin_logits))
+            else:
+                sampled_bin = torch.empty(N, 0, device=h.device)
+
+            all_feats = self._assemble_features(sampled_cont, sampled_bin)
+            return_data = torch.cat([all_feats, pred_labels.unsqueeze(-1).float()], dim=-1)
+            state_update = self.embed_node_feats(return_data)
+            ll = 0
+
+        else:
+            # --- Training ---
+            target_all = node_data[:, :self.feat_dim]
+            target_labels = node_data[:, self.feat_dim].long()
+            label_embed = self.nodelabel_encoding(target_labels)
+            h_cond = torch.cat([h, label_embed], dim=-1)
+
+            target_cont = target_all[:, self.cont_idx] if self.cont_feat_dim > 0 else None
+            target_bin = target_all[:, self.binary_idx] if self.bin_feat_dim > 0 else None
+
+            # 1. MDN log-likelihood per (node, feature), averaged over features.
+            if target_cont is not None and self.cont_feat_dim > 0:
+                log_pi, mu, log_sigma = self._mdn_params(h_cond)      # (N, F, K)
+                x = target_cont.unsqueeze(-1)                          # (N, F, 1)
+                # Gaussian log-prob per component
+                log_norm = -0.5 * math.log(2 * math.pi)
+                log_comp = (log_norm - log_sigma
+                            - 0.5 * ((x - mu) / log_sigma.exp()) ** 2)  # (N, F, K)
+                log_mix = torch.logsumexp(log_pi + log_comp, dim=-1)   # (N, F)
+                ll_cont = log_mix.sum() / self.cont_feat_dim
+            else:
+                ll_cont = torch.tensor(0.0, device=h.device)
+
+            # 2. Binary BCE
+            if target_bin is not None and self.bin_feat_dim > 0:
+                bin_logits = self.binfeat_pred(h_cond)
                 ll_bin = -F.binary_cross_entropy_with_logits(bin_logits, target_bin, reduction='sum')
                 ll_bin = ll_bin / self.bin_feat_dim
             else:

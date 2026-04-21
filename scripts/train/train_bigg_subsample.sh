@@ -7,7 +7,7 @@
 # training subgraph.
 #
 # Usage:
-#   bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight]
+#   bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor]
 #
 # normalize:        feature normalisation — one of "zscore", "minmax", "row", "quantile", or "none" (default: none)
 # loss_weights:     comma-separated cont,label weights relative to struct, applied after dynamic normalization (default: 1,1)
@@ -26,6 +26,10 @@
 # n_bins:           number of quantile bins per continuous feature when cat_feat is on (default: 32)
 # bin_sigma:        Gaussian soft-label std in feature-value units. Leave empty for auto
 #                   (0.5 x median bin-center spacing) (default: auto)
+# mdn_feat:         "true" to use Mixture Density Network feature head (per-feature K-component
+#                   Gaussian mixture). Mutually exclusive with hetero_feat/vae_feat/cat_feat (default: false)
+# mdn_components:   number of mixture components per feature when mdn_feat is on (default: 8)
+# mdn_logsigma_floor: lower clamp for MDN component log-sigma (default: -4.0)
 #
 # Examples:
 #   bash scripts/train/train_bigg_subsample.sh reddit -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true -4.0 2000 0.3
@@ -62,6 +66,9 @@ KL_WEIGHT="${22:-1.0}"
 CAT_FEAT="${23:-false}"
 N_BINS="${24:-32}"
 BIN_SIGMA="${25:-}"
+MDN_FEAT="${26:-false}"
+MDN_COMPONENTS="${27:-8}"
+MDN_LOGSIGMA_FLOOR="${28:--4.0}"
 
 cd "$(dirname "$0")/../../bigg"
 
@@ -91,6 +98,9 @@ echo "KL weight:       $KL_WEIGHT"
 echo "Cat feat:        $CAT_FEAT"
 echo "N bins:          $N_BINS"
 echo "Bin sigma:       ${BIN_SIGMA:-auto}"
+echo "MDN feat:        $MDN_FEAT"
+echo "MDN components:  $MDN_COMPONENTS"
+echo "MDN lσ floor:    $MDN_LOGSIGMA_FLOOR"
 echo ""
 
 NORM_FLAG=""
@@ -133,6 +143,11 @@ if [ -n "$BIN_SIGMA" ]; then
   BIN_SIGMA_FLAG="-bin_sigma $BIN_SIGMA"
 fi
 
+MDN_FLAG=""
+if [ "$MDN_FEAT" = "true" ]; then
+  MDN_FLAG="--mdn_feat"
+fi
+
 python -m bigg.extension.pipeline \
   -data_dir "$DATASET" \
   -model_type conditional \
@@ -164,4 +179,7 @@ python -m bigg.extension.pipeline \
   $CAT_FLAG \
   -n_bins "$N_BINS" \
   $BIN_SIGMA_FLAG \
-  -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LOSS_WEIGHTS}_${HETERO_FEAT}_lvf${LOGVAR_FLOOR}_bin${BINARY_FEAT}_vae${VAE_FEAT}_vd${VAE_DIM}_kl${KL_WEIGHT}_cat${CAT_FEAT}_nb${N_BINS}_sub${SUBSAMPLE_SIZE}_p${BURN_PROB}"
+  $MDN_FLAG \
+  -mdn_components "$MDN_COMPONENTS" \
+  -mdn_logsigma_floor "$MDN_LOGSIGMA_FLOOR" \
+  -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LOSS_WEIGHTS}_${HETERO_FEAT}_lvf${LOGVAR_FLOOR}_bin${BINARY_FEAT}_vae${VAE_FEAT}_vd${VAE_DIM}_kl${KL_WEIGHT}_cat${CAT_FEAT}_nb${N_BINS}_mdn${MDN_FEAT}_k${MDN_COMPONENTS}_sub${SUBSAMPLE_SIZE}_p${BURN_PROB}"

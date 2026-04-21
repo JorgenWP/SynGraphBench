@@ -17,6 +17,7 @@ from bigg.extension.customized_models import (
     BiggWithConditionedFeats,
     BiggWithFeatsAndLabels,
     BiggWithARCatFeats,
+    BiggWithMDNFeats,
 )
 
 # Preprocessing utilities
@@ -84,6 +85,15 @@ def main():
     pipeline_parser.add_argument('-bin_sigma', type=float, default=None,
                                  help='Gaussian soft-label std in feature-value units when --cat_feat '
                                       'is on. Default: 0.5 x median bin-center spacing.')
+    pipeline_parser.add_argument('--mdn_feat', action='store_true', default=False,
+                                 help='Use Mixture Density Network feature head: per-feature '
+                                      'K-component Gaussian mixture conditioned on [h, label_embed]. '
+                                      'Mutually exclusive with --hetero_feat / --vae_feat / --cat_feat.')
+    pipeline_parser.add_argument('-mdn_components', type=int, default=8,
+                                 help='Number of mixture components per feature when --mdn_feat '
+                                      'is on (default: 8)')
+    pipeline_parser.add_argument('-mdn_logsigma_floor', type=float, default=-4.0,
+                                 help='Lower clamp for MDN component log-sigma (default: -4.0)')
     pipeline_parser.add_argument('--mask_test_labels', action='store_true', default=False,
                                  help='Exclude test node labels (split 0) from label loss to prevent '
                                       'data leakage in anomaly detection benchmarks')
@@ -106,6 +116,11 @@ def main():
     # AR categorical is its own predictor; reject combinations that don't apply.
     if pipeline_args.cat_feat and (pipeline_args.hetero_feat or pipeline_args.vae_feat):
         raise ValueError('--cat_feat is mutually exclusive with --hetero_feat and --vae_feat')
+
+    # MDN replaces the continuous head entirely; reject combinations that don't apply.
+    if pipeline_args.mdn_feat and (pipeline_args.hetero_feat or pipeline_args.vae_feat
+                                    or pipeline_args.cat_feat):
+        raise ValueError('--mdn_feat is mutually exclusive with --hetero_feat, --vae_feat, --cat_feat')
 
     set_device(cmd_args.gpu)
     setup_treelib(cmd_args)
@@ -229,6 +244,14 @@ def main():
                                    noise_std=pipeline_args.noise_std,
                                    binary_feat=pipeline_args.binary_feat,
                                    binary_idx=binary_idx).to(cmd_args.device)
+    elif pipeline_args.mdn_feat:
+        model = BiggWithMDNFeats(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
+                                 n_components=pipeline_args.mdn_components,
+                                 label_temp=pipeline_args.label_temp,
+                                 noise_std=pipeline_args.noise_std,
+                                 logsigma_floor=pipeline_args.mdn_logsigma_floor,
+                                 binary_feat=pipeline_args.binary_feat,
+                                 binary_idx=binary_idx).to(cmd_args.device)
     elif pipeline_args.model_type == 'conditional':
         model = BiggWithConditionedFeats(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
                                          label_temp=pipeline_args.label_temp,
@@ -385,8 +408,9 @@ def main():
     bin_tag = '_binfeat' if pipeline_args.binary_feat else ''
     vae_tag = f'_vae{pipeline_args.vae_dim}_kl{pipeline_args.kl_weight}' if pipeline_args.vae_feat else ''
     cat_tag = f'_cat{pipeline_args.n_bins}_smed{pipeline_args.bin_sigma.median().item():.2f}' if pipeline_args.cat_feat else ''
+    mdn_tag = f'_mdn{pipeline_args.mdn_components}' if pipeline_args.mdn_feat else ''
     sub_tag = f'_sub{len(subgraphs)}_size{pipeline_args.subsample_size}_p{pipeline_args.burn_prob}' if pipeline_args.subsample else ''
-    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{vae_tag}{cat_tag}{sub_tag}'
+    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{vae_tag}{cat_tag}{mdn_tag}{sub_tag}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
 
     model.eval()

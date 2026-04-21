@@ -56,6 +56,9 @@ KL_WEIGHT=1.0           # coefficient on the KL term in the VAE ELBO
 CAT_FEAT=false          # "true" to use AR categorical feature predictor (quantile bins + soft labels). Mutually exclusive with HETERO_FEAT / VAE_FEAT.
 N_BINS=32               # number of quantile bins per continuous feature when CAT_FEAT is on
 BIN_SIGMA=              # Gaussian soft-label std in feature-value units (leave empty for auto)
+MDN_FEAT=false          # "true" to use Mixture Density Network feature head. Mutually exclusive with HETERO_FEAT / VAE_FEAT / CAT_FEAT.
+MDN_COMPONENTS=8        # number of mixture components per feature when MDN_FEAT is on
+MDN_LOGSIGMA_FLOOR=-4.0 # lower clamp for MDN component log-sigma
 
 # Run the BiGG subsampled training and generation script
-bash scripts/train/train_bigg_subsample.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$LOGVAR_FLOOR" "$SUBSAMPLE_SIZE" "$BURN_PROB" "$NUM_SUBGRAPHS" "$BINARY_FEAT" "$VAE_FEAT" "$VAE_DIM" "$KL_WEIGHT" "$CAT_FEAT" "$N_BINS" "$BIN_SIGMA"
+bash scripts/train/train_bigg_subsample.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$LOGVAR_FLOOR" "$SUBSAMPLE_SIZE" "$BURN_PROB" "$NUM_SUBGRAPHS" "$BINARY_FEAT" "$VAE_FEAT" "$VAE_DIM" "$KL_WEIGHT" "$CAT_FEAT" "$N_BINS" "$BIN_SIGMA" "$MDN_FEAT" "$MDN_COMPONENTS" "$MDN_LOGSIGMA_FLOOR"
