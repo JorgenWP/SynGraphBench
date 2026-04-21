@@ -479,7 +479,7 @@ def main():
     bin_tag = '_binfeat' if pipeline_args.binary_feat else ''
     vae_tag = f'_vae{pipeline_args.vae_dim}_kl{pipeline_args.kl_weight}' if pipeline_args.vae_feat else ''
     cat_tag = f'_cat{pipeline_args.n_bins}_smed{pipeline_args.bin_sigma.median().item():.2f}' if pipeline_args.cat_feat else ''
-    mdn_tag = f'_mdn{pipeline_args.mdn_components}' if pipeline_args.mdn_feat else ''
+    mdn_tag = f'_mdn{pipeline_args.mdn_components}_lsf{pipeline_args.mdn_logsigma_floor}' if pipeline_args.mdn_feat else ''
     sub_tag = f'_sub{len(subgraphs)}_size{pipeline_args.subsample_size}_p{pipeline_args.burn_prob}' if pipeline_args.subsample else ''
     save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{vae_tag}{cat_tag}{mdn_tag}{sub_tag}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
