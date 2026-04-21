@@ -277,6 +277,42 @@ def main():
 
     optimizer = optim.Adam(model.parameters(), lr=cmd_args.learning_rate, weight_decay=1e-4)
 
+    # Parameter count breakdown — total + top-level children.
+    def _count_params(m):
+        return sum(p.numel() for p in m.parameters() if p.requires_grad)
+    print(f'Model parameters — total: {_count_params(model):,}')
+    for _name, _mod in model.named_children():
+        _n = _count_params(_mod)
+        if _n > 0:
+            print(f'  {_name}: {_n:,}')
+
+    # Grouping for per-epoch gradient norm logging. "feat_head" covers the
+    # active feature decoder (MDN / AR-cat / Gaussian) so its signal is visible
+    # whichever path we chose.
+    feat_head_names = ['mdn_head', 'ar_head', 'nodefeat_pred', 'binfeat_pred',
+                       'feat_pos_embed', 'prev_bin_embed']
+    label_head_names = ['nodelabel_pred', 'nodelabel_encoding']
+    struct_skip = set(feat_head_names) | set(label_head_names) | {
+        'nodefeat_encoding', 'combiner', 'node_state_update', 'vae_encoder'}
+
+    def _group_grad_norms():
+        sums = {'feat': 0.0, 'label': 0.0, 'state': 0.0, 'struct': 0.0}
+        for name, mod in model.named_children():
+            g_sq = 0.0
+            for p in mod.parameters():
+                if p.grad is not None:
+                    g_sq += float((p.grad ** 2).sum().item())
+            if name in feat_head_names:
+                sums['feat'] += g_sq
+            elif name in label_head_names:
+                sums['label'] += g_sq
+            elif name in {'nodefeat_encoding', 'combiner', 'node_state_update', 'vae_encoder'}:
+                sums['state'] += g_sq
+            else:
+                sums['struct'] += g_sq
+        import math as _m
+        return {k: _m.sqrt(v) for k, v in sums.items()}
+
     model.train()
 
     ss_max_prob = pipeline_args.ss_max_prob
@@ -336,6 +372,11 @@ def main():
         epoch_ll_label = 0.0
         epoch_kl = 0.0
         epoch_nodes = 0
+        epoch_grad_total = 0.0
+        epoch_grad_feat = 0.0
+        epoch_grad_label = 0.0
+        epoch_grad_state = 0.0
+        epoch_grad_struct = 0.0
 
         for gid, sub_nd, sub_lm, sub_num_nodes in subgraphs:
             optimizer.zero_grad()
@@ -358,6 +399,16 @@ def main():
                                                node_feats=sub_nd,
                                                label_mask=sub_lm)
                 sg_loss_val = -ll / sub_num_nodes
+
+            # Gradient-norm bookkeeping (before clip so we see the true magnitude).
+            grad_groups = _group_grad_norms()
+            import math as _m
+            sg_total_grad = _m.sqrt(sum(v ** 2 for v in grad_groups.values()))
+            epoch_grad_total  += sg_total_grad
+            epoch_grad_feat   += grad_groups['feat']
+            epoch_grad_label  += grad_groups['label']
+            epoch_grad_state  += grad_groups['state']
+            epoch_grad_struct += grad_groups['struct']
 
             if cmd_args.grad_clip > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=cmd_args.grad_clip)
@@ -389,8 +440,14 @@ def main():
 
         bin_desc = f" | bin: {ll_bin_val:.4f}" if model.bin_feat_dim > 0 else ""
         kl_desc = f" | kl: {kl_val:.4f}" if pipeline_args.vae_feat else ""
+        n_sg = len(subgraphs)
+        grad_desc = (f" | ‖g‖: {epoch_grad_total / n_sg:.2e} "
+                     f"(feat {epoch_grad_feat / n_sg:.1e}, "
+                     f"label {epoch_grad_label / n_sg:.1e}, "
+                     f"state {epoch_grad_state / n_sg:.1e}, "
+                     f"struct {epoch_grad_struct / n_sg:.1e})")
         pbar.set_description(
-            f"Loss: {avg_loss:.4f} | struct: {ll_struct_val:.4f} | cont: {ll_cont_val:.4f}{bin_desc} | label: {ll_label_val:.4f}{kl_desc}"
+            f"Loss: {avg_loss:.4f} | struct: {ll_struct_val:.4f} | cont: {ll_cont_val:.4f}{bin_desc} | label: {ll_label_val:.4f}{kl_desc}{grad_desc}"
         )
 
     print(f'\n=== Memory usage (training) ===')
