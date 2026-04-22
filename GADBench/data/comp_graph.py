@@ -229,6 +229,139 @@ def extract_root_logits(batched_graph, all_logits):
     return all_logits[root_ids]
 
 
+def compute_merged_tree_adj(step_num, sample_num, self_connection=False):
+    """Paper-style merged computation graph for a pair of endpoint nodes.
+
+    Two disjoint trees share a root-root edge: root_u at index 0, root_v
+    at index T, bidirectional edge between them. Message passing can flow
+    from v's neighborhood into h_u (and vice versa) through that edge.
+    """
+    single = compute_tree_adj(step_num, sample_num, self_connection=False)
+    T = single.shape[0]
+    merged = torch.zeros(2 * T, 2 * T, dtype=single.dtype)
+    merged[:T, :T] = single
+    merged[T:, T:] = single
+    merged[0, T] = 1
+    merged[T, 0] = 1
+    if self_connection:
+        merged = merged + torch.eye(2 * T)
+    return merged
+
+
+class MergedOriginalCompGraphDataset(Dataset):
+    """Per-edge merged computation graphs built from an original graph.
+
+    For each edge (u, v): samples a depth-`step_num`, fanout-`sample_num`
+    tree rooted at u, a second tree rooted at v, and stacks their features
+    as `[2 * T, feat_dim]`. The merged-tree adjacency (from
+    `compute_merged_tree_adj`) wires the two root nodes together so the
+    GNN forward pass sees both neighborhoods in a single message-passing
+    graph.
+    """
+
+    def __init__(self, adj_list, features, edges, step_num, sample_num,
+                 noise_num=0, self_connection=False):
+        self.adj_list = adj_list
+        if torch.is_tensor(edges):
+            edges = edges.cpu().numpy()
+        self.edges = np.asarray(edges, dtype=np.int64)
+        self.step_num = step_num
+        self.sample_num = sample_num
+        self.noise_num = noise_num
+        self.total_sample = sample_num + noise_num
+        self.node_num = features.shape[0]
+        self.self_connection = self_connection
+
+        # Pad features with a zero row for empty/missing neighbors
+        self.features = np.concatenate(
+            [features, np.zeros((1, features.shape[1]), dtype=features.dtype)])
+        self.empty_id = features.shape[0]
+
+        merged = compute_merged_tree_adj(
+            step_num, self.total_sample, self_connection)
+        self.template_src, self.template_dst, self.num_merged_nodes = \
+            compute_template_edges(merged)
+        self.per_tree_num_nodes = self.num_merged_nodes // 2
+
+    def __len__(self):
+        return len(self.edges)
+
+    def _sample_tree(self, seed_id):
+        sampled = [seed_id]
+        curr_targets = [seed_id]
+        for _ in range(self.step_num):
+            new_targets = []
+            for tid in curr_targets:
+                if tid == self.empty_id:
+                    neighbors = []
+                else:
+                    neighbors = self.adj_list[tid]
+                if len(neighbors) == 0:
+                    picked = [self.empty_id] * self.sample_num
+                elif len(neighbors) < self.sample_num:
+                    picked = list(neighbors) + [self.empty_id] * (
+                        self.sample_num - len(neighbors))
+                else:
+                    picked = np.random.choice(
+                        neighbors, self.sample_num, replace=False).tolist()
+                if self.noise_num > 0:
+                    noise = np.random.permutation(
+                        self.node_num)[:self.noise_num].tolist()
+                    picked = picked + noise
+                sampled.extend(picked)
+                new_targets.extend(picked)
+            curr_targets = new_targets
+        return sampled
+
+    def __getitem__(self, index):
+        u = int(self.edges[index, 0])
+        v = int(self.edges[index, 1])
+        sampled_u = self._sample_tree(u)
+        sampled_v = self._sample_tree(v)
+        feat = np.concatenate(
+            [self.features[sampled_u], self.features[sampled_v]], axis=0)
+        return {"feat": torch.FloatTensor(feat)}
+
+
+def make_merged_comp_graph_collate(template_src, template_dst, num_merged_nodes):
+    """Collate per-edge merged CGs into one DGL batch graph.
+
+    Mirrors `make_comp_graph_collate`; the only difference is that each
+    sample contributes `num_merged_nodes = 2 * T` nodes and the template
+    edge set already includes the root-root edge.
+    """
+    num_edges = len(template_src)
+
+    def collate(items):
+        B = len(items)
+        all_feats = torch.cat([item['feat'] for item in items], dim=0)
+
+        offsets = torch.arange(B, dtype=torch.long) * num_merged_nodes
+        src = (template_src.unsqueeze(0) + offsets.unsqueeze(1)).reshape(-1)
+        dst = (template_dst.unsqueeze(0) + offsets.unsqueeze(1)).reshape(-1)
+
+        g = dgl.graph((src, dst), num_nodes=B * num_merged_nodes)
+        g.ndata['feature'] = all_feats
+        g.set_batch_num_nodes(
+            torch.full((B,), num_merged_nodes, dtype=torch.long))
+        g.set_batch_num_edges(
+            torch.full((B,), num_edges, dtype=torch.long))
+        return g
+
+    return collate
+
+
+def extract_edge_root_embeddings(batched_graph, all_logits, per_tree_num_nodes):
+    """Return (h_u, h_v) at positions 0 and T of each merged sub-graph."""
+    num_nodes = batched_graph.batch_num_nodes()
+    starts = torch.zeros(
+        len(num_nodes), dtype=torch.long, device=all_logits.device)
+    starts[1:] = torch.cumsum(num_nodes[:-1], dim=0)
+    h_u = all_logits[starts]
+    h_v = all_logits[starts + per_tree_num_nodes]
+    return h_u, h_v
+
+
 def dgl_to_adj_list(graph):
     """Convert a DGL graph to an adjacency list (list of neighbor lists).
 

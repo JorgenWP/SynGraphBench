@@ -50,3 +50,8 @@ Concretely, CGT uses **DP-k-means** to cluster the real node features into `k` c
   * `CGT/test.py`: Generation and evaluation script.
   * `CGT/args.py`: Hyperparameter configurations.
 * **Environment:** `CGT` Conda environment (Python 3.11). Setup via `scripts/env_setups/cgt_setup.sh`.
+
+### Tasks
+
+* **`hidden_labels` (anomaly detection)**: uses GADBench mask columns for the train/val/test node split (via `split_ids_from_dgl`). CGT sees all edges; only labels for test nodes are withheld downstream. `ids['train']`/`ids['val']`/`ids['test']` match GADBench split columns.
+* **`hidden_links` (link prediction)**: `CGT/train.py` dispatches to `load_dgl_graph_with_hidden_links(args, trial_id, val_ratio, test_ratio)` in `CGT/task/utils/utils.py`, which mirrors `GADBench/link_utils.py:LinkDataset.split(trial_id)` byte-for-byte (seed `3407 + trial_id*10`, MST-protected split). Test edges are stripped from the adjacency before training; val edges remain. There is no node-level train/test concept for link prediction, so `split_node_ids_for_hidden_links(num_nodes, trial_id)` produces an 80/20 node split just to give CGT two non-empty target_id buckets (`gen_train_ids` + `gen_val_ids` together cover every node). The `.pt` records `hidden_test_edges`, `task`, `trial_id`, `val_ratio`, `test_ratio`; `scripts/benchmark/bench_utils.py:_assert_link_pt_alignment` verifies these downstream. Added CLI args: `--val_ratio` (default 0.05), `--test_ratio` (default 0.10) — must match `LinkDataset` defaults.

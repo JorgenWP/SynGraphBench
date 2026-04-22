@@ -40,10 +40,12 @@ bash scripts/benchmark/run_anomaly_benchmark.sh tolokers GCN,GIN 1 bigg blksize_
 ```
 
 **`bash scripts/benchmark/run_link_benchmark.sh [datasets] [models] [trials] [generator] [neg_sampling] [decoder] [synthetic_name]`**
-Link prediction benchmark. Defaults: `reddit`, `GCN,GIN,GraphSAGE`, `1`, `cgt`, `random`, `dot`, `""`. Calls `scripts/benchmark/link_benchmark.py`.
+Link prediction benchmark. Defaults: `reddit`, `GCN,GIN,GraphSAGE`, `1`, `cgt`, `random`, `dot`, `""`. Calls `scripts/benchmark/link_benchmark.py`. Task defaults to `hidden_links`.
 
 * `neg_sampling`: `random` (uniform) or `hard` (2-hop random walks).
 * `decoder`: `dot` (dot product, no params) or `mlp` (learnable Hadamard-product scorer).
+
+For `generator=cgt`: the benchmark resolves per-trial `.pt` files `{stem}/{stem}_t{t}.pt` for `t in 0..trials-1` (via `resolve_cgt_trial_paths`). If all files exist, each trial loads its own synthetic data; otherwise it falls back to a single `{stem}/{stem}.pt` with a warning. Three comparison rows are emitted per model: `original` (full-graph LP), `original-cg` (merged-CG LP on original graph), `synthetic-cgt` (merged-CG LP on per-trial CGT-generated hybrid graph). Alignment between the .pt's `hidden_test_edges` and the trial's `LinkDataset.split(trial_id)` is asserted before each synthetic-cgt trial.
 
 Examples:
 ```bash
@@ -81,9 +83,9 @@ Checkpoints saved with `structure_` prefix.
 
 **`bash scripts/train/train_cgt.sh [dataset] [gpt_epochs] [cluster_num] [cluster_size] [gpt_batch_size] [cg_depth] [cg_fanout] [trial_id] [task] [cluster_sample_num]`**
 Train CGT on a dataset. Defaults: `reddit 50 512 1 128 2 5 0 hidden_labels 5000`. Calls `CGT/train.py`.
-`trial_id` selects which GADBench mask column (0-9) to use for the train/val/test split.
+`trial_id` selects the mask column (for `hidden_labels`) or seeds the edge split (for `hidden_links`). `task=hidden_links` additionally reads `--val_ratio` (default 0.05) and `--test_ratio` (default 0.10) from `CGT/args.py`; these must match the downstream `LinkDataset.split` ratios or alignment assertions fail.
 `cluster_sample_num` caps how many nodes are subsampled to fit `KMeansConstrained`; the library requires `cluster_num × cluster_size ≤ cluster_sample_num`, so raise this to use a higher `cluster_size` (k-anonymity) without giving up cluster resolution. Set ≥ graph size to fit on all nodes.
-Output saved to `datasets/synthetic/cgt/<dataset>/<task>/<variant>/<variant>_t{trial_id}.pt` where variant = `{dataset}_e{epochs}_k{clusters}_c{cluster_size}_d{depth}_f{fanout}_s{cluster_sample_num}`.
+Output saved to `datasets/synthetic/cgt/<dataset>/<task>/<variant>/<variant>_t{trial_id}.pt` where variant = `{dataset}_e{epochs}_k{clusters}_c{cluster_size}_d{depth}_f{fanout}_s{cluster_sample_num}`. `.pt` contains: generated sequences, cluster centers, `ids`, `task`, `trial_id`, and (for `hidden_links`) `hidden_test_edges` + `val_ratio` + `test_ratio` for provenance-checking.
 
 **`bash scripts/train/train_cgt_all_trials.sh [dataset] [gpt_epochs] [cluster_num] [cluster_size] [gpt_batch_size] [cg_depth] [cg_fanout] [num_trials] [task] [cluster_sample_num]`**
 Train CGT on all GADBench splits (trials 0 to num_trials-1). Defaults: same as `train_cgt.sh`, `num_trials=10`. Loops over `train_cgt.sh` with each trial_id.

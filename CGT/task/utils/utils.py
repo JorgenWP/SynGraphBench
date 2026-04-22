@@ -120,6 +120,104 @@ def load_dgl_graph(args):
     return adj_list, features, labels, feat_size, label_size
 
 
+def load_dgl_graph_with_hidden_links(args, trial_id,
+                                     val_ratio=0.05, test_ratio=0.10):
+    """Load a DGL graph with the trial's test edges stripped from adjacency.
+
+    The edge split mirrors GADBench/link_utils.py:LinkDataset.split(trial_id)
+    byte-for-byte so the same edges end up withheld on both sides:
+      seed = 3407 + trial_id * 10
+      MST edges protected, non-tree candidates shuffled via torch.randperm,
+      first int(E * test_ratio) candidates become the test split.
+
+    Val edges are NOT stripped (matches the mask-test-only decision,
+    analogous to BiGG's --mask_test_labels).
+
+    Returns:
+        adj_list, features, labels, feat_size, label_size, test_edges
+        where test_edges is a [n_test, 2] LongTensor of (src, dst) pairs.
+    """
+    import dgl
+    from dgl.data.utils import load_graphs
+
+    graph_path = osp.join(args.data_dir, args.dataset)
+    graph = load_graphs(graph_path)[0][0]
+
+    features = graph.ndata['feature'].numpy().astype(np.float32)
+    labels = graph.ndata['label'].numpy().astype(np.int64)
+    features = normalize(features, axis=1, norm='l2')
+
+    # === Mirror of LinkDataset.split(trial_id). Keep in sync with
+    #     GADBench/link_utils.py:LinkDataset.split. ===
+    torch.manual_seed(3407 + trial_id * 10)
+    src, dst = graph.edges()
+    E = src.shape[0]
+
+    nx_graph = dgl.to_networkx(graph).to_undirected()
+    tree_edges_nx = set(nx.minimum_spanning_tree(nx_graph).edges())
+
+    tree_mask = torch.zeros(E, dtype=torch.bool)
+    for i in range(E):
+        u, v = src[i].item(), dst[i].item()
+        if (u, v) in tree_edges_nx or (v, u) in tree_edges_nx:
+            tree_mask[i] = True
+
+    candidate_idx = torch.where(~tree_mask)[0]
+    n_candidates = candidate_idx.shape[0]
+    perm = torch.randperm(n_candidates)
+    candidate_idx = candidate_idx[perm]
+
+    n_test_target = int(E * test_ratio)
+    n_test = min(n_test_target, n_candidates)
+    test_idx = candidate_idx[:n_test]
+
+    test_edges = torch.stack([src[test_idx], dst[test_idx]], dim=1)
+    # === end mirror ===
+
+    # Strip test edges from adjacency (undirected: both directions)
+    keep = torch.ones(E, dtype=torch.bool)
+    keep[test_idx] = False
+    src_keep = src[keep].numpy()
+    dst_keep = dst[keep].numpy()
+
+    num_nodes = graph.num_nodes()
+    adj_list = [[] for _ in range(num_nodes)]
+    for s, d in zip(src_keep, dst_keep):
+        adj_list[int(s)].append(int(d))
+    for s, d in zip(dst_keep, src_keep):
+        if int(d) not in adj_list[int(s)]:
+            adj_list[int(s)].append(int(d))
+
+    feat_size = features.shape[1]
+    labels = labels - labels.min()
+    label_size = int(labels.max() - labels.min() + 1)
+
+    print(f"hidden_links split trial={trial_id}: "
+          f"{E} edges, stripped {n_test} test edges "
+          f"(target {n_test_target}), kept {int(keep.sum())}")
+
+    return adj_list, features, labels, feat_size, label_size, test_edges
+
+
+def split_node_ids_for_hidden_links(num_nodes, trial_id, val_fraction=0.2):
+    """Deterministic 80/20 node split for CGT GPT training under hidden_links.
+
+    Link prediction has no inherent node-level split (all nodes are
+    observed), but CGT's generator needs two disjoint target_ids buckets
+    so both gen_train_ids and gen_val_ids are non-empty and together
+    cover every node. Offset the seed from the edge-split seed so the
+    two splits are uncorrelated.
+    """
+    rng = np.random.RandomState(3407 + trial_id * 10 + 1)
+    perm = rng.permutation(num_nodes)
+    n_val = max(1, int(num_nodes * val_fraction))
+    return {
+        'train': perm[n_val:].tolist(),
+        'val': perm[:n_val].tolist(),
+        'test': [],
+    }
+
+
 def split_ids_from_dgl(args, semi_supervised=False, trial_id=0):
     """Extract pre-defined train/val/test splits from a DGL graph (GADBench format)."""
     from dgl.data.utils import load_graphs

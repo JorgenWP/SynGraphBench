@@ -447,6 +447,53 @@ def _assert_pt_alignment(syn_data, expected_trial_id, expected_semi_supervised,
         f"or a renamed/moved .pt.")
 
 
+def _assert_link_pt_alignment(syn_data, expected_trial_id, expected_test_edges,
+                              source_label):
+    """Verify a CGT .pt file was trained under the same hidden_links split.
+
+    Link-prediction provenance: the .pt must carry `hidden_test_edges`
+    equal to the downstream `LinkDataset.split(trial_id).test_pos_edges`.
+    Any mismatch means CGT saw edges that the GNN is about to test on
+    (or vice versa), which breaks the fairness invariant.
+    """
+    saved_trial = syn_data.get('trial_id')
+    saved_task = syn_data.get('task')
+
+    if saved_task != 'hidden_links':
+        print(f"  WARNING [{source_label}]: .pt task={saved_task!r} != "
+              f"'hidden_links'. CGT may not have withheld test edges.")
+
+    if saved_trial is None:
+        print(f"  WARNING [{source_label}]: .pt lacks trial_id metadata. "
+              f"Re-train CGT to embed it.")
+    elif saved_trial != expected_trial_id:
+        raise AssertionError(
+            f"[{source_label}] trial_id mismatch: .pt was trained with "
+            f"trial_id={saved_trial}, benchmark expects {expected_trial_id}.")
+
+    saved_edges = syn_data.get('hidden_test_edges')
+    if saved_edges is None:
+        print(f"  WARNING [{source_label}]: .pt lacks hidden_test_edges; "
+              f"cannot verify test-edge alignment.")
+        return
+
+    if torch.is_tensor(saved_edges):
+        saved_set = {(int(r[0]), int(r[1])) for r in saved_edges.cpu()}
+    else:
+        saved_set = {(int(s), int(d)) for s, d in saved_edges}
+    exp = expected_test_edges.cpu() if torch.is_tensor(expected_test_edges) \
+        else expected_test_edges
+    expected_set = {(int(r[0]), int(r[1])) for r in exp}
+
+    if saved_set != expected_set:
+        raise AssertionError(
+            f"[{source_label}] hidden_test_edges mismatch: "
+            f"saved |S|={len(saved_set)}, expected |S|={len(expected_set)}. "
+            f"CGT's trial-{expected_trial_id} edge split differs from the "
+            f"downstream split. Check val_ratio/test_ratio and that both "
+            f"sides derive seed as 3407 + trial_id*10.")
+
+
 def resolve_cgt_trial_paths(syn_path, num_trials):
     """Check for per-trial .pt files: {stem}_t{t}.pt for t in 0..num_trials-1.
 

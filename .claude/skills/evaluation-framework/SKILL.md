@@ -32,8 +32,8 @@ An extension added to this project that reuses existing GNN architectures for ed
 
 * `GADBench/link_benchmark.py`: Link prediction benchmark (epochs, patience hyperparameters here).
 * `GADBench/link_utils.py`: `LinkDataset` — edge splitting, negative sampling, model registry.
-* `GADBench/models/link_prediction/link_predictor.py`: `BaseGNNLinkPredictor` and `XGBGraphLinkPredictor` — edge decoder and training loop (decoder architecture hyperparameters here).
-* `GADBench/models/link_prediction/cgt_link_predictor.py`: CGT computation-graph link prediction.
+* `GADBench/models/link_prediction/link_predictor.py`: `BaseGNNLinkPredictor` and `XGBGraphLinkPredictor` — edge decoder and training loop. `MLPDecoder` exposes `forward(h, edges)` for full-graph LP and `score_from_pair(h_u, h_v)` for merged-CG LP.
+* `GADBench/models/link_prediction/cgt_link_predictor.py`: `MergedCompGraphLinkPredictor` — paper-style merged-endpoints link prediction. For each edge (u,v), trees rooted at u and v are merged via a root-root edge into a single graph, a GNN forward pass produces h_u and h_v from the two root positions, and the decoder scores the pair. Preserves the joint-computation property of full-graph LP within a small merged subgraph. Exported as `CompGraphLinkPredictor` for back-compat; supports GCN/GIN/GraphSAGE and warns when `num_layers != step_num` (receptive field should match merged-tree depth).
 * `scripts/benchmark/models/cross_graph_link_predictor.py`: Cross-graph link predictors (GNN + XGBGraph) — train on synthetic edges, test on original edges.
 
 ### Key Design Details
@@ -50,6 +50,15 @@ An extension added to this project that reuses existing GNN architectures for ed
 * `mlp` — learnable scoring on Hadamard product: `Linear(h) → ReLU → Dropout → Linear(1)`. Adds capacity at the cost of extra parameters.
 
 **Metrics:** AUROC, AUPRC, and Recall@K (where K = number of positive test edges).
+
+**Merged computation-graph data utilities** (`GADBench/data/comp_graph.py`):
+* `compute_merged_tree_adj(step_num, sample_num)`: two disjoint trees of size T joined by a bidirectional root-root edge → `[2T, 2T]` adjacency. Root_u at index 0, root_v at index T.
+* `MergedOriginalCompGraphDataset(adj_list, features, edges, ...)`: lazily samples a tree for each endpoint of every edge and concatenates their features `[2T, D]`. Tree sampling uses `adj_list`, which the predictor builds from `data.train_graph` (no test/val edge leakage).
+* `make_merged_comp_graph_collate`, `extract_edge_root_embeddings`: batch offsets + (h_u, h_v) extraction from the two root positions.
+
+**CGT edge masking (`hidden_links`)**: for `task=hidden_links`, `CGT/train.py` calls `load_dgl_graph_with_hidden_links(trial_id, val_ratio, test_ratio)` in `CGT/task/utils/utils.py`, which mirrors `LinkDataset.split(trial_id)` byte-for-byte (seed `3407 + trial_id*10`, MST-protected split, first `int(E*test_ratio)` candidates → test). Test edges are stripped from adjacency; val edges remain (analogous to `mask_test_labels`). The withheld `hidden_test_edges` plus `trial_id` and `task` are saved in the `.pt` and asserted downstream via `_assert_link_pt_alignment` in `scripts/benchmark/bench_utils.py`.
+
+**Per-trial CGT .pt resolution**: `scripts/benchmark/link_benchmark.py` now resolves `{stem}/{stem}_t{t}.pt` for `t in 0..trials-1` (via `resolve_cgt_trial_paths`). If all files exist, each trial loads its own .pt and builds its own synthetic graph. Missing files trigger single-file fallback with a warning. The original-cg baseline does not depend on .pt contents and reuses the same graph across trials.
 
 ---
 

@@ -39,7 +39,8 @@ from models.link_prediction.link_predictor import BaseGNNLinkPredictor, XGBGraph
 from models.link_prediction.cgt_link_predictor import CompGraphLinkPredictor
 from bench_utils import (
     parse_link_args, load_cgt_synthetic_data,
-    print_comparison,
+    print_comparison, resolve_cgt_trial_paths,
+    _assert_link_pt_alignment, build_synthetic_dgl_graph,
 )
 from models.cross_graph_link_predictor import (
     CrossGraphLinkPredictor, CrossGraphXGBGraphLinkPredictor,
@@ -147,15 +148,19 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
     return results
 
 
-def _run_cg_link_trials(dataset_name, cg_models, data, source_label,
+def _run_cg_link_trials(dataset_name, cg_models, base_data, source_label,
                         trials, val_ratio, test_ratio, neg_sampling, decoder,
                         epochs, patience, batch_size, lr, drop_rate,
-                        h_feats, num_layers, step_num, sample_num):
-    """Run CompGraphLinkPredictor trials for a set of models.
+                        h_feats, num_layers, step_num, sample_num,
+                        syn_graph_factory=None):
+    """Run MergedCompGraphLinkPredictor trials across models and trials.
 
-    Each trial re-splits the edges (via data.split) so that different
-    train/val/test edge sets are used, then builds computation graph
-    trees and trains the link predictor.
+    For each trial:
+      - Split base_data's edges (same split logic as full-graph LP).
+      - If syn_graph_factory is provided (synthetic-cgt mode), build a
+        per-trial synthetic graph from that trial's CGT .pt file and wrap
+        it in a LinkDataset. The factory also runs alignment checks.
+      - Train and evaluate the merged-CG link predictor.
     """
     results = []
 
@@ -173,7 +178,16 @@ def _run_cg_link_trials(dataset_name, cg_models, data, source_label,
             set_seed(seed)
 
             print(f"  Trial {t}, seed={seed}")
-            data.split(val_ratio, test_ratio, t, neg_sampling)
+            base_data.split(val_ratio, test_ratio, t, neg_sampling)
+
+            if syn_graph_factory is not None:
+                syn_graph = syn_graph_factory(t, base_data.test_pos_edges)
+                trial_data = LinkDataset.__new__(LinkDataset)
+                trial_data.name = dataset_name + f'_synthetic_cgt_t{t}'
+                trial_data.graph = syn_graph.long()
+                trial_data.split(val_ratio, test_ratio, t, neg_sampling)
+            else:
+                trial_data = base_data
 
             train_config = {
                 'device': 'cuda' if torch.cuda.is_available() else 'cpu',
@@ -195,7 +209,8 @@ def _run_cg_link_trials(dataset_name, cg_models, data, source_label,
                 'num_layers': num_layers,
             }
 
-            detector = CompGraphLinkPredictor(train_config, model_config, data)
+            detector = CompGraphLinkPredictor(
+                train_config, model_config, trial_data)
             st = time.time()
             test_score = detector.train()
             ed = time.time()
@@ -210,6 +225,8 @@ def _run_cg_link_trials(dataset_name, cg_models, data, source_label,
                   f"RecK={test_score['RecK']:.4f}")
 
             del detector
+            if syn_graph_factory is not None:
+                del trial_data
 
         if auc_list:
             results.append({
@@ -231,56 +248,58 @@ def _run_cg_link_trials(dataset_name, cg_models, data, source_label,
 def evaluate_link_models_cgt(dataset_name, models, data_dir,
                              trials, val_ratio, test_ratio,
                              neg_sampling, decoder, epochs, patience,
-                             syn_path, batch_size, lr, drop_rate,
+                             trial_paths, batch_size, lr, drop_rate,
                              h_feats, num_layers):
-    """Evaluate link prediction using CGT computation graph trees.
+    """Evaluate link prediction on CGT merged computation graphs.
 
     Runs two comparisons:
-      1. Original-CG: node embeddings via computation graph trees built
-         from the original graph's train edges (baseline for CG format).
-      2. Synthetic-CGT: node embeddings via computation graph trees built
-         from a synthetic graph's train edges, tested on original graph's
-         test edges. The synthetic graph is reconstructed from CGT cluster
-         centers (root node features replaced with synthetic features).
+      1. Original-CG: merged endpoint trees built from the original graph
+         (with the trial's test edges withheld), baseline for the CG
+         format.
+      2. Synthetic-CGT: merged endpoint trees built from a hybrid graph
+         whose train/val root features are replaced by CGT cluster-center
+         features (via build_synthetic_dgl_graph). Each trial loads its
+         own .pt with alignment-checked test edges.
     """
     results = []
 
     data = LinkDataset(dataset_name, prefix=data_dir + '/original/')
-    syn_data = load_cgt_synthetic_data(syn_path)
+
+    # CG params come from the first trial's .pt (all trials share these)
+    first_syn = load_cgt_synthetic_data(trial_paths[0])
+    step_num = first_syn.get('cg_depth', first_syn.get('subgraph_step_num'))
+    sample_num = first_syn.get('cg_fanout', first_syn.get('subgraph_sample_num'))
 
     cg_models = [m for m in models if m in SUPPORTED_MODELS]
     skipped = [m for m in models if m not in SUPPORTED_MODELS]
     if skipped:
         print(f"  NOTE: {skipped} not supported for CG link prediction. Skipping.")
 
-    # Extract CGT computation graph parameters
-    step_num = syn_data.get('cg_depth', syn_data.get('subgraph_step_num'))
-    sample_num = syn_data.get('cg_fanout', syn_data.get('subgraph_sample_num'))
-
-    # --- Original data as computation graphs (CG baseline) ---
+    # --- Original-CG baseline: same graph for every trial ---
     results.extend(_run_cg_link_trials(
         dataset_name, cg_models, data, 'original-cg',
         trials, val_ratio, test_ratio, neg_sampling, decoder,
         epochs, patience, batch_size, lr, drop_rate,
         h_feats, num_layers, step_num, sample_num))
 
-    # --- CGT synthetic computation graphs ---
-    # Build a synthetic graph by replacing train/val node features with
-    # CGT-generated cluster center features, then run CG link prediction.
-    # Test edges still come from the original graph's edge split.
-    from bench_utils import build_synthetic_dgl_graph
-    syn_graph = build_synthetic_dgl_graph(data.graph, syn_data)
-    syn_link_data = LinkDataset.__new__(LinkDataset)
-    syn_link_data.name = dataset_name + '_synthetic_cgt'
-    syn_link_data.graph = syn_graph.long()
+    # --- Synthetic-CGT: per-trial hybrid graph built from per-trial .pt ---
+    def make_syn_graph(t, expected_test_edges):
+        syn_data = load_cgt_synthetic_data(trial_paths[t])
+        _assert_link_pt_alignment(
+            syn_data, expected_trial_id=t,
+            expected_test_edges=expected_test_edges,
+            source_label=f'synthetic-cgt[t={t}]')
+        return build_synthetic_dgl_graph(
+            data.graph, syn_data, trial_id=t)
 
     results.extend(_run_cg_link_trials(
-        dataset_name, cg_models, syn_link_data, 'synthetic-cgt',
+        dataset_name, cg_models, data, 'synthetic-cgt',
         trials, val_ratio, test_ratio, neg_sampling, decoder,
         epochs, patience, batch_size, lr, drop_rate,
-        h_feats, num_layers, step_num, sample_num))
+        h_feats, num_layers, step_num, sample_num,
+        syn_graph_factory=make_syn_graph))
 
-    del data, syn_link_data
+    del data
     return results
 
 
@@ -468,13 +487,25 @@ def main():
         stem = args.synthetic_name
         if args.synthetic_type == 'comp-graph':
             variant_dir = os.path.join(task_dir, stem)
-            syn_path = os.path.join(variant_dir, f'{stem}.pt')
+            canonical_path = os.path.join(variant_dir, f'{stem}.pt')
+            trial_paths = resolve_cgt_trial_paths(canonical_path, args.trials)
+            if trial_paths is None:
+                if os.path.exists(canonical_path):
+                    print(f"  Falling back to single-file CGT .pt for all "
+                          f"{args.trials} trials: {canonical_path}")
+                    trial_paths = [canonical_path] * args.trials
+                else:
+                    print(f"\n  Skipping {dataset_name}: no per-trial .pt at "
+                          f"{variant_dir}/{stem}_t*.pt and no canonical "
+                          f"{canonical_path}")
+                    continue
+            syn_path = trial_paths[0]
         else:
             syn_path = os.path.join(task_dir, stem)
 
-        if not os.path.exists(syn_path):
-            print(f"\n  Skipping {dataset_name}: {syn_path} not found")
-            continue
+            if not os.path.exists(syn_path):
+                print(f"\n  Skipping {dataset_name}: {syn_path} not found")
+                continue
 
         print(f"\n  Found {args.synthetic_type} synthetic data: {syn_path}")
 
@@ -483,7 +514,7 @@ def main():
                 dataset_name, models, args.data_dir,
                 args.trials, args.val_ratio, args.test_ratio,
                 args.neg_sampling, args.decoder,
-                args.epochs, args.patience, syn_path,
+                args.epochs, args.patience, trial_paths,
                 args.batch_size, args.lr, args.drop_rate,
                 args.h_feats, args.num_layers)
         else:

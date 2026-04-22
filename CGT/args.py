@@ -36,6 +36,12 @@ def get_parser():
     parser.add_argument('--task', type=str, default="hidden_labels",
                         choices=['hidden_labels', 'hidden_links'],
                         help='Pipeline task (determines output subdirectory).')
+    parser.add_argument('--val_ratio', type=float, default=0.05,
+                        help='Edge val fraction for hidden_links (must match '
+                             'the downstream LinkDataset.split ratio).')
+    parser.add_argument('--test_ratio', type=float, default=0.10,
+                        help='Edge test fraction for hidden_links (must match '
+                             'the downstream LinkDataset.split ratio).')
 
     # GNN structure-related hyperparameters
     parser.add_argument('--hidden_dim', type=int, default=64,

@@ -11,7 +11,10 @@ from datetime import datetime
 from time import perf_counter
 
 from args import get_args, get_parser, print_args, print_non_default_args
-from task.utils.utils import load_graph, split_ids, split_ids_from_dgl
+from task.utils.utils import (
+    load_graph, split_ids, split_ids_from_dgl,
+    load_dgl_graph_with_hidden_links, split_node_ids_for_hidden_links,
+)
 
 import generator.gpt.gpt as gpt
 
@@ -38,21 +41,35 @@ def main():
     print_non_default_args(args)
 
     # Load graph dataset
-    adj, feat, label, feat_size, label_size = load_graph(args)
+    if args.task == 'hidden_links':
+        if not is_dgl_dataset(args):
+            raise ValueError(
+                f"task=hidden_links requires a DGL graph (GADBench format); "
+                f"got non-DGL dataset: {args.dataset}")
+        adj, feat, label, feat_size, label_size, hidden_test_edges = \
+            load_dgl_graph_with_hidden_links(
+                args, args.trial_id, args.val_ratio, args.test_ratio)
+        ids = split_node_ids_for_hidden_links(feat.shape[0], args.trial_id)
+        print(f"hidden_links node split (for GPT training): "
+              f"train={len(ids['train'])}, val={len(ids['val'])}, test=0")
+    else:
+        adj, feat, label, feat_size, label_size = load_graph(args)
+        hidden_test_edges = None
+
+        # Use pre-defined splits for DGL/GADBench datasets, random splits otherwise
+        if is_dgl_dataset(args):
+            ids = split_ids_from_dgl(
+                args,
+                semi_supervised=bool(args.semi_supervised),
+                trial_id=args.trial_id,
+            )
+            print(f"Using GADBench splits: train={len(ids['train'])}, val={len(ids['val'])}, test={len(ids['test'])}")
+        else:
+            ids = split_ids(args, feat.shape[0])
+
     args.feat_size = feat_size
     args.label_size = label_size
     args.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-    # Use pre-defined splits for DGL/GADBench datasets, random splits otherwise
-    if is_dgl_dataset(args):
-        ids = split_ids_from_dgl(
-            args,
-            semi_supervised=bool(args.semi_supervised),
-            trial_id=args.trial_id,
-        )
-        print(f"Using GADBench splits: train={len(ids['train'])}, val={len(ids['val'])}, test={len(ids['test'])}")
-    else:
-        ids = split_ids(args, feat.shape[0])
 
     # Train CGT and generate synthetic train/val data
     print("\nTraining CGT and generating synthetic data...")
@@ -87,6 +104,10 @@ def main():
         'self_connection': args.self_connection,
         'trial_id': args.trial_id,
         'semi_supervised': bool(args.semi_supervised),
+        'task': args.task,
+        'hidden_test_edges': hidden_test_edges,
+        'val_ratio': args.val_ratio if args.task == 'hidden_links' else None,
+        'test_ratio': args.test_ratio if args.task == 'hidden_links' else None,
     }, save_path)
 
     print(f"\nSynthetic dataset saved to {save_path}")
