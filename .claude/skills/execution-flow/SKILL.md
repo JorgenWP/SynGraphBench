@@ -39,8 +39,8 @@ bash scripts/benchmark/run_anomaly_benchmark.sh tolokers GCN,GIN 1 bigg blksize_
 bash scripts/benchmark/run_anomaly_benchmark.sh tolokers GCN,GIN 1 bigg blksize_-1_b_1_lr_0.001_epochs_50_..._sub6_size2000_p0.3 hidden_labels
 ```
 
-**`bash scripts/benchmark/run_link_benchmark.sh [datasets] [models] [trials] [generator] [neg_sampling] [decoder] [synthetic_name]`**
-Link prediction benchmark. Defaults: `reddit`, `GCN,GIN,GraphSAGE`, `1`, `cgt`, `random`, `dot`, `""`. Calls `scripts/benchmark/link_benchmark.py`. Task defaults to `hidden_links`.
+**`bash scripts/benchmark/run_link_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [neg_sampling] [decoder] [task]`**
+Link prediction benchmark. Defaults: `reddit`, `GCN,GIN,GraphSAGE`, `1`, `cgt`, `""`, `random`, `dot`, `hidden_links`. Calls `scripts/benchmark/link_benchmark.py`.
 
 * `neg_sampling`: `random` (uniform) or `hard` (2-hop random walks).
 * `decoder`: `dot` (dot product, no params) or `mlp` (learnable Hadamard-product scorer).

@@ -1,6 +1,6 @@
 #!/bin/sh
-#SBATCH --account=share-ie-idi      # "share-ie-idi" "ie-idi" 
-#SBATCH --job-name="CGT_ANOMALY_BENCHMARK_<dataset>_k<k-anonymity>"
+#SBATCH --account=share-ie-idi      # "share-ie-idi" "ie-idi"
+#SBATCH --job-name="CGT_LINK_BENCHMARK_<dataset>_k<k-anonymity>_<decoder>_<neg-sampling>"
 #SBATCH --time=04:30:00             # Time limit (hh:mm:ss)
 
 #SBATCH --partition=GPUQ            # Asking for GPU
@@ -10,8 +10,8 @@
 #SBATCH --nodes=1                   # Number of compute nodes
 #SBATCH --ntasks-per-node=1         # Number of tasks per node
 
-#SBATCH --output=output/cgt/benchmark/<dataset>/anomaly/anomaly_k<k-anonymity>_output.txt     # Specifying 'stdout'
-#SBATCH --error=output/cgt/benchmark/<dataset>/anomaly/anomaly_k<k-anonymity>_error.txt       # Specifying 'stderr'
+#SBATCH --output=output/cgt/benchmark/<dataset>/link/link_k<k-anonymity>_<decoder>_<neg-sampling>_output.txt    # Specifying 'stdout'
+#SBATCH --error=output/cgt/benchmark/<dataset>/link/link_k<k-anonymity>_<decoder>_<neg-sampling>_error.txt      # Specifying 'stderr'
 
 #SBATCH --mail-user=<email>@stud.ntnu.no         # The email to send notifications to
 #SBATCH --mail-type=ALL
@@ -32,10 +32,12 @@ conda activate GADBench
 
 # Config
 GENERATOR="cgt"
-DATASETS="tolokers"
+DATASETS="reddit"
 MODELS="GCN,GIN,GraphSAGE"
 TRIALS="10"
-SYNTHETIC_NAME=""   # Optional: set to a specific variant, e.g. "reddit_eps0.1"
+SYNTHETIC_NAME=""       # Optional: variant stem, e.g. "reddit_e50_k512_c1_d2_f5_s5000"
+NEG_SAMPLING="random"   # random | hard
+DECODER="dot"           # dot | mlp
 
-# Run the benchmark script with CGT synthetic data
-bash scripts/benchmark/run_anomaly_benchmark.sh "$DATASETS" "$MODELS" "$TRIALS" "$GENERATOR" "$SYNTHETIC_NAME"
+# Run the link prediction benchmark with CGT synthetic data
+bash scripts/benchmark/run_link_benchmark.sh "$DATASETS" "$MODELS" "$TRIALS" "$GENERATOR" "$SYNTHETIC_NAME" "$NEG_SAMPLING" "$DECODER"

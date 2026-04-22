@@ -2,7 +2,7 @@
 # Evaluate GNN models on link prediction: original vs synthetic graph data.
 #
 # Usage:
-#   bash scripts/benchmark/run_link_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [task] [neg_sampling] [decoder]
+#   bash scripts/benchmark/run_link_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [neg_sampling] [decoder] [task]
 #
 # Arguments:
 #   datasets        Comma-separated dataset names (default: reddit)
@@ -11,16 +11,16 @@
 #   generator       Generative model folder under datasets/synthetic/ (default: cgt)
 #                   Supported: cgt, bigg
 #   synthetic_name  Exact filename stem for a specific variant (default: uses dataset name)
-#   task            Task subfolder under <dataset>/ (default: hidden_links)
-#                   Supported: hidden_labels, hidden_links, structure
 #   neg_sampling    Negative sampling strategy: random or hard (default: random)
 #   decoder         Edge decoder: dot or mlp (default: dot)
+#   task            Task subfolder under <dataset>/ (default: hidden_links)
+#                   Supported: hidden_labels, hidden_links, structure
 #
 # Examples:
 #   bash scripts/benchmark/run_link_benchmark.sh reddit GCN,GIN 3 cgt
-#   bash scripts/benchmark/run_link_benchmark.sh reddit GCN,GIN 3 cgt "" hidden_links random dot
+#   bash scripts/benchmark/run_link_benchmark.sh reddit GCN,GIN 3 cgt "" random dot hidden_links
 #   bash scripts/benchmark/run_link_benchmark.sh tolokers GCN,GIN 1 bigg blksize_1024_b_1_lr_0.001_epochs_50
-#   bash scripts/benchmark/run_link_benchmark.sh tolokers GCN,GIN 1 bigg structure_blksize_128_lr_0.001_epochs_100 structure
+#   bash scripts/benchmark/run_link_benchmark.sh tolokers GCN,GIN 1 bigg structure_blksize_128_lr_0.001_epochs_100 random dot structure
 
 set -e
 
@@ -30,9 +30,9 @@ MODELS="${2:-GCN,GIN,GraphSAGE}"
 TRIALS="${3:-1}"
 GENERATOR="${4:-cgt}"
 SYNTHETIC_NAME="${5:-}"
-TASK="${6:-hidden_links}"
-NEG_SAMPLING="${7:-random}"
-DECODER="${8:-dot}"
+NEG_SAMPLING="${6:-random}"
+DECODER="${7:-dot}"
+TASK="${8:-hidden_links}"
 
 # Map generator to its synthetic type (evaluation mode)
 case "$GENERATOR" in

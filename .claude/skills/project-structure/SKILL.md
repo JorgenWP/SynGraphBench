@@ -24,8 +24,9 @@ SynGraphBench/
 │   │   ├── anomaly_benchmark.py    # Project-level anomaly detection benchmark (original vs. synthetic)
 │   │   ├── link_benchmark.py       # Link prediction benchmark
 │   │   ├── bench_utils.py          # Arg parsing, data loading, CGT helpers
-│   │   ├── bigg_benchmark.slurm    # SLURM template for BiGG evaluation
-│   │   ├── cgt_benchmark.slurm     # SLURM template for CGT evaluation
+│   │   ├── bigg_benchmark.slurm            # SLURM template for BiGG anomaly evaluation
+│   │   ├── cgt_anomaly_benchmark.slurm     # SLURM template for CGT anomaly evaluation
+│   │   ├── cgt_link_benchmark.slurm        # SLURM template for CGT link prediction evaluation
 │   │   └── models/
 │   │       ├── cross_graph_detector.py         # Cross-graph anomaly (GNN + XGBGraph)
 │   │       └── cross_graph_link_predictor.py   # Cross-graph link prediction (GNN + XGBGraph)
