@@ -866,6 +866,8 @@ class BiggWithMDNFeats(RecurTreeGen):
         self.w_bin = 1.0
         self.w_label = 1.0
 
+        self.ss_prob = 0.0  # scheduled sampling probability (set per-epoch by pipeline)
+
     def reset_loss_trackers(self):
         self._ll_cont = 0.0
         self._ll_bin = 0.0
@@ -883,6 +885,19 @@ class BiggWithMDNFeats(RecurTreeGen):
         if self.bin_feat_dim > 0:
             full[:, self.binary_idx] = bin_vals
         return full
+
+    def _sample_mdn(self, h_cond):
+        """Sample one continuous value per (node, feature) from the MDN."""
+        N = h_cond.shape[0]
+        log_pi, mu, log_sigma = self._mdn_params(h_cond)
+        pi = log_pi.exp()
+        flat_pi = pi.reshape(N * self.cont_feat_dim, self.n_components)
+        comp_idx = torch.multinomial(flat_pi, num_samples=1).squeeze(-1)
+        comp_idx = comp_idx.view(N, self.cont_feat_dim)
+        gather_idx = comp_idx.unsqueeze(-1)
+        chosen_mu = mu.gather(-1, gather_idx).squeeze(-1)
+        chosen_log_sigma = log_sigma.gather(-1, gather_idx).squeeze(-1)
+        return chosen_mu + chosen_log_sigma.exp() * torch.randn_like(chosen_mu)
 
     def _mdn_params(self, h_cond):
         """Split MDN head output into (log_pi, mu, log_sigma), each (N, F, K)."""
@@ -986,7 +1001,29 @@ class BiggWithMDNFeats(RecurTreeGen):
             self._ll_bin += ll_bin.item()
             self._ll_label += ll_label.item()
 
-            state_update = self.embed_node_feats(node_data)
+            # Scheduled sampling: feed the model's own predictions into the state
+            # update on a fraction of steps. Loss above stays teacher-forced; only
+            # the RNN state sees self-generated prefixes.
+            if self.ss_prob > 0 and torch.rand(1).item() < self.ss_prob:
+                with torch.no_grad():
+                    ss_labels = torch.multinomial(
+                        F.softmax(pred_logits, dim=-1), num_samples=1
+                    ).squeeze(-1)
+                    ss_label_embed = self.nodelabel_encoding(ss_labels)
+                    ss_h_cond = torch.cat([h, ss_label_embed], dim=-1)
+                    if self.cont_feat_dim > 0:
+                        ss_cont = self._sample_mdn(ss_h_cond)
+                    else:
+                        ss_cont = torch.empty(h.shape[0], 0, device=h.device)
+                    if self.bin_feat_dim > 0:
+                        ss_bin = torch.bernoulli(torch.sigmoid(self.binfeat_pred(ss_h_cond)))
+                    else:
+                        ss_bin = torch.empty(h.shape[0], 0, device=h.device)
+                ss_feats = self._assemble_features(ss_cont.detach(), ss_bin.detach())
+                pred_data = torch.cat([ss_feats, ss_labels.unsqueeze(-1).float()], dim=-1)
+                state_update = self.embed_node_feats(pred_data)
+            else:
+                state_update = self.embed_node_feats(node_data)
             return_data = node_data
 
         new_state = self.node_state_update(state_update, (h, c))
