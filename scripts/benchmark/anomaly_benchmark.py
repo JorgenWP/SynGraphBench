@@ -49,7 +49,14 @@ from bench_utils import (
     resolve_cgt_trial_paths, make_cgt_rebuild_fn,
     _assert_pt_alignment,
 )
-from models.anomaly_detection.cgt_detector import CompGraphDetector, CG_SUPPORTED_MODELS
+from models.anomaly_detection.cgt_detector import (
+    CompGraphDetector, CG_SUPPORTED_MODELS,
+    CGTXGBoostDetector, CGTXGBGraphDetector)
+
+CGT_TREE_MODELS = {
+    'XGBoost': CGTXGBoostDetector,
+    'XGBGraph': CGTXGBGraphDetector,
+}
 
 SEED_LIST = list(range(3407, 10000, 10))
 
@@ -223,7 +230,8 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
                 model_config['h_feats'] = 16
 
             print(f"  Trial {t}, seed={seed}")
-            detector = CompGraphDetector(
+            detector_cls = CGT_TREE_MODELS.get(model_name, CompGraphDetector)
+            detector = detector_cls(
                 train_config, model_config, train_ds, val_ds, test_ds)
 
             st = time.time()
@@ -290,11 +298,21 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
 
     feat_dim = data.graph.ndata['feature'].shape[1]
 
-    cg_models = [m for m in models if m in CG_SUPPORTED_MODELS]
-    skipped = [m for m in models if m not in CG_SUPPORTED_MODELS]
+    supported = set(CG_SUPPORTED_MODELS) | set(CGT_TREE_MODELS)
+    cg_models = [m for m in models if m in supported]
+    skipped = [m for m in models if m not in supported]
     if skipped:
         print(f"  NOTE: {skipped} not supported in computation graph mode. "
               f"Skipping.")
+
+    if 'XGBGraph' in cg_models:
+        cg_depth_pt = int(
+            syn_data.get('cg_depth', syn_data.get('subgraph_step_num')))
+        if cg_depth_pt != num_layers:
+            raise ValueError(
+                f"XGBGraph on CGT requires num_layers == cg_depth; "
+                f"got num_layers={num_layers}, cg_depth={cg_depth_pt} "
+                f"(in {syn_path}).")
 
     # --- Original data as computation graphs (CG baseline) ---
     # Rebuild datasets each trial so that different mask splits are used,
