@@ -81,14 +81,11 @@ Train BiGG with forest fire subsampling for VRAM-limited training. Same args as 
 Train BiGG structure-only baseline. Defaults: `tolokers 128 1 100 0.001 256`.
 Checkpoints saved with `structure_` prefix.
 
-**`bash scripts/train/train_cgt.sh [dataset] [gpt_epochs] [cluster_num] [cluster_size] [gpt_batch_size] [cg_depth] [cg_fanout] [trial_id] [task] [cluster_sample_num]`**
-Train CGT on a dataset. Defaults: `reddit 50 512 1 128 2 5 0 hidden_labels 5000`. Calls `CGT/train.py`.
-`trial_id` selects the mask column (for `hidden_labels`) or seeds the edge split (for `hidden_links`). `task=hidden_links` additionally reads `--val_ratio` (default 0.05) and `--test_ratio` (default 0.10) from `CGT/args.py`; these must match the downstream `LinkDataset.split` ratios or alignment assertions fail.
+**`bash scripts/train/train_cgt.sh [dataset] [gpt_epochs] [cluster_num] [cluster_size] [gpt_batch_size] [cg_depth] [cg_fanout] [num_trials] [task] [cluster_sample_num]`**
+Train CGT on `num_trials` GADBench splits (trials 0 to num_trials-1). Defaults: `reddit 50 512 1 128 2 5 10 hidden_labels 5000`. Calls `CGT/train.py` once per trial; set `num_trials=1` for a single-trial run. Idempotent: trials whose `.pt` already exists are skipped (supports SLURM re-submission after timeout).
+`trial_id` (per-trial, from the loop) selects the mask column (for `hidden_labels`) or seeds the edge split (for `hidden_links`). `task=hidden_links` additionally reads `--val_ratio` (default 0.05) and `--test_ratio` (default 0.10) from `CGT/args.py`; these must match the downstream `LinkDataset.split` ratios or alignment assertions fail.
 `cluster_sample_num` caps how many nodes are subsampled to fit `KMeansConstrained`; the library requires `cluster_num × cluster_size ≤ cluster_sample_num`, so raise this to use a higher `cluster_size` (k-anonymity) without giving up cluster resolution. Set ≥ graph size to fit on all nodes.
 Output saved to `datasets/synthetic/cgt/<dataset>/<task>/<variant>/<variant>_t{trial_id}.pt` where variant = `{dataset}_e{epochs}_k{clusters}_c{cluster_size}_d{depth}_f{fanout}_s{cluster_sample_num}`. `.pt` contains: generated sequences, cluster centers, `ids`, `task`, `trial_id`, and (for `hidden_links`) `hidden_test_edges` + `val_ratio` + `test_ratio` for provenance-checking.
-
-**`bash scripts/train/train_cgt_all_trials.sh [dataset] [gpt_epochs] [cluster_num] [cluster_size] [gpt_batch_size] [cg_depth] [cg_fanout] [num_trials] [task] [cluster_sample_num]`**
-Train CGT on all GADBench splits (trials 0 to num_trials-1). Defaults: same as `train_cgt.sh`, `num_trials=10`. Loops over `train_cgt.sh` with each trial_id.
 
 ### Environment Setup
 
