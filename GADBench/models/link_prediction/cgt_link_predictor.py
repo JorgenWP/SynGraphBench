@@ -9,12 +9,18 @@ tree subgraphs that CGT synthesises.
 
 Exposed as `CompGraphLinkPredictor` for backward compatibility with
 existing imports.
+
+Also provides `CGTXGBGraphLinkPredictor`: the CG counterpart of
+`XGBGraphLinkPredictor`. Runs `GIN_noparam` over the batched merged
+comp graph, takes the Hadamard product of the two root embeddings,
+and feeds it to XGBoost.
 """
 
 import dgl
 import numpy as np
 import torch
 import torch.nn.functional as F
+from sklearn.metrics import roc_auc_score, average_precision_score
 from torch.utils.data import DataLoader
 
 from data.comp_graph import (
@@ -204,3 +210,149 @@ class MergedCompGraphLinkPredictor(BaseDetector):
 
 # Back-compat alias for existing imports
 CompGraphLinkPredictor = MergedCompGraphLinkPredictor
+
+
+class CGTXGBGraphLinkPredictor(BaseDetector):
+    """XGBoost LP on GIN_noparam-aggregated root embeddings of merged
+    comp graphs. Per edge: Hadamard of (h_u, h_v) where h_u, h_v are
+    root embeddings at positions 0 and T of the merged tree.
+    `num_layers` must equal `step_num` (enforced).
+    """
+
+    def __init__(self, train_config, model_config, data):
+        super().__init__(train_config, model_config, data)
+        import xgboost as xgb
+        from models.gnn import GIN_noparam
+
+        self.device = train_config['device']
+        self.step_num = train_config.get('step_num', 2)
+        self.sample_num = train_config.get('sample_num', 5)
+        self.noise_num = train_config.get('noise_num', 0)
+        self.self_connection = train_config.get('self_connection', False)
+        self.batch_size = train_config.get('batch_size', 256)
+
+        num_layers = model_config.get('num_layers', 2)
+        if num_layers != self.step_num:
+            raise ValueError(
+                f"CGTXGBGraphLinkPredictor requires num_layers == step_num; "
+                f"got num_layers={num_layers}, step_num={self.step_num}.")
+
+        self.gin = GIN_noparam(**model_config).to(self.device).eval()
+
+        self.train_adj_list = dgl_to_adj_list(data.train_graph)
+        self.features = data.graph.ndata['feature'].cpu().numpy().astype(
+            np.float32)
+
+        merged_adj = compute_merged_tree_adj(
+            self.step_num, self.sample_num + self.noise_num,
+            self.self_connection)
+        self.template_src, self.template_dst, self.num_merged_nodes = \
+            compute_template_edges(merged_adj)
+        self.per_tree_num_nodes = self.num_merged_nodes // 2
+
+        eval_metric = (roc_auc_score if train_config['metric'] == 'AUROC'
+                       else average_precision_score)
+        cfg = {k: v for k, v in model_config.items() if k != 'model'}
+        self.model = xgb.XGBClassifier(
+            tree_method='hist', eval_metric=eval_metric, verbose=False, **cfg)
+
+    def _edge_features(self, edges):
+        if edges.shape[0] == 0:
+            feat_dim = self.features.shape[1] * (
+                self.model_config.get('num_layers', 2) + 1)
+            return np.zeros((0, feat_dim), dtype=np.float32)
+
+        edges_cpu = edges.cpu() if torch.is_tensor(edges) else edges
+        ds = MergedOriginalCompGraphDataset(
+            self.train_adj_list, self.features, edges_cpu,
+            self.step_num, self.sample_num,
+            self.noise_num, self.self_connection)
+        collate = make_merged_comp_graph_collate(
+            self.template_src, self.template_dst, self.num_merged_nodes)
+        loader = DataLoader(
+            ds, batch_size=self.batch_size, shuffle=False,
+            collate_fn=collate, num_workers=0)
+
+        feats = []
+        with torch.no_grad():
+            for batched in loader:
+                batched = batched.to(self.device)
+                emb = self.gin(batched)
+                h_u, h_v = extract_edge_root_embeddings(
+                    batched, emb, self.per_tree_num_nodes)
+                feats.append((h_u * h_v).cpu().numpy())
+        return np.vstack(feats)
+
+    def _filter_collisions(self, neg_edges):
+        src, dst = neg_edges[:, 0], neg_edges[:, 1]
+        N = self.num_nodes
+        for _ in range(10):
+            hashes = src.long() * N + dst.long()
+            collision = torch.isin(hashes, self.edge_set) | (src == dst)
+            if not collision.any():
+                break
+            n_bad = collision.sum().item()
+            dst[collision] = torch.randint(0, N, (n_bad,))
+        return neg_edges
+
+    def _sample_random_negatives(self, n):
+        neg = torch.stack([
+            torch.randint(0, self.num_nodes, (n,)),
+            torch.randint(0, self.num_nodes, (n,)),
+        ], dim=1)
+        return self._filter_collisions(neg).to(self.device)
+
+    def _sample_hard_negatives(self, pos_edges):
+        src = pos_edges[:, 0]
+        walk_nodes, _ = dgl.sampling.random_walk(
+            self.train_graph.cpu(), src.cpu(), metapath=[None, None])
+        hard_dst = walk_nodes[:, 2]
+        failed = hard_dst == -1
+        if failed.any():
+            hard_dst[failed] = torch.randint(
+                0, self.num_nodes, (int(failed.sum()),))
+        neg = torch.stack([src.cpu(), hard_dst], dim=1)
+        return self._filter_collisions(neg).to(self.device)
+
+    def train(self):
+        n_train = self.train_pos_edges.shape[0]
+
+        if self.neg_sampling == 'hard':
+            train_neg = self._sample_hard_negatives(self.train_pos_edges)
+        else:
+            train_neg = self._sample_random_negatives(n_train)
+
+        train_X = np.vstack([
+            self._edge_features(self.train_pos_edges),
+            self._edge_features(train_neg),
+        ])
+        train_y = np.concatenate([
+            np.ones(n_train), np.zeros(train_neg.shape[0])])
+
+        n_val_pos = self.val_pos_edges.shape[0]
+        n_val_neg = self.val_neg_edges.shape[0]
+        val_X = np.vstack([
+            self._edge_features(self.val_pos_edges),
+            self._edge_features(self.val_neg_edges),
+        ])
+        val_y = np.concatenate([np.ones(n_val_pos), np.zeros(n_val_neg)])
+
+        self.model.fit(train_X, train_y, eval_set=[(val_X, val_y)],
+                       verbose=False)
+
+        val_probs = self.model.predict_proba(val_X)[:, 1]
+        val_pos_probs = torch.tensor(val_probs[:n_val_pos])
+        val_neg_probs = torch.tensor(val_probs[n_val_pos:])
+        val_score = self.eval(val_pos_probs, val_neg_probs)
+        self.best_score = val_score[self.train_config['metric']]
+
+        n_test_pos = self.test_pos_edges.shape[0]
+        n_test_neg = self.test_neg_edges.shape[0]
+        test_X = np.vstack([
+            self._edge_features(self.test_pos_edges),
+            self._edge_features(self.test_neg_edges),
+        ])
+        test_probs = self.model.predict_proba(test_X)[:, 1]
+        test_pos_probs = torch.tensor(test_probs[:n_test_pos])
+        test_neg_probs = torch.tensor(test_probs[n_test_pos:])
+        return self.eval(test_pos_probs, test_neg_probs)

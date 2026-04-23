@@ -36,7 +36,8 @@ if _script_dir not in sys.path:
 
 from link_utils import LinkDataset, save_results
 from models.link_prediction.link_predictor import BaseGNNLinkPredictor, XGBGraphLinkPredictor
-from models.link_prediction.cgt_link_predictor import CompGraphLinkPredictor
+from models.link_prediction.cgt_link_predictor import (
+    CompGraphLinkPredictor, CGTXGBGraphLinkPredictor)
 from bench_utils import (
     parse_link_args, load_cgt_synthetic_data,
     print_comparison, resolve_cgt_trial_paths,
@@ -50,6 +51,8 @@ from models.cross_graph_link_predictor import (
 SEED_LIST = list(range(3407, 10000, 10))
 
 SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph']
+
+CGT_LP_TREE_MODELS = {'XGBGraph': CGTXGBGraphLinkPredictor}
 
 
 def set_seed(seed=3407):
@@ -209,7 +212,9 @@ def _run_cg_link_trials(dataset_name, cg_models, base_data, source_label,
                 'num_layers': num_layers,
             }
 
-            detector = CompGraphLinkPredictor(
+            detector_cls = CGT_LP_TREE_MODELS.get(
+                model_name, CompGraphLinkPredictor)
+            detector = detector_cls(
                 train_config, model_config, trial_data)
             st = time.time()
             test_score = detector.train()
@@ -274,6 +279,12 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
     skipped = [m for m in models if m not in SUPPORTED_MODELS]
     if skipped:
         print(f"  NOTE: {skipped} not supported for CG link prediction. Skipping.")
+
+    if 'XGBGraph' in cg_models and num_layers != step_num:
+        raise ValueError(
+            f"XGBGraph on CGT link prediction requires num_layers == step_num; "
+            f"got num_layers={num_layers}, step_num={step_num} "
+            f"(from {trial_paths[0]}).")
 
     # --- Original-CG baseline: same graph for every trial ---
     results.extend(_run_cg_link_trials(
