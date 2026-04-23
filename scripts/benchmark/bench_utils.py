@@ -299,6 +299,60 @@ def load_bigg_synthetic_graph(path):
         return graphs[0], norm_stats
 
 
+def load_bigg_real_subsampled_graph(path, original_graph):
+    """Load the real forest-fire subsamples saved alongside a BiGG subsampled run.
+
+    Reads every ``subgraph_*`` file in ``{path}/training_subsamples/`` and
+    batches them into a single block-diagonal graph. Split masks are generated
+    with the same per-split proportions as *original_graph* (test_masks are left
+    zeroed — testing happens on the full original graph, so the syn-side mask
+    is unused, matching the synthetic cross-graph code path).
+
+    Returns (combined_graph, norm_stats) or (None, None) if the directory is
+    missing / empty.
+    """
+    sub_dir = os.path.join(path, 'training_subsamples')
+    if not os.path.isdir(sub_dir):
+        return None, None
+    subgraph_files = sorted(
+        f for f in os.listdir(sub_dir) if f.startswith('subgraph_')
+    )
+    if not subgraph_files:
+        return None, None
+
+    graphs = []
+    for fname in subgraph_files:
+        gs, _ = dgl.load_graphs(os.path.join(sub_dir, fname))
+        graphs.append(gs[0])
+    combined = dgl.batch(graphs)
+    num_nodes = combined.num_nodes()
+
+    num_splits = original_graph.ndata['train_masks'].shape[1]
+    orig_n = original_graph.num_nodes()
+    train_masks = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
+    val_masks   = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
+    test_masks  = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
+    for col in range(num_splits):
+        train_frac = original_graph.ndata['train_masks'][:, col].sum().item() / orig_n
+        val_frac   = original_graph.ndata['val_masks'][:, col].sum().item()   / orig_n
+        n_train = max(1, round(train_frac * num_nodes))
+        n_val   = max(1, round(val_frac   * num_nodes))
+        if n_train + n_val > num_nodes:
+            n_val = num_nodes - n_train
+        perm = torch.randperm(num_nodes)
+        train_masks[perm[:n_train],              col] = 1
+        val_masks  [perm[n_train:n_train+n_val], col] = 1
+    combined.ndata['train_masks'] = train_masks
+    combined.ndata['val_masks']   = val_masks
+    combined.ndata['test_masks']  = test_masks
+
+    stats_path = os.path.join(path, 'norm_stats.pt')
+    norm_stats = torch.load(stats_path, weights_only=False) if os.path.exists(stats_path) else None
+    print(f'  Loaded {len(graphs)} real training subsamples → combined: '
+          f'{combined.num_nodes()} nodes, {combined.num_edges()} edges')
+    return combined, norm_stats
+
+
 def load_cgt_synthetic_data(syn_path):
     """Load CGT synthetic data from a .pt file."""
     try:

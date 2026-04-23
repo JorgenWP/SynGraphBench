@@ -122,6 +122,13 @@ def main():
                                     or pipeline_args.cat_feat):
         raise ValueError('--mdn_feat is mutually exclusive with --hetero_feat, --vae_feat, --cat_feat')
 
+    # CDF encoding requires sigmoid + BCE cont head; incompatible with other cont-head modes.
+    if pipeline_args.normalize == 'cdf' and (pipeline_args.hetero_feat
+                                              or pipeline_args.cat_feat
+                                              or pipeline_args.mdn_feat):
+        raise ValueError('--normalize cdf is mutually exclusive with '
+                         '--hetero_feat, --cat_feat, --mdn_feat')
+
     set_device(cmd_args.gpu)
     setup_treelib(cmd_args)
 
@@ -262,7 +269,8 @@ def main():
                                          binary_idx=binary_idx,
                                          vae_feat=pipeline_args.vae_feat,
                                          vae_dim=pipeline_args.vae_dim,
-                                         kl_weight=pipeline_args.kl_weight).to(cmd_args.device)
+                                         kl_weight=pipeline_args.kl_weight,
+                                         cdf_mode=(pipeline_args.normalize == 'cdf')).to(cmd_args.device)
     elif pipeline_args.model_type == 'independent':
         model = BiggWithFeatsAndLabels(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
                                        label_temp=pipeline_args.label_temp,
@@ -273,7 +281,8 @@ def main():
                                        binary_idx=binary_idx,
                                        vae_feat=pipeline_args.vae_feat,
                                        vae_dim=pipeline_args.vae_dim,
-                                       kl_weight=pipeline_args.kl_weight).to(cmd_args.device)
+                                       kl_weight=pipeline_args.kl_weight,
+                                       cdf_mode=(pipeline_args.normalize == 'cdf')).to(cmd_args.device)
 
     optimizer = optim.Adam(model.parameters(), lr=cmd_args.learning_rate, weight_decay=1e-4)
 

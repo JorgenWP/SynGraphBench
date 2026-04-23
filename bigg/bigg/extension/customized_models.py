@@ -88,7 +88,7 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
 
     def __init__(self, args, feat_dim, num_classes, label_temp=1.0, noise_std=0.0, ss_prob=0.0,
                  hetero_feat=False, logvar_floor=-4.0, binary_feat=False, binary_idx=None,
-                 vae_feat=False, vae_dim=16, kl_weight=1.0):
+                 vae_feat=False, vae_dim=16, kl_weight=1.0, cdf_mode=False):
         super().__init__(args)
         self.feat_dim = feat_dim
         self.num_classes = num_classes
@@ -101,6 +101,7 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
         self.vae_feat = vae_feat
         self.vae_dim = vae_dim if vae_feat else 0
         self.kl_weight = kl_weight
+        self.cdf_mode = cdf_mode  # sigmoid output + BCE loss for Uniform[0,1] targets
 
         # Binary / continuous feature index split
         if binary_feat and binary_idx:
@@ -212,6 +213,8 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
         if self.hetero_feat:
             pred_cont = raw_cont[:, :self.cont_feat_dim]
             log_var = torch.clamp(raw_cont[:, self.cont_feat_dim:], self.logvar_floor, 2.0)
+        elif self.cdf_mode:
+            pred_cont = torch.sigmoid(raw_cont)
         else:
             pred_cont = raw_cont
 
@@ -228,6 +231,9 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
                 std = torch.exp(0.5 * log_var)
                 sampled_cont = pred_cont + std * torch.randn_like(pred_cont)
             else:
+                # For cdf_mode this is sigmoid(raw) — Bernoulli mean in [0,1], used
+                # directly (not Bernoulli-sampled) because downstream inverse-CDF
+                # requires continuous [0,1] values.
                 sampled_cont = pred_cont
 
             # Binary: Bernoulli sample from sigmoid(logits)
@@ -295,7 +301,12 @@ class BiggWithFeatsAndLabels(RecurTreeGen):
                         z_prior = torch.randn(h.shape[0], self.vae_dim, device=h.device)
                         h_ss_in = torch.cat([h, z_prior], dim=-1)
                         raw_cont_ss = self.nodefeat_pred(h_ss_in)
-                        pred_cont_ss = raw_cont_ss[:, :self.cont_feat_dim] if self.hetero_feat else raw_cont_ss
+                        if self.hetero_feat:
+                            pred_cont_ss = raw_cont_ss[:, :self.cont_feat_dim]
+                        elif self.cdf_mode:
+                            pred_cont_ss = torch.sigmoid(raw_cont_ss)
+                        else:
+                            pred_cont_ss = raw_cont_ss
                         bin_logits_ss = self.binfeat_pred(h_ss_in) if self.bin_feat_dim > 0 else None
                     else:
                         pred_cont_ss = pred_cont
@@ -320,7 +331,7 @@ class BiggWithConditionedFeats(RecurTreeGen):
 
     def __init__(self, args, feat_dim, num_classes, label_temp=1.0, noise_std=0.0, ss_prob=0.0,
                  hetero_feat=False, logvar_floor=-4.0, binary_feat=False, binary_idx=None,
-                 vae_feat=False, vae_dim=16, kl_weight=1.0):
+                 vae_feat=False, vae_dim=16, kl_weight=1.0, cdf_mode=False):
         super().__init__(args)
         self.feat_dim = feat_dim
         self.num_classes = num_classes
@@ -333,6 +344,7 @@ class BiggWithConditionedFeats(RecurTreeGen):
         self.vae_feat = vae_feat
         self.vae_dim = vae_dim if vae_feat else 0
         self.kl_weight = kl_weight
+        self.cdf_mode = cdf_mode  # sigmoid output + BCE loss for Uniform[0,1] targets
 
         # Binary / continuous feature index split
         if binary_feat and binary_idx:
@@ -454,6 +466,10 @@ class BiggWithConditionedFeats(RecurTreeGen):
                 log_var = torch.clamp(raw_cont[:, self.cont_feat_dim:], self.logvar_floor, 2.0)
                 std = torch.exp(0.5 * log_var)
                 sampled_cont = pred_cont + std * torch.randn_like(pred_cont)
+            elif self.cdf_mode:
+                # Bernoulli mean in [0,1] — used directly (not Bernoulli-sampled) so
+                # downstream inverse-CDF receives continuous [0,1] values.
+                sampled_cont = torch.sigmoid(raw_cont)
             else:
                 sampled_cont = raw_cont
 
@@ -486,6 +502,8 @@ class BiggWithConditionedFeats(RecurTreeGen):
             if self.hetero_feat:
                 pred_cont = raw_cont[:, :self.cont_feat_dim]
                 log_var = torch.clamp(raw_cont[:, self.cont_feat_dim:], self.logvar_floor, 2.0)
+            elif self.cdf_mode:
+                pred_cont = torch.sigmoid(raw_cont)
             else:
                 pred_cont = raw_cont
 
@@ -497,6 +515,10 @@ class BiggWithConditionedFeats(RecurTreeGen):
             if target_cont is not None and self.cont_feat_dim > 0:
                 if self.hetero_feat:
                     ll_cont = -0.5 * (log_var + (target_cont - pred_cont) ** 2 / torch.exp(log_var))
+                elif self.cdf_mode:
+                    ll_cont = -F.binary_cross_entropy_with_logits(
+                        raw_cont, target_cont, reduction='none'
+                    )
                 else:
                     ll_cont = -(target_cont - pred_cont) ** 2
                 ll_cont = torch.sum(ll_cont) / self.cont_feat_dim
@@ -541,7 +563,12 @@ class BiggWithConditionedFeats(RecurTreeGen):
                         z_prior = torch.randn(h.shape[0], self.vae_dim, device=h.device)
                         h_ss_in = torch.cat([h, label_embed, z_prior], dim=-1)
                         raw_cont_ss = self.nodefeat_pred(h_ss_in)
-                        pred_cont_ss = raw_cont_ss[:, :self.cont_feat_dim] if self.hetero_feat else raw_cont_ss
+                        if self.hetero_feat:
+                            pred_cont_ss = raw_cont_ss[:, :self.cont_feat_dim]
+                        elif self.cdf_mode:
+                            pred_cont_ss = torch.sigmoid(raw_cont_ss)
+                        else:
+                            pred_cont_ss = raw_cont_ss
                         bin_logits_ss = self.binfeat_pred(h_ss_in) if self.bin_feat_dim > 0 else None
                     else:
                         pred_cont_ss = pred_cont

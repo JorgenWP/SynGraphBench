@@ -45,7 +45,8 @@ from bench_utils import (
     parse_args,
     load_cgt_synthetic_data, build_cgt_datasets,
     build_original_cg_datasets, print_comparison,
-    load_bigg_synthetic_graph, apply_normalization,
+    load_bigg_synthetic_graph, load_bigg_real_subsampled_graph,
+    apply_normalization,
     resolve_cgt_trial_paths, make_cgt_rebuild_fn,
 )
 from models.anomaly_detection.cgt_detector import CompGraphDetector, CG_SUPPORTED_MODELS
@@ -331,8 +332,14 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
 def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn_file_name,
                                 trials, semi_supervised, trial_id,
                                 epochs, patience, lr, drop_rate, h_feats, num_layers,
-                                norm_stats_path=None, curve_records=None):
-    """Train GNNs on synthetic graph, validate on synthetic val, test on original test nodes.
+                                norm_stats_path=None, curve_records=None,
+                                source_label='synthetic-graph'):
+    """Train GNNs on a train-source graph, validate on its val mask, test on original test nodes.
+
+    *source_label* identifies the training-source in printed banners and result
+    rows — e.g. ``'synthetic-graph'`` (BiGG-generated subgraphs) or
+    ``'real-subsampled-graph'`` (the real forest-fire subsamples used to train
+    the generative model). The rest of the pipeline is identical.
 
     Per-epoch val/test AUPRC curves are appended to curve_records (if provided),
     averaged across trials, for val/test divergence analysis.
@@ -356,7 +363,7 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
             continue
 
         print(f"\n{'='*60}")
-        print(f"  SYNTHETIC-GRAPH (CROSS) | {dataset_name} | {model_name}")
+        print(f"  {source_label.upper()} (CROSS) | {dataset_name} | {model_name}")
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
@@ -418,7 +425,7 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
 
         if auc_list:
             results.append({
-                'source': 'synthetic-graph', 'dataset': dataset_name, 'model': model_name,
+                'source': source_label, 'dataset': dataset_name, 'model': model_name,
                 'AUROC_mean': np.mean(auc_list), 'AUROC_std': np.std(auc_list),
                 'AUPRC_mean': np.mean(pre_list), 'AUPRC_std': np.std(pre_list),
                 'RecK_mean':  np.mean(rec_list),  'RecK_std':  np.std(rec_list),
@@ -433,7 +440,7 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
             test_arr = np.array([pad(c) for c in test_curves])
             for epoch in range(max_len):
                 curve_records.append({
-                    'source': 'synthetic-graph',
+                    'source': source_label,
                     'dataset': dataset_name, 'model': model_name, 'epoch': epoch,
                     'val_auprc_mean':  float(val_arr[:, epoch].mean()),
                     'val_auprc_std':   float(val_arr[:, epoch].std()),
@@ -583,6 +590,48 @@ def main():
                 args.lr, args.drop_rate, args.h_feats, args.num_layers,
                 norm_stats_path=norm_stats_path,
                 curve_records=all_curve_records)
+            all_results.extend(results)
+
+            # Train on the REAL forest-fire subsamples, test on full original.
+            # Shares subsampling + cross-graph testing with the synthetic path,
+            # so the delta between the two isolates generative-model fidelity
+            # from the subsampling effect.
+            if os.path.isdir(syn_path):
+                real_sub_stem = stem + '_real_sub_combined'
+                real_sub_path = os.path.join(task_dir, real_sub_stem)
+                real_sub_norm_path = real_sub_path + '_norm_stats.pt'
+                real_sub_ready = os.path.exists(real_sub_path)
+
+                if not real_sub_ready:
+                    orig_for_masks = GADBenchDataset(
+                        dataset_name, prefix=args.data_dir + '/').graph
+                    real_combined, real_norm = load_bigg_real_subsampled_graph(
+                        syn_path, orig_for_masks)
+                    if real_combined is not None:
+                        print(f'  Combining real subsamples → {real_sub_path}')
+                        dgl.save_graphs(real_sub_path, [real_combined])
+                        if real_norm is not None:
+                            torch.save(real_norm, real_sub_norm_path)
+                        real_sub_ready = True
+                    else:
+                        print(f'  No training_subsamples/ found in {syn_path}; '
+                              f'skipping real-subsampled source.')
+                else:
+                    print(f'  Using cached real-subsampled combined graph: {real_sub_path}')
+
+                if real_sub_ready:
+                    real_norm_arg = (real_sub_norm_path
+                                     if os.path.exists(real_sub_norm_path) else None)
+                    results = evaluate_models_cross_graph(
+                        dataset_name, models, args.data_dir, task_dir, real_sub_stem,
+                        args.trials, args.semi_supervised, args.trial_id,
+                        args.epochs, args.patience,
+                        args.lr, args.drop_rate, args.h_feats, args.num_layers,
+                        norm_stats_path=real_norm_arg,
+                        curve_records=all_curve_records,
+                        source_label='real-subsampled-graph')
+                    all_results.extend(results)
+            continue
         all_results.extend(results)
 
     # --- Save and display results ---

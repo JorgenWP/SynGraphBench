@@ -17,8 +17,8 @@ The original GADBench capability. Trains GNN-based classifiers to identify anoma
 
 * `GADBench/benchmark.py`: Native anomaly detection benchmark.
 * `GADBench/random_search.py`: Hyperparameter tuning.
-* `scripts/benchmark/anomaly_benchmark.py`: Project-level anomaly detection benchmark comparing original vs. synthetic data. Supports multi-trial CGT evaluation: when per-trial `.pt` files exist (`{stem}_t0.pt` through `{stem}_t9.pt`), each trial loads a different file with its own train/val split, matching the split-varying behaviour of the original-data baseline.
-* `scripts/benchmark/models/cross_graph_detector.py`: Cross-graph detectors (GNN + XGBGraph) — train on synthetic, test on original.
+* `scripts/benchmark/anomaly_benchmark.py`: Project-level anomaly detection benchmark comparing original vs. synthetic data. Supports multi-trial CGT evaluation: when per-trial `.pt` files exist (`{stem}_t0.pt` through `{stem}_t9.pt`), each trial loads a different file with its own train/val split, matching the split-varying behaviour of the original-data baseline. For BiGG subsampled runs, additionally evaluates a `real-subsampled-graph` source that trains on the real forest-fire subsamples saved under `{syn_path}/training_subsamples/` and tests on the full original graph — sharing subsampling + cross-graph testing with the synthetic path so the delta isolates generative-model fidelity from the subsampling effect.
+* `scripts/benchmark/models/cross_graph_detector.py`: Cross-graph detectors (GNN + XGBGraph) — train on a source graph (synthetic or real-subsampled), test on original.
 * **Hyperparameters:** `CGT/args.py` or `GADBench/benchmark.py`.
 * **Label leakage prevention:** BiGG's `--mask_test_labels` flag excludes test node labels (split 0) from label loss during training. Without this, BiGG can memorize test labels, artificially inflating anomaly detection scores when synthetic-trained GNNs are tested on original test nodes.
 
@@ -57,8 +57,8 @@ An extension added to this project that reuses existing GNN architectures for ed
 
 When BiGG trains with feature normalization (e.g., `-normalize zscore`), the synthetic graph's features are in normalized space. The benchmarks must apply the same transform to the original graph's features before testing, otherwise the model trains on one feature distribution and tests on another.
 
-* `bigg/bigg/extension/preprocessing.py`: `normalize_features()` returns `(features, stats)` — stats dict contains the method and parameters (e.g., mean/std for zscore, sorted_values for quantile). `apply_normalization()` applies saved stats to new data. `invert_normalization()` reverses lossless normalizations (zscore, minmax, quantile; errors on row).
-* Normalization methods: `zscore` (zero mean, unit variance), `minmax` ([0,1] scaling), `row` (L2 row norm, lossy), `quantile` (rank-based inverse normal transform — maps any distribution to N(0,1)).
+* `bigg/bigg/extension/preprocessing.py`: `normalize_features()` returns `(features, stats)` — stats dict contains the method and parameters (e.g., mean/std for zscore, sorted_values for quantile/cdf). `apply_normalization()` applies saved stats to new data. `invert_normalization()` reverses lossless normalizations (zscore, minmax, quantile, cdf; errors on row).
+* Normalization methods: `zscore` (zero mean, unit variance), `minmax` ([0,1] scaling), `row` (L2 row norm, lossy), `quantile` (rank-based inverse normal transform — any distribution to N(0,1)), `cdf` (empirical CDF — any distribution to Uniform[0,1]; couples to a sigmoid+BCE continuous head in the model).
 * `bigg/bigg/extension/pipeline.py`: Saves `_norm_stats.pt` alongside the synthetic graph. When `--binary_feat` is enabled, also saves `_binary_idx.pt`.
 * `scripts/benchmark/bench_utils.py`: `apply_normalization()` duplicated here for benchmark imports. When stats contain `binary_idx`, only non-binary columns are normalized.
 * Both anomaly and link prediction benchmarks: load stats if the `_norm_stats.pt` file exists, apply to original graph features before cross-graph evaluation. If no stats file exists (non-normalized runs), features are used as-is.

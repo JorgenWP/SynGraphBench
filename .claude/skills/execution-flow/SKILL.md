@@ -64,7 +64,7 @@ Train BiGG conditional model (features + labels). Defaults: `tolokers 1024 1 50 
 * `ss_max_prob`: Max scheduled-sampling probability (0.0 = disabled; uses teacher forcing only).
 * `ss_start_epoch`: Epoch at which scheduled sampling begins ramping up.
 * `bfs_preprocess`: Apply fixed BFS node ordering before training (`True`/`False`).
-* `normalize`: Feature normalisation method (`zscore`, `minmax`, `row`, `quantile`, or `none`). Quantile uses rank-based inverse normal transform — maps any distribution to N(0,1).
+* `normalize`: Feature normalisation method (`zscore`, `minmax`, `row`, `quantile`, `cdf`, or `none`). `quantile` uses rank-based inverse normal transform (any distribution → N(0,1)). `cdf` uses the empirical CDF (any distribution → Uniform[0,1]) and couples to a sigmoid+BCE continuous head; mutually exclusive with `hetero_feat`, `cat_feat`, `mdn_feat`.
 * `loss_weights`: Comma-separated cont,label weights relative to struct (e.g., `0.1,0.1`).
 * `hetero_feat`: `true` for heteroscedastic feature prediction (mean + variance).
 * `mask_test_labels`: `true` to exclude test node labels (split 0) from label loss, preventing data leakage in anomaly benchmarks. Appends `_masked` to save name.

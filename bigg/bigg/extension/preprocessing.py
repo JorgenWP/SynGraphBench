@@ -258,7 +258,7 @@ def forest_fire_subsample(graph_nx, node_data, target_size, burn_prob, seed_node
 # Feature normalisation
 # ---------------------------------------------------------------------------
 
-NORMALIZATION_METHODS = ('zscore', 'minmax', 'row', 'quantile')
+NORMALIZATION_METHODS = ('zscore', 'minmax', 'row', 'quantile', 'cdf')
 
 
 def normalize_features(features, method):
@@ -329,6 +329,22 @@ def normalize_features(features, method):
             transformed[:, d] = math.sqrt(2) * torch.erfinv(2 * uniform - 1)
         features = transformed
 
+    elif method == 'cdf':
+        # Rank-based empirical CDF: any distribution → Uniform[0, 1]
+        N, D = features.shape
+        sorted_values, _ = features.sort(dim=0)
+        stats['sorted_values'] = sorted_values
+
+        eps = 1e-6
+        transformed = torch.empty_like(features)
+        for d in range(D):
+            col = features[:, d]
+            sv = sorted_values[:, d]
+            ranks = torch.searchsorted(sv, col).clamp(0, N - 1).float()
+            uniform = (ranks + 0.5) / N
+            transformed[:, d] = uniform.clamp(eps, 1.0 - eps)
+        features = transformed
+
     return features, stats
 
 
@@ -372,13 +388,27 @@ def apply_normalization(features, stats):
             transformed[:, d] = math.sqrt(2) * torch.erfinv(2 * uniform - 1)
         features = transformed
 
+    elif method == 'cdf':
+        sorted_values = stats['sorted_values']  # (N_train, D)
+        N_train = sorted_values.shape[0]
+        D = features.shape[1]
+        eps = 1e-6
+        transformed = torch.empty_like(features)
+        for d in range(D):
+            col = features[:, d]
+            sv = sorted_values[:, d]
+            ranks = torch.searchsorted(sv, col).clamp(0, N_train - 1).float()
+            uniform = (ranks + 0.5) / N_train
+            transformed[:, d] = uniform.clamp(eps, 1.0 - eps)
+        features = transformed
+
     return features
 
 
 def invert_normalization(features, stats):
     """Invert a previously computed normalization to recover original-space features.
 
-    Only lossless methods (zscore, minmax, quantile) are invertible.
+    Only lossless methods (zscore, minmax, quantile, cdf) are invertible.
     Raises ``ValueError`` for ``'row'`` normalization (lossy).
 
     Parameters
@@ -410,6 +440,22 @@ def invert_normalization(features, stats):
             # Normal CDF: N(0,1) → uniform [0, 1]
             uniform = 0.5 * (1.0 + torch.erf(col / math.sqrt(2)))
             # Uniform → index into sorted training values
+            indices = (uniform * (N_train - 1)).clamp(0, N_train - 1)
+            lo = indices.long().clamp(0, N_train - 2)
+            hi = lo + 1
+            frac = indices - lo.float()
+            inverted[:, d] = sv[lo] * (1 - frac) + sv[hi] * frac
+        features = inverted
+    elif method == 'cdf':
+        sorted_values = stats['sorted_values']  # (N_train, D)
+        N_train = sorted_values.shape[0]
+        D = features.shape[1]
+        inverted = torch.empty_like(features)
+        for d in range(D):
+            col = features[:, d]
+            sv = sorted_values[:, d]
+            # Already uniform in [0, 1] — index directly into sorted training values
+            uniform = col.clamp(0.0, 1.0)
             indices = (uniform * (N_train - 1)).clamp(0, N_train - 1)
             lo = indices.long().clamp(0, N_train - 2)
             hi = lo + 1
