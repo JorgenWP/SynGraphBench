@@ -10,8 +10,8 @@
 #SBATCH --nodes=1                   # Number of compute nodes
 #SBATCH --ntasks-per-node=1         # Number of tasks per node
 
-#SBATCH --output=output/cgt/benchmark/<dataset>/link/link_k<k-anonymity>_<decoder>_<neg-sampling>_output.txt    # Specifying 'stdout'
-#SBATCH --error=output/cgt/benchmark/<dataset>/link/link_k<k-anonymity>_<decoder>_<neg-sampling>_error.txt      # Specifying 'stderr'
+#SBATCH --output=output/cgt/benchmark/<dataset>/hidden_links/link_k<k-anonymity>_<decoder>_<neg-sampling>_output.txt    # Specifying 'stdout'
+#SBATCH --error=output/cgt/benchmark/<dataset>/hidden_links/link_k<k-anonymity>_<decoder>_<neg-sampling>_error.txt      # Specifying 'stderr'
 
 #SBATCH --mail-user=<email>@stud.ntnu.no         # The email to send notifications to
 #SBATCH --mail-type=ALL
@@ -31,13 +31,13 @@ module load Anaconda3/2024.02-1
 conda activate GADBench
 
 # Config
-GENERATOR="cgt"
 DATASETS="reddit"
 MODELS="GCN,GIN,GraphSAGE"
 TRIALS="10"
 SYNTHETIC_NAME=""       # Optional: variant stem, e.g. "reddit_e50_k512_c1_d2_f5_s5000"
+
 NEG_SAMPLING="random"   # random | hard
 DECODER="dot"           # dot | mlp
 
 # Run the link prediction benchmark with CGT synthetic data
-bash scripts/benchmark/run_link_benchmark.sh "$DATASETS" "$MODELS" "$TRIALS" "$GENERATOR" "$SYNTHETIC_NAME" "$NEG_SAMPLING" "$DECODER"
+bash scripts/benchmark/run_link_benchmark.sh "$DATASETS" "$MODELS" "$TRIALS" "cgt" "$SYNTHETIC_NAME" "$NEG_SAMPLING" "$DECODER"
