@@ -94,6 +94,11 @@ def main():
                                       'is on (default: 8)')
     pipeline_parser.add_argument('-mdn_logsigma_floor', type=float, default=-4.0,
                                  help='Lower clamp for MDN component log-sigma (default: -4.0)')
+    pipeline_parser.add_argument('-mdn_base', type=str, default='gaussian',
+                                 choices=['gaussian', 'logit_normal'],
+                                 help='Per-component base distribution for the MDN head '
+                                      '(default: gaussian). Use logit_normal for [0,1] targets '
+                                      '(pairs with --normalize cdf).')
     pipeline_parser.add_argument('--mask_test_labels', action='store_true', default=False,
                                  help='Exclude test node labels (split 0) from label loss to prevent '
                                       'data leakage in anomaly detection benchmarks')
@@ -118,16 +123,24 @@ def main():
         raise ValueError('--cat_feat is mutually exclusive with --hetero_feat and --vae_feat')
 
     # MDN replaces the continuous head entirely; reject combinations that don't apply.
-    if pipeline_args.mdn_feat and (pipeline_args.hetero_feat or pipeline_args.vae_feat
-                                    or pipeline_args.cat_feat):
-        raise ValueError('--mdn_feat is mutually exclusive with --hetero_feat, --vae_feat, --cat_feat')
+    # MDN composes with VAE (z is concatenated into the head's conditioning input).
+    if pipeline_args.mdn_feat and (pipeline_args.hetero_feat or pipeline_args.cat_feat):
+        raise ValueError('--mdn_feat is mutually exclusive with --hetero_feat, --cat_feat')
 
-    # CDF encoding requires sigmoid + BCE cont head; incompatible with other cont-head modes.
-    if pipeline_args.normalize == 'cdf' and (pipeline_args.hetero_feat
-                                              or pipeline_args.cat_feat
-                                              or pipeline_args.mdn_feat):
-        raise ValueError('--normalize cdf is mutually exclusive with '
-                         '--hetero_feat, --cat_feat, --mdn_feat')
+    # CDF encoding bounds targets to [0,1]. Compatible with the default sigmoid+BCE
+    # head and with --mdn_feat when --mdn_base logit_normal (components live on the
+    # logit and are mapped to (0,1) via sigmoid at sample time). All other cont-head
+    # modes assume unbounded targets and are incompatible.
+    if pipeline_args.normalize == 'cdf':
+        bad = []
+        if pipeline_args.hetero_feat:
+            bad.append('--hetero_feat')
+        if pipeline_args.cat_feat:
+            bad.append('--cat_feat')
+        if pipeline_args.mdn_feat and pipeline_args.mdn_base != 'logit_normal':
+            bad.append('--mdn_feat (without --mdn_base logit_normal)')
+        if bad:
+            raise ValueError('--normalize cdf is mutually exclusive with: ' + ', '.join(bad))
 
     set_device(cmd_args.gpu)
     setup_treelib(cmd_args)
@@ -258,7 +271,12 @@ def main():
                                  noise_std=pipeline_args.noise_std,
                                  logsigma_floor=pipeline_args.mdn_logsigma_floor,
                                  binary_feat=pipeline_args.binary_feat,
-                                 binary_idx=binary_idx).to(cmd_args.device)
+                                 binary_idx=binary_idx,
+                                 vae_feat=pipeline_args.vae_feat,
+                                 vae_dim=pipeline_args.vae_dim,
+                                 kl_weight=pipeline_args.kl_weight,
+                                 logvar_floor=pipeline_args.logvar_floor,
+                                 mdn_base=pipeline_args.mdn_base).to(cmd_args.device)
     elif pipeline_args.model_type == 'conditional':
         model = BiggWithConditionedFeats(cmd_args, feat_dim=feat_dim, num_classes=num_classes,
                                          label_temp=pipeline_args.label_temp,
@@ -488,7 +506,11 @@ def main():
     bin_tag = '_binfeat' if pipeline_args.binary_feat else ''
     vae_tag = f'_vae{pipeline_args.vae_dim}_kl{pipeline_args.kl_weight}' if pipeline_args.vae_feat else ''
     cat_tag = f'_cat{pipeline_args.n_bins}_smed{pipeline_args.bin_sigma.median().item():.2f}' if pipeline_args.cat_feat else ''
-    mdn_tag = f'_mdn{pipeline_args.mdn_components}_lsf{pipeline_args.mdn_logsigma_floor}' if pipeline_args.mdn_feat else ''
+    if pipeline_args.mdn_feat:
+        mdn_base_tag = 'lnmdn' if pipeline_args.mdn_base == 'logit_normal' else 'mdn'
+        mdn_tag = f'_{mdn_base_tag}{pipeline_args.mdn_components}_lsf{pipeline_args.mdn_logsigma_floor}'
+    else:
+        mdn_tag = ''
     sub_tag = f'_sub{len(subgraphs)}_size{pipeline_args.subsample_size}_p{pipeline_args.burn_prob}' if pipeline_args.subsample else ''
     save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{vae_tag}{cat_tag}{mdn_tag}{sub_tag}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'

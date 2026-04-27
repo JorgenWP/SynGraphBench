@@ -847,7 +847,9 @@ class BiggWithMDNFeats(RecurTreeGen):
 
     def __init__(self, args, feat_dim, num_classes, n_components,
                  label_temp=1.0, noise_std=0.0, logsigma_floor=-4.0,
-                 binary_feat=False, binary_idx=None):
+                 binary_feat=False, binary_idx=None,
+                 vae_feat=False, vae_dim=16, kl_weight=1.0, logvar_floor=-4.0,
+                 mdn_base='gaussian'):
         super().__init__(args)
         self.feat_dim = feat_dim
         self.num_classes = num_classes
@@ -855,6 +857,13 @@ class BiggWithMDNFeats(RecurTreeGen):
         self.label_temp = label_temp
         self.noise_std = noise_std
         self.logsigma_floor = logsigma_floor
+        self.vae_feat = vae_feat
+        self.vae_dim = vae_dim if vae_feat else 0
+        self.kl_weight = kl_weight
+        self.logvar_floor = logvar_floor
+        if mdn_base not in ('gaussian', 'logit_normal'):
+            raise ValueError(f"mdn_base must be 'gaussian' or 'logit_normal', got {mdn_base!r}")
+        self.mdn_base = mdn_base
 
         if binary_feat and binary_idx:
             self.binary_idx = sorted(binary_idx)
@@ -870,19 +879,25 @@ class BiggWithMDNFeats(RecurTreeGen):
         self.nodelabel_pred = MLP(args.embed_dim, [2 * args.embed_dim, num_classes])
 
         # MDN head: per-node emits F * K * 3 parameters (pi_logit, mu, log_sigma).
-        # Input is [h, label_embed]: 2 * embed_dim.
+        # Input is [h, label_embed, (z)]: 2 * embed_dim + vae_dim.
+        feat_in_dim = args.embed_dim * 2 + self.vae_dim
         if self.cont_feat_dim > 0:
             mdn_out_dim = self.cont_feat_dim * n_components * 3
-            self.mdn_head = MLP(args.embed_dim * 2, [2 * args.embed_dim, mdn_out_dim])
+            self.mdn_head = MLP(feat_in_dim, [2 * args.embed_dim, mdn_out_dim])
 
         # Binary head (same conditioning as MDN)
         if self.bin_feat_dim > 0:
-            self.binfeat_pred = MLP(args.embed_dim * 2, [2 * args.embed_dim, self.bin_feat_dim])
+            self.binfeat_pred = MLP(feat_in_dim, [2 * args.embed_dim, self.bin_feat_dim])
 
         # State update path
         self.nodefeat_encoding = MLP(feat_dim, [2 * args.embed_dim, args.embed_dim])
         self.combiner = nn.Linear(args.embed_dim * 2, args.embed_dim)
         self.node_state_update = nn.LSTMCell(args.embed_dim, args.embed_dim)
+
+        # VAE encoder (training only; constructed only when enabled)
+        if self.vae_feat:
+            self.vae_encoder = MLP(args.embed_dim + feat_dim,
+                                   [2 * args.embed_dim, 2 * self.vae_dim])
 
         self._ll_cont = 0.0
         self._ll_bin = 0.0
@@ -924,7 +939,10 @@ class BiggWithMDNFeats(RecurTreeGen):
         gather_idx = comp_idx.unsqueeze(-1)
         chosen_mu = mu.gather(-1, gather_idx).squeeze(-1)
         chosen_log_sigma = log_sigma.gather(-1, gather_idx).squeeze(-1)
-        return chosen_mu + chosen_log_sigma.exp() * torch.randn_like(chosen_mu)
+        sample = chosen_mu + chosen_log_sigma.exp() * torch.randn_like(chosen_mu)
+        if self.mdn_base == 'logit_normal':
+            sample = torch.sigmoid(sample)
+        return sample
 
     def _mdn_params(self, h_cond):
         """Split MDN head output into (log_pi, mu, log_sigma), each (N, F, K)."""
@@ -953,12 +971,27 @@ class BiggWithMDNFeats(RecurTreeGen):
 
         pred_logits = self.nodelabel_pred(h)
 
+        # VAE latent: posterior q(z|h,x) during training, prior N(0,I) at generation.
+        mu_z = log_var_z = None
+        if self.vae_feat:
+            if node_data is not None:
+                target_all_for_enc = node_data[:, :self.feat_dim]
+                enc_out = self.vae_encoder(torch.cat([h, target_all_for_enc], dim=-1))
+                mu_z = enc_out[:, :self.vae_dim]
+                log_var_z = torch.clamp(enc_out[:, self.vae_dim:], self.logvar_floor, 2.0)
+                z = mu_z + torch.exp(0.5 * log_var_z) * torch.randn_like(mu_z)
+            else:
+                z = torch.randn(h.shape[0], self.vae_dim, device=h.device)
+
         if node_data is None:
             # --- Generation ---
             probs = F.softmax(pred_logits / self.label_temp, dim=-1)
             pred_labels = torch.multinomial(probs, num_samples=1).squeeze(-1)
             label_embed = self.nodelabel_encoding(pred_labels)
-            h_cond = torch.cat([h, label_embed], dim=-1)
+            if self.vae_feat:
+                h_cond = torch.cat([h, label_embed, z], dim=-1)
+            else:
+                h_cond = torch.cat([h, label_embed], dim=-1)
 
             if self.cont_feat_dim > 0:
                 log_pi, mu, log_sigma = self._mdn_params(h_cond)  # (N, F, K)
@@ -971,6 +1004,8 @@ class BiggWithMDNFeats(RecurTreeGen):
                 chosen_mu = mu.gather(-1, gather_idx).squeeze(-1)
                 chosen_log_sigma = log_sigma.gather(-1, gather_idx).squeeze(-1)
                 sampled_cont = chosen_mu + chosen_log_sigma.exp() * torch.randn_like(chosen_mu)
+                if self.mdn_base == 'logit_normal':
+                    sampled_cont = torch.sigmoid(sampled_cont)
             else:
                 sampled_cont = torch.empty(N, 0, device=h.device)
 
@@ -990,7 +1025,10 @@ class BiggWithMDNFeats(RecurTreeGen):
             target_all = node_data[:, :self.feat_dim]
             target_labels = node_data[:, self.feat_dim].long()
             label_embed = self.nodelabel_encoding(target_labels)
-            h_cond = torch.cat([h, label_embed], dim=-1)
+            if self.vae_feat:
+                h_cond = torch.cat([h, label_embed, z], dim=-1)
+            else:
+                h_cond = torch.cat([h, label_embed], dim=-1)
 
             target_cont = target_all[:, self.cont_idx] if self.cont_feat_dim > 0 else None
             target_bin = target_all[:, self.binary_idx] if self.bin_feat_dim > 0 else None
@@ -998,7 +1036,13 @@ class BiggWithMDNFeats(RecurTreeGen):
             # 1. MDN log-likelihood per (node, feature), averaged over features.
             if target_cont is not None and self.cont_feat_dim > 0:
                 log_pi, mu, log_sigma = self._mdn_params(h_cond)      # (N, F, K)
-                x = target_cont.unsqueeze(-1)                          # (N, F, 1)
+                # Components live on R; for logit_normal targets in (0,1) get
+                # mapped through logit so the same Gaussian log-prob applies.
+                # Jacobian of logit is constant w.r.t. params and dropped.
+                if self.mdn_base == 'logit_normal':
+                    x = torch.logit(target_cont, eps=1e-6).unsqueeze(-1)  # (N, F, 1)
+                else:
+                    x = target_cont.unsqueeze(-1)                          # (N, F, 1)
                 # Gaussian log-prob per component
                 log_norm = -0.5 * math.log(2 * math.pi)
                 log_comp = (log_norm - log_sigma
@@ -1024,20 +1068,32 @@ class BiggWithMDNFeats(RecurTreeGen):
 
             ll = self.w_cont * ll_cont + self.w_bin * ll_bin + self.w_label * ll_label
 
+            # 4. KL(q(z|h,x) || N(0,I)) — subtract since we maximize ll
+            if self.vae_feat:
+                kl = 0.5 * torch.sum(torch.exp(log_var_z) + mu_z ** 2 - 1.0 - log_var_z, dim=-1)
+                kl_total = kl.sum() / self.vae_dim
+                ll = ll - self.kl_weight * kl_total
+                self._kl += kl_total.item()
+
             self._ll_cont += ll_cont.item()
             self._ll_bin += ll_bin.item()
             self._ll_label += ll_label.item()
 
             # Scheduled sampling: feed the model's own predictions into the state
             # update on a fraction of steps. Loss above stays teacher-forced; only
-            # the RNN state sees self-generated prefixes.
+            # the RNN state sees self-generated prefixes. With VAE on, draw a
+            # fresh prior z (matches generation-time distribution).
             if self.ss_prob > 0 and torch.rand(1).item() < self.ss_prob:
                 with torch.no_grad():
                     ss_labels = torch.multinomial(
                         F.softmax(pred_logits, dim=-1), num_samples=1
                     ).squeeze(-1)
                     ss_label_embed = self.nodelabel_encoding(ss_labels)
-                    ss_h_cond = torch.cat([h, ss_label_embed], dim=-1)
+                    if self.vae_feat:
+                        z_prior = torch.randn(h.shape[0], self.vae_dim, device=h.device)
+                        ss_h_cond = torch.cat([h, ss_label_embed, z_prior], dim=-1)
+                    else:
+                        ss_h_cond = torch.cat([h, ss_label_embed], dim=-1)
                     if self.cont_feat_dim > 0:
                         ss_cont = self._sample_mdn(ss_h_cond)
                     else:

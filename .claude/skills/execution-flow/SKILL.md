@@ -64,14 +64,14 @@ Train BiGG conditional model (features + labels). Defaults: `tolokers 1024 1 50 
 * `ss_max_prob`: Max scheduled-sampling probability (0.0 = disabled; uses teacher forcing only).
 * `ss_start_epoch`: Epoch at which scheduled sampling begins ramping up.
 * `bfs_preprocess`: Apply fixed BFS node ordering before training (`True`/`False`).
-* `normalize`: Feature normalisation method (`zscore`, `minmax`, `row`, `quantile`, `cdf`, or `none`). `quantile` uses rank-based inverse normal transform (any distribution → N(0,1)). `cdf` uses the empirical CDF (any distribution → Uniform[0,1]) and couples to a sigmoid+BCE continuous head; mutually exclusive with `hetero_feat`, `cat_feat`, `mdn_feat`.
+* `normalize`: Feature normalisation method (`zscore`, `minmax`, `row`, `quantile`, `cdf`, or `none`). `quantile` uses rank-based inverse normal transform (any distribution → N(0,1)). `cdf` uses the empirical CDF (any distribution → Uniform[0,1]) and couples to either the default sigmoid+BCE continuous head or `--mdn_feat --mdn_base logit_normal`. Mutually exclusive with `hetero_feat`, `cat_feat`, and `mdn_feat` with the default Gaussian base.
 * `loss_weights`: Comma-separated cont,label weights relative to struct (e.g., `0.1,0.1`).
 * `hetero_feat`: `true` for heteroscedastic feature prediction (mean + variance).
 * `mask_test_labels`: `true` to exclude test node labels (split 0) from label loss, preventing data leakage in anomaly benchmarks. Appends `_masked` to save name.
 * `logvar_floor`: Lower clamp for log-variance in hetero_feat mode (default: -4.0).
 * `binary_feat`: `true` to auto-detect binary feature columns and use BCE loss + Bernoulli sampling instead of Gaussian head. Appends `_binfeat` to save name. Binary columns skip normalization.
 
-**`bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor]`**
+**`bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor] [mdn_base]`**
 Train BiGG with forest fire subsampling for VRAM-limited training. Same args as above, plus:
 * `subsample_size`: target nodes per subgraph (default: 2000).
 * `burn_prob`: forest fire burn probability — controls subgraph density (default: 0.3).
@@ -82,9 +82,10 @@ Train BiGG with forest fire subsampling for VRAM-limited training. Same args as 
 * `cat_feat`: `true` to use the AR categorical feature predictor (quantile bins + value-space soft-label cross-entropy). Mutually exclusive with `hetero_feat` and `vae_feat`. Appends `_cat{n_bins}_s{bin_sigma}` to save name and persists `cat_bins.pt` alongside the generated graph(s).
 * `n_bins`: number of quantile bins per continuous feature when `cat_feat` is on (default: 32).
 * `bin_sigma`: Gaussian soft-label std in feature-value units. Leave empty for auto per-feature sigma (0.5 × median positive spacing of *that* feature's bin centers — adapts across regimes: small for dense continuous, large for binary-like, scales automatically under k-means privacy). Scalar override broadcast to all features.
-* `mdn_feat`: `true` to use Mixture Density Network feature head (per-feature K-component Gaussian mixture conditioned on `[h, label_embed]`). Mutually exclusive with `hetero_feat` / `vae_feat` / `cat_feat`. Appends `_mdn{K}` to save name.
+* `mdn_feat`: `true` to use Mixture Density Network feature head (per-feature K-component mixture conditioned on `[h, label_embed, (z)]`). Mutually exclusive with `hetero_feat` / `cat_feat`. Composes with `vae_feat` (z is concatenated into the head's conditioning input). Appends `_mdn{K}_lsf{floor}` (or `_lnmdn{K}_lsf{floor}` for `logit_normal`) to save name.
 * `mdn_components`: number of mixture components per feature when `mdn_feat` is on (default: 8).
 * `mdn_logsigma_floor`: lower clamp for MDN component log-sigma (default: -4.0).
+* `mdn_base`: per-component base distribution — `gaussian` (default; unbounded targets) or `logit_normal` (targets in [0,1]; pairs with `--normalize cdf`). Use `logit_normal` whenever feature targets are CDF-encoded.
 
 **`bash scripts/train/train_bigg_structure.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim]`**
 Train BiGG structure-only baseline. Defaults: `tolokers 128 1 100 0.001 256`.
