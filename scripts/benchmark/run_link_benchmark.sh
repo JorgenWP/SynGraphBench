@@ -61,7 +61,7 @@ if [ -n "$SYNTHETIC_NAME" ]; then
     EXTRA_ARGS="--synthetic_name $SYNTHETIC_NAME"
 fi
 
-python scripts/benchmark/link_benchmark.py \
+python -u scripts/benchmark/link_benchmark.py \
     --datasets "$DATASETS" \
     --models "$MODELS" \
     --trials "$TRIALS" \
