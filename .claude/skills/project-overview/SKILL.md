@@ -17,6 +17,7 @@ The project is an amalgamation of three distinct, previously published research 
 | `/evaluation-framework` | GADBench — anomaly detection, link prediction extension, design details |
 | `/execution-flow` | Pipeline steps, shell script CLI args and defaults, env setup |
 | `/project-structure` | Folder layout, dataset naming conventions |
+| `/slurm-jobs` | SLURM/IDUN submission workflow, template editing, CGT training arguments |
 
 ## Quick Heuristics
 
