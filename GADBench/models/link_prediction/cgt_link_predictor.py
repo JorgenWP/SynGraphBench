@@ -10,10 +10,14 @@ tree subgraphs that CGT synthesises.
 Exposed as `CompGraphLinkPredictor` for backward compatibility with
 existing imports.
 
-Also provides `CGTXGBGraphLinkPredictor`: the CG counterpart of
-`XGBGraphLinkPredictor`. Runs `GIN_noparam` over the batched merged
-comp graph, takes the Hadamard product of the two root embeddings,
-and feeds it to XGBoost.
+Also provides tree-model link predictors that consume the same merged
+comp graphs:
+  - `CGTXGBoostLinkPredictor`: Hadamard of the two raw root features
+    (positions 0 and T of the merged tree) → XGBoost. CGT-only (no
+    full-graph LP baseline).
+  - `CGTXGBGraphLinkPredictor`: CG counterpart of `XGBGraphLinkPredictor`.
+    Adds `GIN_noparam` over the merged tree before the Hadamard step.
+    Enforces `num_layers == step_num`.
 """
 
 import dgl
@@ -237,17 +241,16 @@ class MergedCompGraphLinkPredictor(BaseDetector):
 CompGraphLinkPredictor = MergedCompGraphLinkPredictor
 
 
-class CGTXGBGraphLinkPredictor(BaseDetector):
-    """XGBoost LP on GIN_noparam-aggregated root embeddings of merged
-    comp graphs. Per edge: Hadamard of (h_u, h_v) where h_u, h_v are
-    root embeddings at positions 0 and T of the merged tree.
-    `num_layers` must equal `step_num` (enforced).
+class CGTXGBoostLinkPredictor(BaseDetector):
+    """XGBoost LP on merged comp graphs. Per edge: Hadamard of
+    (h_u, h_v) at positions 0 and T of the merged tree. Base class
+    uses raw root features (no GIN); subclass adds GIN_noparam
+    aggregation. CGT-only.
     """
 
     def __init__(self, train_config, model_config, data):
         super().__init__(train_config, model_config, data)
         import xgboost as xgb
-        from models.gnn import GIN_noparam
 
         self.device = train_config['device']
         self.step_num = train_config.get('step_num', 2)
@@ -255,14 +258,6 @@ class CGTXGBGraphLinkPredictor(BaseDetector):
         self.noise_num = train_config.get('noise_num', 0)
         self.self_connection = train_config.get('self_connection', False)
         self.batch_size = train_config.get('batch_size', 256)
-
-        num_layers = model_config.get('num_layers', 2)
-        if num_layers != self.step_num:
-            raise ValueError(
-                f"CGTXGBGraphLinkPredictor requires num_layers == step_num; "
-                f"got num_layers={num_layers}, step_num={self.step_num}.")
-
-        self.gin = GIN_noparam(**model_config).to(self.device).eval()
 
         self.train_adj_list = dgl_to_adj_list(data.train_graph)
         self.features = data.graph.ndata['feature'].cpu().numpy().astype(
@@ -281,10 +276,13 @@ class CGTXGBGraphLinkPredictor(BaseDetector):
         self.model = xgb.XGBClassifier(
             tree_method='hist', eval_metric=eval_metric, verbose=False, **cfg)
 
+        self.gin = None
+
     def _edge_features(self, edges):
         if edges.shape[0] == 0:
-            feat_dim = self.features.shape[1] * (
-                self.model_config.get('num_layers', 2) + 1)
+            feat_dim = self.features.shape[1]
+            if self.gin is not None:
+                feat_dim *= self.model_config.get('num_layers', 2) + 1
             return np.zeros((0, feat_dim), dtype=np.float32)
 
         edges_cpu = edges.cpu() if torch.is_tensor(edges) else edges
@@ -301,8 +299,11 @@ class CGTXGBGraphLinkPredictor(BaseDetector):
         feats = []
         with torch.no_grad():
             for batched in loader:
-                batched = batched.to(self.device)
-                emb = self.gin(batched)
+                if self.gin is None:
+                    emb = batched.ndata['feature']
+                else:
+                    batched = batched.to(self.device)
+                    emb = self.gin(batched)
                 h_u, h_v = extract_edge_root_embeddings(
                     batched, emb, self.per_tree_num_nodes)
                 feats.append((h_u * h_v).cpu().numpy())
@@ -381,3 +382,22 @@ class CGTXGBGraphLinkPredictor(BaseDetector):
         test_pos_probs = torch.tensor(test_probs[:n_test_pos])
         test_neg_probs = torch.tensor(test_probs[n_test_pos:])
         return self.eval(test_pos_probs, test_neg_probs)
+
+
+class CGTXGBGraphLinkPredictor(CGTXGBoostLinkPredictor):
+    """XGBoost LP on GIN_noparam-aggregated root embeddings of merged
+    comp graphs. Per-edge feature dim: feat_dim * (num_layers + 1).
+    `num_layers` must equal `step_num` (enforced).
+    """
+
+    def __init__(self, train_config, model_config, data):
+        super().__init__(train_config, model_config, data)
+        from models.gnn import GIN_noparam
+
+        num_layers = model_config.get('num_layers', 2)
+        if num_layers != self.step_num:
+            raise ValueError(
+                f"CGTXGBGraphLinkPredictor requires num_layers == step_num; "
+                f"got num_layers={num_layers}, step_num={self.step_num}.")
+
+        self.gin = GIN_noparam(**model_config).to(self.device).eval()

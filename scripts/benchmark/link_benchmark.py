@@ -37,7 +37,7 @@ if _script_dir not in sys.path:
 from link_utils import LinkDataset, save_results
 from models.link_prediction.link_predictor import BaseGNNLinkPredictor, XGBGraphLinkPredictor
 from models.link_prediction.cgt_link_predictor import (
-    CompGraphLinkPredictor, CGTXGBGraphLinkPredictor)
+    CompGraphLinkPredictor, CGTXGBoostLinkPredictor, CGTXGBGraphLinkPredictor)
 from bench_utils import (
     parse_link_args, load_cgt_synthetic_data,
     print_comparison, resolve_cgt_trial_paths,
@@ -51,8 +51,12 @@ from models.cross_graph_link_predictor import (
 SEED_LIST = list(range(3407, 10000, 10))
 
 SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph']
+CGT_LP_SUPPORTED_MODELS = SUPPORTED_MODELS + ['XGBoost']
 
-CGT_LP_TREE_MODELS = {'XGBGraph': CGTXGBGraphLinkPredictor}
+CGT_LP_TREE_MODELS = {
+    'XGBoost': CGTXGBoostLinkPredictor,
+    'XGBGraph': CGTXGBGraphLinkPredictor,
+}
 
 
 def set_seed(seed=3407):
@@ -74,6 +78,10 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
     results = []
 
     for model_name in models:
+        if model_name == 'XGBoost':
+            print(f"  NOTE: 'XGBoost' is CGT-only for link prediction. "
+                  f"Skipping full-graph eval.")
+            continue
         if model_name not in SUPPORTED_MODELS:
             print(f"  WARNING: '{model_name}' not supported for link prediction. Skipping.")
             continue
@@ -275,8 +283,8 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
     step_num = first_syn.get('cg_depth', first_syn.get('subgraph_step_num'))
     sample_num = first_syn.get('cg_fanout', first_syn.get('subgraph_sample_num'))
 
-    cg_models = [m for m in models if m in SUPPORTED_MODELS]
-    skipped = [m for m in models if m not in SUPPORTED_MODELS]
+    cg_models = [m for m in models if m in CGT_LP_SUPPORTED_MODELS]
+    skipped = [m for m in models if m not in CGT_LP_SUPPORTED_MODELS]
     if skipped:
         print(f"  NOTE: {skipped} not supported for CG link prediction. Skipping.")
 
