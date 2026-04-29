@@ -1,6 +1,6 @@
 #!/bin/sh
 #SBATCH --account=share-ie-idi      # "share-ie-idi" "ie-idi"
-#SBATCH --job-name="CGT_LINK_BENCHMARK_<dataset>_k<k-anonymity>_<decoder>_<neg-sampling>"
+#SBATCH --job-name="CGT_LINK_BENCHMARK_<dataset>_k<k-anonymity>_c<cluster-num>_<decoder>_<neg-sampling>"
 #SBATCH --time=04:30:00             # Time limit (hh:mm:ss)
 
 #SBATCH --partition=GPUQ            # Asking for GPU
@@ -11,8 +11,8 @@
 #SBATCH --ntasks-per-node=1         # Number of tasks per node
 #SBATCH --cpus-per-task=4           # CPU cores for DataLoader workers
 
-#SBATCH --output=output/cgt/benchmark/<dataset>/hidden_links/link_k<k-anonymity>_<decoder>_<neg-sampling>_output.txt    # Specifying 'stdout'
-#SBATCH --error=output/cgt/benchmark/<dataset>/hidden_links/link_k<k-anonymity>_<decoder>_<neg-sampling>_error.txt      # Specifying 'stderr'
+#SBATCH --output=output/cgt/benchmark/<dataset>/hidden_links/link_k<k-anonymity>_c<cluster-num>_<decoder>_<neg-sampling>_output.txt    # Specifying 'stdout'
+#SBATCH --error=output/cgt/benchmark/<dataset>/hidden_links/link_k<k-anonymity>_c<cluster-num>_<decoder>_<neg-sampling>_error.txt      # Specifying 'stderr'
 
 #SBATCH --mail-user=<email>@stud.ntnu.no         # The email to send notifications to
 #SBATCH --mail-type=ALL
@@ -33,7 +33,7 @@ conda activate GADBench
 
 # Config
 DATASETS="reddit"
-MODELS="GCN,GIN,GraphSAGE"
+MODELS="GCN,GIN,GraphSAGE,XGBoost,XGBGraph"
 TRIALS="10"
 SYNTHETIC_NAME=""       # Optional: variant stem, e.g. "reddit_e50_k512_c1_d2_f5_s5000"
 

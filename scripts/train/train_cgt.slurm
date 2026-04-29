@@ -1,6 +1,6 @@
 #!/bin/sh
 #SBATCH --account=share-ie-idi      # "share-ie-idi" "ie-idi"
-#SBATCH --job-name="CGT_<task>_TRAIN_<dataset>_<k-anonymity>_<cluster_num>_<description>"
+#SBATCH --job-name="CGT_<task>_TRAIN_<dataset>_k<k-anonymity>_c<cluster-num>_<description>"
 #SBATCH --time=02:30:00             # Time limit (hh:mm:ss)
 
 #SBATCH --partition=GPUQ            # Asking for GPU
@@ -10,8 +10,8 @@
 #SBATCH --nodes=1                   # Number of compute nodes
 #SBATCH --ntasks-per-node=1         # Number of tasks per node
 
-#SBATCH --output=output/cgt/train/<dataset>/<task>/output_<k-anonymity>_<cluster_num>_<description>.txt    # Specifying 'stdout'
-#SBATCH --error=output/cgt/train/<dataset>/<task>/error_<k-anonymity>_<cluster_num>_<description>.err      # Specifying 'stderr'
+#SBATCH --output=output/cgt/train/<dataset>/<task>/output_k<k-anonymity>_c<cluster-num>_<description>.txt    # Specifying 'stdout'
+#SBATCH --error=output/cgt/train/<dataset>/<task>/error_k<k-anonymity>_c<cluster-num>_<description>.err      # Specifying 'stderr'
 
 #SBATCH --mail-user=<username>@stud.ntnu.no         # The email to send notifications to
 #SBATCH --mail-type=ALL
