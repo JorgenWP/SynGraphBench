@@ -91,33 +91,60 @@ class MergedCompGraphLinkPredictor(BaseDetector):
             compute_template_edges(merged_adj)
         self.per_tree_num_nodes = self.num_merged_nodes // 2
 
-    def _score_edges(self, edges):
-        """Score edges by building batched merged computation graphs."""
-        if edges.shape[0] == 0:
-            return torch.empty(0, device=self.device)
-
+    def _edge_loader(self, edges):
         ds = MergedOriginalCompGraphDataset(
             self.train_adj_list, self.features, edges,
             self.step_num, self.sample_num,
             self.noise_num, self.self_connection)
         collate = make_merged_comp_graph_collate(
             self.template_src, self.template_dst, self.num_merged_nodes)
-        loader = DataLoader(
+        return DataLoader(
             ds, batch_size=self.batch_size, shuffle=False,
             collate_fn=collate, num_workers=0)
 
+    def _score_batch(self, batched):
+        batched = batched.to(self.device)
+        h = self.model(batched)
+        h_u, h_v = extract_edge_root_embeddings(
+            batched, h, self.per_tree_num_nodes)
+        if self.decoder is not None:
+            return self.decoder.score_from_pair(h_u, h_v)
+        return (h_u * h_v).sum(dim=-1)
+
+    def _score_edges(self, edges):
+        """Score edges by building batched merged computation graphs."""
+        if edges.shape[0] == 0:
+            return torch.empty(0, device=self.device)
+
         scores = []
-        for batched in loader:
-            batched = batched.to(self.device)
-            h = self.model(batched)
-            h_u, h_v = extract_edge_root_embeddings(
-                batched, h, self.per_tree_num_nodes)
-            if self.decoder is not None:
-                s = self.decoder.score_from_pair(h_u, h_v)
-            else:
-                s = (h_u * h_v).sum(dim=-1)
-            scores.append(s)
+        for batched in self._edge_loader(edges):
+            scores.append(self._score_batch(batched))
         return torch.cat(scores, dim=0)
+
+    def _train_step(self, edges, labels):
+        """Per-batch forward+backward with gradient accumulation.
+
+        Peak memory is O(one batch) because each batch's autograd graph
+        is freed by its own backward. Accumulated gradient equals the
+        gradient of mean-BCE over all edges: each batch contributes
+        (1/N) * sum_{i in batch} BCE_i, summing to (1/N) * sum_i BCE_i.
+        """
+        n_total = edges.shape[0]
+        if n_total == 0:
+            return 0.0
+
+        loss_sum = 0.0
+        offset = 0
+        for batched in self._edge_loader(edges):
+            s = self._score_batch(batched)
+            n_b = s.shape[0]
+            batch_labels = labels[offset:offset + n_b]
+            batch_loss = F.binary_cross_entropy_with_logits(
+                s, batch_labels, reduction='sum') / n_total
+            batch_loss.backward()
+            loss_sum += batch_loss.item()
+            offset += n_b
+        return loss_sum
 
     def _filter_collisions(self, neg_edges):
         src, dst = neg_edges[:, 0], neg_edges[:, 1]
@@ -170,15 +197,13 @@ class MergedCompGraphLinkPredictor(BaseDetector):
 
             all_train_edges = torch.cat(
                 [self.train_pos_edges, train_neg_edges], dim=0)
-            scores = self._score_edges(all_train_edges)
             labels = torch.cat([
                 torch.ones(n_train, device=self.device),
                 torch.zeros(train_neg_edges.shape[0], device=self.device),
             ])
-            loss = F.binary_cross_entropy_with_logits(scores, labels)
 
             optimizer.zero_grad()
-            loss.backward()
+            loss = self._train_step(all_train_edges, labels)
             optimizer.step()
 
             self.model.eval()
