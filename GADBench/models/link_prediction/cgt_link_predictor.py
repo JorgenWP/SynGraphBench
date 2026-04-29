@@ -100,7 +100,7 @@ class MergedCompGraphLinkPredictor(BaseDetector):
             self.template_src, self.template_dst, self.num_merged_nodes)
         return DataLoader(
             ds, batch_size=self.batch_size, shuffle=False,
-            collate_fn=collate, num_workers=0)
+            collate_fn=collate, num_workers=4)
 
     def _score_batch(self, batched):
         batched = batched.to(self.device)
@@ -296,7 +296,7 @@ class CGTXGBGraphLinkPredictor(BaseDetector):
             self.template_src, self.template_dst, self.num_merged_nodes)
         loader = DataLoader(
             ds, batch_size=self.batch_size, shuffle=False,
-            collate_fn=collate, num_workers=0)
+            collate_fn=collate, num_workers=4)
 
         feats = []
         with torch.no_grad():

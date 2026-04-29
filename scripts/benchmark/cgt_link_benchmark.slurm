@@ -9,6 +9,7 @@
 #SBATCH --mem=10G                   # Gigabytes of system memory (not GPU memory)
 #SBATCH --nodes=1                   # Number of compute nodes
 #SBATCH --ntasks-per-node=1         # Number of tasks per node
+#SBATCH --cpus-per-task=4           # CPU cores for DataLoader workers
 
 #SBATCH --output=output/cgt/benchmark/<dataset>/hidden_links/link_k<k-anonymity>_<decoder>_<neg-sampling>_output.txt    # Specifying 'stdout'
 #SBATCH --error=output/cgt/benchmark/<dataset>/hidden_links/link_k<k-anonymity>_<decoder>_<neg-sampling>_error.txt      # Specifying 'stderr'
