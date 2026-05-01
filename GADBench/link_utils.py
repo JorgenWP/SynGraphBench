@@ -151,6 +151,18 @@ model_lp_dict = {
 }
 
 
+def format_duration(seconds):
+    """Render a wall-clock duration as 's' / 'm Ss' / 'h Mm'."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    if seconds < 3600:
+        m, s = divmod(int(round(seconds)), 60)
+        return f"{m}m {s}s"
+    h, rem = divmod(int(round(seconds)), 3600)
+    m = rem // 60
+    return f"{h}h {m}m"
+
+
 def save_results(results, file_id):
     import os
     if not os.path.exists('results/'):

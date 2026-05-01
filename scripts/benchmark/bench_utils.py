@@ -375,20 +375,32 @@ def build_synthetic_dgl_graph(original_graph, synthetic_data,
     return syn_graph
 
 
+def format_duration(seconds):
+    """Render a wall-clock duration as 's' / 'm Ss' / 'h Mm'."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    if seconds < 3600:
+        m, s = divmod(int(round(seconds)), 60)
+        return f"{m}m {s}s"
+    h, rem = divmod(int(round(seconds)), 3600)
+    m = rem // 60
+    return f"{h}h {m}m"
+
+
 def print_comparison(all_results, datasets, models):
     """Print formatted comparison of original vs synthetic results."""
     sources = sorted(set(r['source'] for r in all_results))
 
-    print("\n" + "=" * 90)
+    print("\n" + "=" * 105)
     print("RESULTS COMPARISON")
-    print("=" * 90)
+    print("=" * 105)
 
     for dataset in datasets:
         print(f"\n  Dataset: {dataset}")
         header = (f"  {'Model':<14} {'Source':<24} "
-                  f"{'AUROC':>15} {'AUPRC':>15} {'RecK':>15}")
+                  f"{'AUROC':>15} {'AUPRC':>15} {'RecK':>15} {'Time/trial':>12}")
         print(header)
-        print(f"  {'-' * 86}")
+        print(f"  {'-' * 101}")
 
         for model in models:
             for source in sources:
@@ -401,8 +413,9 @@ def print_comparison(all_results, datasets, models):
                     auroc = f"{r['AUROC_mean']:.4f}\u00b1{r['AUROC_std']:.4f}"
                     auprc = f"{r['AUPRC_mean']:.4f}\u00b1{r['AUPRC_std']:.4f}"
                     reck = f"{r['RecK_mean']:.4f}\u00b1{r['RecK_std']:.4f}"
+                    tpt = format_duration(r.get('time_per_trial', 0.0))
                     print(f"  {model:<14} {source:<24} "
-                          f"{auroc:>15} {auprc:>15} {reck:>15}")
+                          f"{auroc:>15} {auprc:>15} {reck:>15} {tpt:>12}")
             print()
 
 

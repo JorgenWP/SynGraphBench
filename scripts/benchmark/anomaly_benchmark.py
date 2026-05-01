@@ -47,7 +47,7 @@ from bench_utils import (
     build_original_cg_datasets, print_comparison,
     load_bigg_synthetic_graph, apply_normalization,
     resolve_cgt_trial_paths, make_cgt_rebuild_fn,
-    _assert_pt_alignment,
+    _assert_pt_alignment, format_duration,
 )
 from models.anomaly_detection.cgt_detector import (
     CompGraphDetector, CG_SUPPORTED_MODELS,
@@ -89,7 +89,7 @@ def evaluate_models(dataset_name, models, data_dir,
 
         auc_list, pre_list, rec_list = [], [], []
         val_curves, test_curves = [], []
-        time_cost = 0
+        time_list = []
 
         for t in range(trials):
             torch.cuda.empty_cache()
@@ -128,7 +128,8 @@ def evaluate_models(dataset_name, models, data_dir,
             st = time.time()
             test_score = detector.train()
             ed = time.time()
-            time_cost += ed - st
+            dt = ed - st
+            time_list.append(dt)
 
             auc_list.append(test_score['AUROC'])
             pre_list.append(test_score['AUPRC'])
@@ -140,9 +141,16 @@ def evaluate_models(dataset_name, models, data_dir,
 
             print(f"  -> AUROC={test_score['AUROC']:.4f}, "
                   f"AUPRC={test_score['AUPRC']:.4f}, "
-                  f"RecK={test_score['RecK']:.4f}")
+                  f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
 
             del detector
+
+        if time_list:
+            total = sum(time_list)
+            print(f"  [{model_name}] {len(time_list)} trials — "
+                  f"total {format_duration(total)}, "
+                  f"mean {format_duration(total / len(time_list))} "
+                  f"± {format_duration(float(np.std(time_list)))}")
 
         del data
 
@@ -157,7 +165,7 @@ def evaluate_models(dataset_name, models, data_dir,
                 'AUPRC_std': np.std(pre_list),
                 'RecK_mean': np.mean(rec_list),
                 'RecK_std': np.std(rec_list),
-                'time_per_trial': time_cost / len(auc_list),
+                'time_per_trial': sum(time_list) / len(time_list),
             })
 
         if val_curves and curve_records is not None:
@@ -199,7 +207,7 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
-        time_cost = 0
+        time_list = []
 
         for t in range(trials):
             torch.cuda.empty_cache()
@@ -237,7 +245,8 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
             st = time.time()
             test_score = detector.train()
             ed = time.time()
-            time_cost += ed - st
+            dt = ed - st
+            time_list.append(dt)
 
             auc_list.append(test_score['AUROC'])
             pre_list.append(test_score['AUPRC'])
@@ -245,9 +254,16 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
 
             print(f"  -> AUROC={test_score['AUROC']:.4f}, "
                   f"AUPRC={test_score['AUPRC']:.4f}, "
-                  f"RecK={test_score['RecK']:.4f}")
+                  f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
 
             del detector
+
+        if time_list:
+            total = sum(time_list)
+            print(f"  [{model_name}] {len(time_list)} trials — "
+                  f"total {format_duration(total)}, "
+                  f"mean {format_duration(total / len(time_list))} "
+                  f"± {format_duration(float(np.std(time_list)))}")
 
         if auc_list:
             results.append({
@@ -260,7 +276,7 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
                 'AUPRC_std': np.std(pre_list),
                 'RecK_mean': np.mean(rec_list),
                 'RecK_std': np.std(rec_list),
-                'time_per_trial': time_cost / len(auc_list),
+                'time_per_trial': sum(time_list) / len(time_list),
             })
 
     return results
@@ -400,7 +416,7 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
 
         auc_list, pre_list, rec_list = [], [], []
         val_curves, test_curves = [], []
-        time_cost = 0
+        time_list = []
 
         for t in range(trials):
             torch.cuda.empty_cache()
@@ -440,12 +456,14 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
             st = time.time()
             test_score = detector.train()
             ed = time.time()
-            time_cost += ed - st
+            dt = ed - st
+            time_list.append(dt)
 
             auc_list.append(test_score['AUROC'])
             pre_list.append(test_score['AUPRC'])
             rec_list.append(test_score['RecK'])
-            print(f"  -> AUROC={test_score['AUROC']:.4f}, AUPRC={test_score['AUPRC']:.4f}, RecK={test_score['RecK']:.4f}")
+            print(f"  -> AUROC={test_score['AUROC']:.4f}, AUPRC={test_score['AUPRC']:.4f}, "
+                  f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
 
             if 'val_auprc_curve' in test_score:
                 val_curves.append(test_score['val_auprc_curve'])
@@ -453,13 +471,20 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
 
             del detector, syn_data, orig_data
 
+        if time_list:
+            total = sum(time_list)
+            print(f"  [{model_name}] {len(time_list)} trials — "
+                  f"total {format_duration(total)}, "
+                  f"mean {format_duration(total / len(time_list))} "
+                  f"± {format_duration(float(np.std(time_list)))}")
+
         if auc_list:
             results.append({
                 'source': 'synthetic-graph', 'dataset': dataset_name, 'model': model_name,
                 'AUROC_mean': np.mean(auc_list), 'AUROC_std': np.std(auc_list),
                 'AUPRC_mean': np.mean(pre_list), 'AUPRC_std': np.std(pre_list),
                 'RecK_mean':  np.mean(rec_list),  'RecK_std':  np.std(rec_list),
-                'time_per_trial': time_cost / len(auc_list),
+                'time_per_trial': sum(time_list) / len(time_list),
             })
 
         if val_curves and curve_records is not None:
@@ -482,6 +507,7 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
 
 
 def main():
+    t_start = time.time()
     args = parse_args()
 
     # Resolve default paths relative to project root
@@ -545,6 +571,7 @@ def main():
     print("\n" + "#" * 80)
     print("# PHASE 1: EVALUATING ON ORIGINAL DATA")
     print("#" * 80)
+    t_phase1 = time.time()
 
     for dataset_name in datasets:
         results = evaluate_models(
@@ -555,10 +582,14 @@ def main():
             curve_records=all_curve_records)
         all_results.extend(results)
 
+    phase1_elapsed = time.time() - t_phase1
+    print(f"\n[Phase 1: original-data] {format_duration(phase1_elapsed)}")
+
     # --- Phase 2: Evaluate on synthetic data ---
     print("\n" + "#" * 80)
     print("# PHASE 2: EVALUATING ON SYNTHETIC DATA")
     print("#" * 80)
+    t_phase2 = time.time()
 
     for dataset_name in datasets:
         # Resolve path: synthetic_dir/<generator>/<dataset>/<task>/<stem>[.pt]
@@ -624,6 +655,9 @@ def main():
                 curve_records=all_curve_records)
         all_results.extend(results)
 
+    phase2_elapsed = time.time() - t_phase2
+    print(f"\n[Phase 2: synthetic-data] {format_duration(phase2_elapsed)}")
+
     # --- Save and display results ---
     if all_results:
         results_df = pd.DataFrame(all_results)
@@ -644,6 +678,8 @@ def main():
         curves_path = os.path.join(args.output_dir, 'divergence_curves.csv')
         curves_df.to_csv(curves_path, index=False)
         print(f"  Divergence curves saved to: {curves_path}")
+
+    print(f"\n[Total] {format_duration(time.time() - t_start)}")
 
 
 if __name__ == '__main__':
