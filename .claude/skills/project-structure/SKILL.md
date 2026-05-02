@@ -30,8 +30,6 @@ SynGraphBench/
 │   │   └── models/
 │   │       ├── cross_graph_detector.py         # Cross-graph anomaly (GNN + XGBGraph)
 │   │       └── cross_graph_link_predictor.py   # Cross-graph link prediction (GNN + XGBGraph)
-│   ├── pipeline/
-│   │   └── run_cgt_pipeline.slurm  # Full CGT pipeline SLURM job
 │   └── test/               # Quick test/example scripts
 ├── datasets/
 │   ├── original/           # Original DGL datasets (reddit, tolokers, amazon, …)

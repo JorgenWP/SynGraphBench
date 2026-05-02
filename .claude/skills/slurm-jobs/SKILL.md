@@ -22,7 +22,6 @@ CGT training and benchmarking:
 | `scripts/train/train_cgt.slurm` | CGT generative training + synthetic generation, all `NUM_TRIALS` in one job |
 | `scripts/benchmark/cgt_anomaly_benchmark.slurm` | GADBench anomaly detection on CGT synthetic |
 | `scripts/benchmark/cgt_link_benchmark.slurm` | GADBench link prediction on CGT synthetic |
-| `scripts/pipeline/run_cgt_pipeline.slurm` | End-to-end CGT pipeline (train + benchmark) |
 
 BiGG training and benchmarking:
 
