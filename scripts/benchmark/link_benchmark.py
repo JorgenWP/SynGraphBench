@@ -42,6 +42,7 @@ from bench_utils import (
     parse_link_args, load_cgt_synthetic_data,
     print_comparison, resolve_cgt_trial_paths,
     _assert_link_pt_alignment, build_synthetic_dgl_graph,
+    format_duration,
 )
 from models.cross_graph_link_predictor import (
     CrossGraphLinkPredictor, CrossGraphXGBGraphLinkPredictor,
@@ -91,7 +92,7 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
-        time_cost = 0
+        time_list = []
 
         prefix = (synthetic_dir + '/') if data_source != 'original' else (data_dir + '/original/')
         data = LinkDataset(dataset_name, prefix=prefix)
@@ -128,7 +129,8 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
             st = time.time()
             test_score = detector.train()
             ed = time.time()
-            time_cost += ed - st
+            dt = ed - st
+            time_list.append(dt)
 
             auc_list.append(test_score['AUROC'])
             pre_list.append(test_score['AUPRC'])
@@ -136,11 +138,18 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
 
             print(f"  -> AUROC={test_score['AUROC']:.4f}, "
                   f"AUPRC={test_score['AUPRC']:.4f}, "
-                  f"RecK={test_score['RecK']:.4f}")
+                  f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
 
             del detector
 
         del data
+
+        if time_list:
+            total = sum(time_list)
+            print(f"  [{model_name} on {dataset_name}] {len(time_list)} trials — "
+                  f"total {format_duration(total)}, "
+                  f"mean {format_duration(total / len(time_list))} "
+                  f"± {format_duration(float(np.std(time_list)))}")
 
         if auc_list:
             results.append({
@@ -153,7 +162,7 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
                 'AUPRC_std': np.std(pre_list),
                 'RecK_mean': np.mean(rec_list),
                 'RecK_std': np.std(rec_list),
-                'time_per_trial': time_cost / len(auc_list),
+                'time_per_trial': sum(time_list) / len(time_list),
             })
 
     return results
@@ -181,7 +190,7 @@ def _run_cg_link_trials(dataset_name, cg_models, base_data, source_label,
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
-        time_cost = 0
+        time_list = []
 
         for t in range(trials):
             torch.cuda.empty_cache()
@@ -227,7 +236,8 @@ def _run_cg_link_trials(dataset_name, cg_models, base_data, source_label,
             st = time.time()
             test_score = detector.train()
             ed = time.time()
-            time_cost += ed - st
+            dt = ed - st
+            time_list.append(dt)
 
             auc_list.append(test_score['AUROC'])
             pre_list.append(test_score['AUPRC'])
@@ -235,11 +245,18 @@ def _run_cg_link_trials(dataset_name, cg_models, base_data, source_label,
 
             print(f"  -> AUROC={test_score['AUROC']:.4f}, "
                   f"AUPRC={test_score['AUPRC']:.4f}, "
-                  f"RecK={test_score['RecK']:.4f}")
+                  f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
 
             del detector
             if syn_graph_factory is not None:
                 del trial_data
+
+        if time_list:
+            total = sum(time_list)
+            print(f"  [{model_name} on {dataset_name}] {len(time_list)} trials — "
+                  f"total {format_duration(total)}, "
+                  f"mean {format_duration(total / len(time_list))} "
+                  f"± {format_duration(float(np.std(time_list)))}")
 
         if auc_list:
             results.append({
@@ -252,7 +269,7 @@ def _run_cg_link_trials(dataset_name, cg_models, base_data, source_label,
                 'AUPRC_std': np.std(pre_list),
                 'RecK_mean': np.mean(rec_list),
                 'RecK_std': np.std(rec_list),
-                'time_per_trial': time_cost / len(auc_list),
+                'time_per_trial': sum(time_list) / len(time_list),
             })
 
     return results
@@ -346,7 +363,7 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
-        time_cost = 0
+        time_list = []
 
         for t in range(trials):
             torch.cuda.empty_cache()
@@ -401,15 +418,23 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
             st = time.time()
             test_score = detector.train()
             ed = time.time()
-            time_cost += ed - st
+            dt = ed - st
+            time_list.append(dt)
 
             auc_list.append(test_score['AUROC'])
             pre_list.append(test_score['AUPRC'])
             rec_list.append(test_score['RecK'])
             print(f"  -> AUROC={test_score['AUROC']:.4f}, "
                   f"AUPRC={test_score['AUPRC']:.4f}, "
-                  f"RecK={test_score['RecK']:.4f}")
+                  f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
             del detector, syn_data, orig_data
+
+        if time_list:
+            total = sum(time_list)
+            print(f"  [{model_name} on {dataset_name}] {len(time_list)} trials — "
+                  f"total {format_duration(total)}, "
+                  f"mean {format_duration(total / len(time_list))} "
+                  f"± {format_duration(float(np.std(time_list)))}")
 
         if auc_list:
             results.append({
@@ -422,7 +447,7 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
                 'AUPRC_std': np.std(pre_list),
                 'RecK_mean': np.mean(rec_list),
                 'RecK_std': np.std(rec_list),
-                'time_per_trial': time_cost / len(auc_list),
+                'time_per_trial': sum(time_list) / len(time_list) if time_list else 0,
             })
 
     return results
@@ -430,6 +455,7 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
 
 def main():
     args = parse_link_args()
+    script_start = time.time()
 
     # Resolve default paths relative to project root
     if args.data_dir is None:
@@ -562,6 +588,8 @@ def main():
         print_comparison(all_results, datasets, models)
     else:
         print("\nNo results to save.")
+
+    print(f"\n[Total] {format_duration(time.time() - script_start)}")
 
 
 if __name__ == '__main__':
