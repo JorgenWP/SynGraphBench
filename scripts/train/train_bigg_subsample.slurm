@@ -60,6 +60,10 @@ MDN_FEAT=false          # "true" to use Mixture Density Network feature head. Mu
 MDN_COMPONENTS=8        # number of mixture components per feature when MDN_FEAT is on
 MDN_LOGSIGMA_FLOOR=-4.0 # lower clamp for MDN component log-sigma
 MDN_BASE=gaussian       # "gaussian" (unbounded) or "logit_normal" (targets in [0,1]; pairs with NORMALIZE=cdf)
+KL_SCHEDULE=none        # KL annealing schedule: "none", "linear", or "cyclic"
+KL_ANNEAL_EPOCHS=0      # linear: epochs over which β ramps 0 → kl_weight (required if KL_SCHEDULE=linear)
+KL_CYCLE_EPOCHS=0       # cyclic: cycle length in epochs (required if KL_SCHEDULE=cyclic)
+KL_RAMP_RATIO=0.5       # cyclic: fraction of cycle spent ramping (paper R, default 0.5)
 
 # Run the BiGG subsampled training and generation script
-bash scripts/train/train_bigg_subsample.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$LOGVAR_FLOOR" "$SUBSAMPLE_SIZE" "$BURN_PROB" "$NUM_SUBGRAPHS" "$BINARY_FEAT" "$VAE_FEAT" "$VAE_DIM" "$KL_WEIGHT" "$CAT_FEAT" "$N_BINS" "$BIN_SIGMA" "$MDN_FEAT" "$MDN_COMPONENTS" "$MDN_LOGSIGMA_FLOOR" "$MDN_BASE"
+bash scripts/train/train_bigg_subsample.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$LOGVAR_FLOOR" "$SUBSAMPLE_SIZE" "$BURN_PROB" "$NUM_SUBGRAPHS" "$BINARY_FEAT" "$VAE_FEAT" "$VAE_DIM" "$KL_WEIGHT" "$CAT_FEAT" "$N_BINS" "$BIN_SIGMA" "$MDN_FEAT" "$MDN_COMPONENTS" "$MDN_LOGSIGMA_FLOOR" "$MDN_BASE" "$KL_SCHEDULE" "$KL_ANNEAL_EPOCHS" "$KL_CYCLE_EPOCHS" "$KL_RAMP_RATIO"

@@ -7,7 +7,7 @@
 # training subgraph.
 #
 # Usage:
-#   bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor] [mdn_base]
+#   bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor] [mdn_base] [kl_schedule] [kl_anneal_epochs] [kl_cycle_epochs] [kl_ramp_ratio]
 #
 # normalize:        feature normalisation — one of "zscore", "minmax", "row", "quantile", or "none" (default: none)
 # loss_weights:     comma-separated cont,label weights relative to struct, applied after dynamic normalization (default: 1,1)
@@ -32,6 +32,14 @@
 # mdn_logsigma_floor: lower clamp for MDN component log-sigma (default: -4.0)
 # mdn_base:         per-component base distribution when mdn_feat is on — "gaussian" (unbounded targets)
 #                   or "logit_normal" (targets in [0,1]; pairs with --normalize cdf) (default: gaussian)
+# kl_schedule:      KL annealing schedule for the VAE coefficient — "none", "linear", or "cyclic"
+#                   (default: none). Addresses posterior collapse when vae_feat is on.
+# kl_anneal_epochs: linear ramp duration in epochs (required when kl_schedule=linear). β goes 0 →
+#                   kl_weight over this many epochs, then stays. (default: 0)
+# kl_cycle_epochs:  cyclic schedule cycle length in epochs (required when kl_schedule=cyclic).
+#                   β resets to 0 every cycle. (default: 0)
+# kl_ramp_ratio:    fraction of cycle spent ramping when kl_schedule=cyclic (paper R, default 0.5).
+#                   0.5 → first 50%% of cycle ramps 0→1, last 50%% sits at 1.
 #
 # Examples:
 #   bash scripts/train/train_bigg_subsample.sh reddit -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true -4.0 2000 0.3
@@ -72,6 +80,10 @@ MDN_FEAT="${26:-false}"
 MDN_COMPONENTS="${27:-8}"
 MDN_LOGSIGMA_FLOOR="${28:--4.0}"
 MDN_BASE="${29:-gaussian}"
+KL_SCHEDULE="${30:-none}"
+KL_ANNEAL_EPOCHS="${31:-0}"
+KL_CYCLE_EPOCHS="${32:-0}"
+KL_RAMP_RATIO="${33:-0.5}"
 
 cd "$(dirname "$0")/../../bigg"
 
@@ -105,6 +117,10 @@ echo "MDN feat:        $MDN_FEAT"
 echo "MDN components:  $MDN_COMPONENTS"
 echo "MDN lσ floor:    $MDN_LOGSIGMA_FLOOR"
 echo "MDN base:        $MDN_BASE"
+echo "KL schedule:     $KL_SCHEDULE"
+echo "KL anneal eps:   $KL_ANNEAL_EPOCHS"
+echo "KL cycle eps:    $KL_CYCLE_EPOCHS"
+echo "KL ramp ratio:   $KL_RAMP_RATIO"
 echo ""
 
 NORM_FLAG=""
@@ -187,4 +203,8 @@ python -m bigg.extension.pipeline \
   -mdn_components "$MDN_COMPONENTS" \
   -mdn_logsigma_floor "$MDN_LOGSIGMA_FLOOR" \
   -mdn_base "$MDN_BASE" \
+  -kl_schedule "$KL_SCHEDULE" \
+  -kl_anneal_epochs "$KL_ANNEAL_EPOCHS" \
+  -kl_cycle_epochs "$KL_CYCLE_EPOCHS" \
+  -kl_ramp_ratio "$KL_RAMP_RATIO" \
   -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LOSS_WEIGHTS}_${HETERO_FEAT}_lvf${LOGVAR_FLOOR}_bin${BINARY_FEAT}_vae${VAE_FEAT}_vd${VAE_DIM}_kl${KL_WEIGHT}_cat${CAT_FEAT}_nb${N_BINS}_mdn${MDN_FEAT}_k${MDN_COMPONENTS}_sub${SUBSAMPLE_SIZE}_p${BURN_PROB}"

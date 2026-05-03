@@ -35,6 +35,31 @@ from bigg.extension.preprocessing import (
     NORMALIZATION_METHODS,
 )
 
+def compute_kl_beta(epoch, schedule, anneal_epochs=None,
+                    cycle_epochs=None, ramp_ratio=0.5):
+    """Return β ∈ [0, 1] for the current epoch.
+
+    Effective KL coefficient = β × kl_weight (kl_weight is the user-set ceiling).
+
+    Schedules:
+      - 'none':    β ≡ 1.0 (constant; preserves pre-annealing behavior).
+      - 'linear':  β ramps 0 → 1 over `anneal_epochs`, stays at 1 thereafter.
+      - 'cyclic':  Fu et al. 2019 — β resets to 0 every `cycle_epochs`, ramps
+                   linearly to 1 over the first `ramp_ratio` fraction of the
+                   cycle, then sits at 1 for the remainder.
+    """
+    if schedule == 'none':
+        return 1.0
+    if schedule == 'linear':
+        return min(1.0, epoch / max(anneal_epochs, 1))
+    if schedule == 'cyclic':
+        cycle_pos = (epoch % max(cycle_epochs, 1)) / max(cycle_epochs, 1)
+        if ramp_ratio <= 0 or cycle_pos >= ramp_ratio:
+            return 1.0
+        return cycle_pos / ramp_ratio
+    raise ValueError(f"unknown KL schedule: {schedule!r}")
+
+
 def main():
 
     #Parse pipeline args
@@ -110,6 +135,23 @@ def main():
                                  help='Forest fire burn probability — controls subgraph density (default: 0.3)')
     pipeline_parser.add_argument('-num_subgraphs', type=int, default=None,
                                  help='Number of subgraphs to generate. Default: ceil(N / subsample_size)')
+    pipeline_parser.add_argument('-kl_schedule', type=str, default='none',
+                                 choices=['none', 'linear', 'cyclic'],
+                                 help='KL annealing schedule for the VAE coefficient. '
+                                      '"linear" ramps β from 0 to kl_weight over -kl_anneal_epochs. '
+                                      '"cyclic" (Fu et al. NAACL 2019) resets β every -kl_cycle_epochs '
+                                      'and ramps over the first -kl_ramp_ratio fraction of the cycle. '
+                                      'Use to address posterior collapse (default: none).')
+    pipeline_parser.add_argument('-kl_anneal_epochs', type=int, default=0,
+                                 help='Epochs over which β linearly ramps 0 → kl_weight when '
+                                      '-kl_schedule linear (required for linear).')
+    pipeline_parser.add_argument('-kl_cycle_epochs', type=int, default=0,
+                                 help='Epochs per cycle when -kl_schedule cyclic (required for cyclic). '
+                                      'Paper M = ceil(num_epochs / kl_cycle_epochs).')
+    pipeline_parser.add_argument('-kl_ramp_ratio', type=float, default=0.5,
+                                 help='Fraction of cycle spent ramping when -kl_schedule cyclic '
+                                      '(paper R, default 0.5). 0.5 → first 50%% ramps 0→1, last 50%% '
+                                      'sits at 1.')
 
     pipeline_args, _ = pipeline_parser.parse_known_args()
 
@@ -141,6 +183,26 @@ def main():
             bad.append('--mdn_feat (without --mdn_base logit_normal)')
         if bad:
             raise ValueError('--normalize cdf is mutually exclusive with: ' + ', '.join(bad))
+
+    # KL annealing schedule validation
+    if pipeline_args.kl_schedule == 'linear' and pipeline_args.kl_anneal_epochs <= 0:
+        raise ValueError('-kl_schedule linear requires -kl_anneal_epochs > 0')
+    if pipeline_args.kl_schedule == 'cyclic':
+        if pipeline_args.kl_cycle_epochs <= 0:
+            raise ValueError('-kl_schedule cyclic requires -kl_cycle_epochs > 0')
+        if not (0 < pipeline_args.kl_ramp_ratio <= 1):
+            raise ValueError('-kl_ramp_ratio must satisfy 0 < ratio <= 1')
+    if pipeline_args.kl_schedule != 'none' and not pipeline_args.vae_feat:
+        print(f'WARNING: -kl_schedule={pipeline_args.kl_schedule} has no effect '
+              'when --vae_feat is off (kl_weight is unused).')
+    if (pipeline_args.kl_schedule == 'linear'
+            and pipeline_args.kl_anneal_epochs > cmd_args.num_epochs):
+        print(f'WARNING: -kl_anneal_epochs ({pipeline_args.kl_anneal_epochs}) > num_epochs '
+              f'({cmd_args.num_epochs}); β will never reach 1.')
+    if (pipeline_args.kl_schedule == 'cyclic'
+            and pipeline_args.kl_cycle_epochs > cmd_args.num_epochs):
+        print(f'WARNING: -kl_cycle_epochs ({pipeline_args.kl_cycle_epochs}) > num_epochs '
+              f'({cmd_args.num_epochs}); β will never reach 1.')
 
     set_device(cmd_args.gpu)
     setup_treelib(cmd_args)
@@ -302,6 +364,10 @@ def main():
                                        kl_weight=pipeline_args.kl_weight,
                                        cdf_mode=(pipeline_args.normalize == 'cdf')).to(cmd_args.device)
 
+    # The user-set kl_weight is the schedule's β=1 ceiling; preserve it since
+    # model.kl_weight will be mutated per-epoch by the annealing schedule.
+    base_kl_weight = pipeline_args.kl_weight
+
     optimizer = optim.Adam(model.parameters(), lr=cmd_args.learning_rate, weight_decay=1e-4)
 
     # Parameter count breakdown — total + top-level children.
@@ -397,6 +463,14 @@ def main():
     pbar = tqdm(range(cmd_args.num_epochs))
     print(f'Start learn ({len(subgraphs)} subgraph(s), loss weights relative to struct: cont={user_w_cont}, label={user_w_label})')
     for epoch in pbar:
+        # KL annealing: update the effective coefficient before any forward pass this epoch.
+        # base_kl_weight is the schedule's β=1 ceiling (the user's -kl_weight CLI value).
+        kl_beta = compute_kl_beta(epoch, pipeline_args.kl_schedule,
+                                  pipeline_args.kl_anneal_epochs,
+                                  pipeline_args.kl_cycle_epochs,
+                                  pipeline_args.kl_ramp_ratio)
+        model.kl_weight = kl_beta * base_kl_weight
+
         # Anneal scheduled sampling probability linearly from 0 to ss_max_prob
         if epoch < ss_start_epoch or ss_max_prob <= 0:
             model.ss_prob = 0.0
@@ -469,7 +543,8 @@ def main():
         ll_label_val = -epoch_ll_label / epoch_nodes
         kl_val       = epoch_kl / epoch_nodes
         # KL adds kl_weight*kl_val to the displayed loss; strip it out for the structure residual.
-        kl_loss_contrib = pipeline_args.kl_weight * kl_val if pipeline_args.vae_feat else 0.0
+        # Use model.kl_weight (current effective β·base) so the residual is honest under annealing.
+        kl_loss_contrib = model.kl_weight * kl_val if pipeline_args.vae_feat else 0.0
         ll_struct_val = avg_loss - ll_cont_val - ll_bin_val - ll_label_val - kl_loss_contrib
 
         # Track memory usage
@@ -480,7 +555,7 @@ def main():
             peak_vram_mb = max(peak_vram_mb, vram_mb)
 
         bin_desc = f" | bin: {ll_bin_val:.4f}" if model.bin_feat_dim > 0 else ""
-        kl_desc = f" | kl: {kl_val:.4f}" if pipeline_args.vae_feat else ""
+        kl_desc = f" | β: {kl_beta:.2f} kl: {kl_val:.4f}" if pipeline_args.vae_feat else ""
         n_sg = len(subgraphs)
         grad_desc = (f" | ‖g‖: {epoch_grad_total / n_sg:.2e} "
                      f"(feat {epoch_grad_feat / n_sg:.1e}, "
@@ -505,6 +580,12 @@ def main():
     mask_tag = '_masked' if pipeline_args.mask_test_labels else ''
     bin_tag = '_binfeat' if pipeline_args.binary_feat else ''
     vae_tag = f'_vae{pipeline_args.vae_dim}_kl{pipeline_args.kl_weight}' if pipeline_args.vae_feat else ''
+    if pipeline_args.vae_feat and pipeline_args.kl_schedule == 'linear':
+        kl_sched_tag = f'_klan{pipeline_args.kl_anneal_epochs}'
+    elif pipeline_args.vae_feat and pipeline_args.kl_schedule == 'cyclic':
+        kl_sched_tag = f'_klcyc{pipeline_args.kl_cycle_epochs}r{int(pipeline_args.kl_ramp_ratio * 100)}'
+    else:
+        kl_sched_tag = ''
     cat_tag = f'_cat{pipeline_args.n_bins}_smed{pipeline_args.bin_sigma.median().item():.2f}' if pipeline_args.cat_feat else ''
     if pipeline_args.mdn_feat:
         mdn_base_tag = 'lnmdn' if pipeline_args.mdn_base == 'logit_normal' else 'mdn'
@@ -512,7 +593,7 @@ def main():
     else:
         mdn_tag = ''
     sub_tag = f'_sub{len(subgraphs)}_size{pipeline_args.subsample_size}_p{pipeline_args.burn_prob}' if pipeline_args.subsample else ''
-    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{vae_tag}{cat_tag}{mdn_tag}{sub_tag}'
+    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{vae_tag}{kl_sched_tag}{cat_tag}{mdn_tag}{sub_tag}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
 
     model.eval()

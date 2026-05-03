@@ -71,7 +71,7 @@ Train BiGG conditional model (features + labels). Defaults: `tolokers 1024 1 50 
 * `logvar_floor`: Lower clamp for log-variance in hetero_feat mode (default: -4.0).
 * `binary_feat`: `true` to auto-detect binary feature columns and use BCE loss + Bernoulli sampling instead of Gaussian head. Appends `_binfeat` to save name. Binary columns skip normalization.
 
-**`bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor] [mdn_base]`**
+**`bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor] [mdn_base] [kl_schedule] [kl_anneal_epochs] [kl_cycle_epochs] [kl_ramp_ratio]`**
 Train BiGG with forest fire subsampling for VRAM-limited training. Same args as above, plus:
 * `subsample_size`: target nodes per subgraph (default: 2000).
 * `burn_prob`: forest fire burn probability — controls subgraph density (default: 0.3).
@@ -86,6 +86,10 @@ Train BiGG with forest fire subsampling for VRAM-limited training. Same args as 
 * `mdn_components`: number of mixture components per feature when `mdn_feat` is on (default: 8).
 * `mdn_logsigma_floor`: lower clamp for MDN component log-sigma (default: -4.0).
 * `mdn_base`: per-component base distribution — `gaussian` (default; unbounded targets) or `logit_normal` (targets in [0,1]; pairs with `--normalize cdf`). Use `logit_normal` whenever feature targets are CDF-encoded.
+* `kl_schedule`: KL annealing schedule for the VAE coefficient — `none` (default; constant `kl_weight`), `linear` (warmup then constant), or `cyclic` (Fu et al. NAACL 2019 — repeated reset+ramp). Use to address posterior collapse when `vae_feat` is on. Schedule produces β ∈ [0, 1]; the effective KL coefficient is `β × kl_weight`. Appends `_klan{N}` (linear) or `_klcyc{C}r{int(R*100)}` (cyclic) to save name when `vae_feat` is on.
+* `kl_anneal_epochs`: linear ramp duration (epochs) — β ramps 0 → 1 over this many epochs, then sits at 1. Required when `kl_schedule=linear`.
+* `kl_cycle_epochs`: cyclic schedule cycle length (epochs) — β resets to 0 every cycle. Required when `kl_schedule=cyclic`. Paper M = `ceil(epochs / kl_cycle_epochs)`.
+* `kl_ramp_ratio`: cyclic ramp fraction within each cycle (paper R, default 0.5). 0.5 → first half of cycle ramps 0→1, second half sits at 1. Lower values = faster ramp, longer fix phase.
 
 **`bash scripts/train/train_bigg_structure.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim]`**
 Train BiGG structure-only baseline. Defaults: `tolokers 128 1 100 0.001 256`.
