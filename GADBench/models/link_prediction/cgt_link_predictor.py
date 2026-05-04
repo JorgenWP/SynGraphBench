@@ -95,6 +95,12 @@ class MergedCompGraphLinkPredictor(BaseDetector):
             compute_template_edges(merged_adj)
         self.per_tree_num_nodes = self.num_merged_nodes // 2
 
+        # Cache of pre-built merged-CG batches for fixed eval edge sets
+        # (val_pos/val_neg/test_pos/test_neg). Keyed by id(edges) so the
+        # immutable edge tensors created once per trial deduplicate the
+        # ~414+ batches/epoch otherwise rebuilt for evaluation.
+        self._eval_batch_cache = {}
+
     def _edge_loader(self, edges):
         ds = MergedOriginalCompGraphDataset(
             self.train_adj_list, self.features, edges,
@@ -106,8 +112,7 @@ class MergedCompGraphLinkPredictor(BaseDetector):
             ds, batch_size=self.batch_size, shuffle=False,
             collate_fn=collate, num_workers=4)
 
-    def _score_batch(self, batched):
-        batched = batched.to(self.device)
+    def _score_batch_on_device(self, batched):
         h = self.model(batched)
         h_u, h_v = extract_edge_root_embeddings(
             batched, h, self.per_tree_num_nodes)
@@ -115,14 +120,27 @@ class MergedCompGraphLinkPredictor(BaseDetector):
             return self.decoder.score_from_pair(h_u, h_v)
         return (h_u * h_v).sum(dim=-1)
 
+    def _score_batch(self, batched):
+        return self._score_batch_on_device(batched.to(self.device))
+
     def _score_edges(self, edges):
-        """Score edges by building batched merged computation graphs."""
+        """Score edges by building batched merged computation graphs.
+
+        For fixed edge sets (val_pos/val_neg/test_pos/test_neg) we build
+        the batched merged-CG graphs once and cache them; subsequent
+        calls only re-run the GNN forward. Train-time edges (resampled
+        every epoch) are not cached — `id(edges)` differs per call.
+        """
         if edges.shape[0] == 0:
             return torch.empty(0, device=self.device)
 
-        scores = []
-        for batched in self._edge_loader(edges):
-            scores.append(self._score_batch(batched))
+        cache_key = id(edges)
+        cached = self._eval_batch_cache.get(cache_key)
+        if cached is None:
+            cached = [b.to(self.device) for b in self._edge_loader(edges)]
+            self._eval_batch_cache[cache_key] = cached
+
+        scores = [self._score_batch_on_device(b) for b in cached]
         return torch.cat(scores, dim=0)
 
     def _train_step(self, edges, labels):
