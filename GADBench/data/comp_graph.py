@@ -83,6 +83,119 @@ def compute_template_edges(tree_adj):
     return src, dst, n
 
 
+def _build_csr_adj(adj_list, num_nodes):
+    """Build CSR-style flat adjacency from a list of neighbor lists.
+
+    Includes a sentinel row at index `num_nodes` (the empty_id) with
+    degree 0, so empty parents propagate empty children naturally
+    through deeper sampling levels.
+
+    Returns:
+        adj_flat:    int64[E] concatenated neighbor IDs.
+        adj_offsets: int64[N+2] prefix-sum of degrees (incl. empty_id row).
+        degrees:     int64[N+1] degree per node; degrees[empty_id]=0.
+    """
+    n = num_nodes
+    degrees = np.zeros(n + 1, dtype=np.int64)
+    for i, nbrs in enumerate(adj_list):
+        degrees[i] = len(nbrs)
+    adj_offsets = np.zeros(n + 2, dtype=np.int64)
+    np.cumsum(degrees, out=adj_offsets[1:])
+    adj_flat = np.empty(int(adj_offsets[-1]), dtype=np.int64)
+    for i, nbrs in enumerate(adj_list):
+        if nbrs:
+            start = adj_offsets[i]
+            adj_flat[start:start + len(nbrs)] = nbrs
+    return adj_flat, adj_offsets, degrees
+
+
+def _floyd_indices(degrees, k):
+    """Return [P, k] of distinct indices in [0, degrees[p]) per parent.
+
+    Vectorized Floyd's algorithm: O(P*k^2) comparisons + O(P*k) PRNG
+    draws, independent of max degree. For parents with degree < k, the
+    returned values may exceed degrees[p]; the caller masks those rows.
+    """
+    P = degrees.shape[0]
+    eff = np.maximum(degrees, k).astype(np.int64)
+    upper = eff[:, None] - k + np.arange(k, dtype=np.int64)[None, :] + 1
+    t = (np.random.random((P, k)) * upper).astype(np.int64)
+    out = np.empty((P, k), dtype=np.int64)
+    out[:, 0] = t[:, 0]
+    for j in range(1, k):
+        collision = (out[:, :j] == t[:, j:j + 1]).any(axis=1)
+        replacement = eff - k + j
+        out[:, j] = np.where(collision, replacement, t[:, j])
+    return out
+
+
+def _sample_neighbors_csr(parents, k, adj_flat, adj_offsets, degrees,
+                          empty_id):
+    """Per parent, sample k neighbor IDs uniformly without replacement.
+
+    Pads with empty_id when degree < k. Three branches:
+      A. degree >= k:    Floyd's index sampler + CSR gather.
+      B. 0 < degree < k: take all real neighbors, pad rest with empty_id.
+      C. degree == 0:    all empty_id (default).
+    """
+    P = parents.shape[0]
+    d = degrees[parents]
+    out = np.full((P, k), empty_id, dtype=np.int64)
+
+    rich = d >= k
+    if rich.any():
+        rd = d[rich]
+        idx = _floyd_indices(rd, k)
+        flat = adj_offsets[parents[rich]][:, None] + idx
+        out[rich] = adj_flat[flat]
+
+    short = (d > 0) & (d < k)
+    if short.any():
+        sd = d[short]
+        max_sd = int(sd.max())
+        col = np.arange(max_sd, dtype=np.int64)[None, :]
+        in_bounds = col < sd[:, None]
+        flat = adj_offsets[parents[short]][:, None] + np.where(
+            in_bounds, col, 0)
+        gathered = adj_flat[flat]
+        gathered = np.where(in_bounds, gathered, empty_id)
+        out[short, :max_sd] = gathered
+
+    return out
+
+
+def _sample_tree_batch(seeds, step_num, sample_num, noise_num, node_num,
+                       adj_flat, adj_offsets, degrees, empty_id):
+    """Batched tree sampling. Returns [B, T] node IDs per seed.
+
+    Each parent produces (sample_num + noise_num) children per level.
+    Output ordering matches the v3 per-edge sampler (BFS, siblings of
+    one parent contiguous), so it lines up with the template tree
+    adjacency from `compute_tree_adj` / `compute_merged_tree_adj`.
+    """
+    seeds = np.asarray(seeds, dtype=np.int64).reshape(-1)
+    B = seeds.shape[0]
+    total = sample_num + noise_num
+    nodes = [seeds.reshape(B, 1)]
+    parents = seeds
+    parents_per_tree = 1
+    for _ in range(step_num):
+        P = parents.shape[0]
+        children = _sample_neighbors_csr(
+            parents, sample_num, adj_flat, adj_offsets, degrees, empty_id)
+        if noise_num > 0:
+            # noise_num is 0 in active link/AD paths; with-replacement
+            # noise here vs v3's permutation-based without-replacement is
+            # statistically negligible for noise_num << node_num.
+            noise = np.random.randint(
+                0, node_num, size=(P, noise_num), dtype=np.int64)
+            children = np.concatenate([children, noise], axis=1)
+        nodes.append(children.reshape(B, parents_per_tree * total))
+        parents = children.reshape(-1)
+        parents_per_tree *= total
+    return np.concatenate(nodes, axis=1)
+
+
 class OriginalCompGraphDataset(Dataset):
     """Build computation graph trees from original graph data.
 
@@ -92,9 +205,8 @@ class OriginalCompGraphDataset(Dataset):
 
     def __init__(self, adj_list, features, labels, node_ids,
                  step_num, sample_num, noise_num=0, self_connection=False):
-        self.adj_list = adj_list
         self.labels = labels
-        self.node_ids = node_ids
+        self.node_ids = np.asarray(node_ids, dtype=np.int64)
         self.node_num = features.shape[0]
         self.step_num = step_num
         self.sample_num = sample_num
@@ -107,6 +219,10 @@ class OriginalCompGraphDataset(Dataset):
             [features, np.zeros((1, features.shape[1]), dtype=features.dtype)])
         self.empty_id = features.shape[0]
 
+        # CSR-style adjacency for vectorized batch sampling.
+        self.adj_flat, self.adj_offsets, self.degrees = _build_csr_adj(
+            adj_list, self.node_num)
+
         tree_adj = compute_tree_adj(
             step_num, self.total_sample, self_connection)
         self.template_src, self.template_dst, self.num_tree_nodes = \
@@ -118,41 +234,22 @@ class OriginalCompGraphDataset(Dataset):
     def get_labels(self):
         return self.labels[self.node_ids]
 
+    def __getitems__(self, indices):
+        idx = np.asarray(indices, dtype=np.int64)
+        seeds = self.node_ids[idx]
+        trees = _sample_tree_batch(
+            seeds, self.step_num, self.sample_num, self.noise_num,
+            self.node_num, self.adj_flat, self.adj_offsets, self.degrees,
+            self.empty_id)
+        feats = self.features[trees]
+        feats_t = torch.from_numpy(np.ascontiguousarray(feats))
+        return [{
+            "feat": feats_t[i],
+            "label": torch.LongTensor([self.labels[int(seeds[i])]]),
+        } for i in range(len(idx))]
+
     def __getitem__(self, index):
-        seed_id = self.node_ids[index]
-        sampled = [seed_id]
-        curr_targets = [seed_id]
-
-        for _ in range(self.step_num):
-            new_targets = []
-            for tid in curr_targets:
-                if tid == self.empty_id:
-                    neighbors = []
-                else:
-                    neighbors = self.adj_list[tid]
-
-                if len(neighbors) == 0:
-                    picked = [self.empty_id] * self.sample_num
-                elif len(neighbors) < self.sample_num:
-                    picked = neighbors + [self.empty_id] * (
-                        self.sample_num - len(neighbors))
-                else:
-                    picked = np.random.choice(
-                        neighbors, self.sample_num, replace=False).tolist()
-
-                if self.noise_num > 0:
-                    noise = np.random.permutation(
-                        self.node_num)[:self.noise_num].tolist()
-                    picked = picked + noise
-
-                sampled.extend(picked)
-                new_targets.extend(picked)
-            curr_targets = new_targets
-
-        return {
-            "feat": torch.FloatTensor(self.features[sampled]),
-            "label": torch.LongTensor([self.labels[seed_id]]),
-        }
+        return self.__getitems__([index])[0]
 
 
 class SyntheticCompGraphDataset(Dataset):
@@ -261,7 +358,6 @@ class MergedOriginalCompGraphDataset(Dataset):
 
     def __init__(self, adj_list, features, edges, step_num, sample_num,
                  noise_num=0, self_connection=False):
-        self.adj_list = adj_list
         if torch.is_tensor(edges):
             edges = edges.cpu().numpy()
         self.edges = np.asarray(edges, dtype=np.int64)
@@ -277,6 +373,10 @@ class MergedOriginalCompGraphDataset(Dataset):
             [features, np.zeros((1, features.shape[1]), dtype=features.dtype)])
         self.empty_id = features.shape[0]
 
+        # CSR-style adjacency for vectorized batch sampling.
+        self.adj_flat, self.adj_offsets, self.degrees = _build_csr_adj(
+            adj_list, self.node_num)
+
         merged = compute_merged_tree_adj(
             step_num, self.total_sample, self_connection)
         self.template_src, self.template_dst, self.num_merged_nodes = \
@@ -286,41 +386,23 @@ class MergedOriginalCompGraphDataset(Dataset):
     def __len__(self):
         return len(self.edges)
 
-    def _sample_tree(self, seed_id):
-        sampled = [seed_id]
-        curr_targets = [seed_id]
-        for _ in range(self.step_num):
-            new_targets = []
-            for tid in curr_targets:
-                if tid == self.empty_id:
-                    neighbors = []
-                else:
-                    neighbors = self.adj_list[tid]
-                if len(neighbors) == 0:
-                    picked = [self.empty_id] * self.sample_num
-                elif len(neighbors) < self.sample_num:
-                    picked = list(neighbors) + [self.empty_id] * (
-                        self.sample_num - len(neighbors))
-                else:
-                    picked = np.random.choice(
-                        neighbors, self.sample_num, replace=False).tolist()
-                if self.noise_num > 0:
-                    noise = np.random.permutation(
-                        self.node_num)[:self.noise_num].tolist()
-                    picked = picked + noise
-                sampled.extend(picked)
-                new_targets.extend(picked)
-            curr_targets = new_targets
-        return sampled
+    def __getitems__(self, indices):
+        idx = np.asarray(indices, dtype=np.int64)
+        edges_batch = self.edges[idx]                  # [B, 2]
+        B = edges_batch.shape[0]
+        # Concatenate u and v seeds so both trees sample in one call.
+        seeds = np.concatenate([edges_batch[:, 0], edges_batch[:, 1]])
+        trees = _sample_tree_batch(
+            seeds, self.step_num, self.sample_num, self.noise_num,
+            self.node_num, self.adj_flat, self.adj_offsets, self.degrees,
+            self.empty_id)                             # [2B, T]
+        nodes = np.concatenate([trees[:B], trees[B:]], axis=1)  # [B, 2T]
+        feats = self.features[nodes]                   # [B, 2T, F]
+        feats_t = torch.from_numpy(np.ascontiguousarray(feats))
+        return [{"feat": feats_t[i]} for i in range(B)]
 
     def __getitem__(self, index):
-        u = int(self.edges[index, 0])
-        v = int(self.edges[index, 1])
-        sampled_u = self._sample_tree(u)
-        sampled_v = self._sample_tree(v)
-        feat = np.concatenate(
-            [self.features[sampled_u], self.features[sampled_v]], axis=0)
-        return {"feat": torch.FloatTensor(feat)}
+        return self.__getitems__([index])[0]
 
 
 def make_merged_comp_graph_collate(template_src, template_dst, num_merged_nodes):
