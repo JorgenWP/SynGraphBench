@@ -1,4 +1,8 @@
 import os
+import sys
+import json
+import time
+import traceback
 import argparse
 import psutil
 import dgl
@@ -152,6 +156,27 @@ def main():
                                  help='Fraction of cycle spent ramping when -kl_schedule cyclic '
                                       '(paper R, default 0.5). 0.5 → first 50%% ramps 0→1, last 50%% '
                                       'sits at 1.')
+    pipeline_parser.add_argument('-subsample_method', type=str, default='forest_fire',
+                                 choices=['forest_fire', 'metis'],
+                                 help='Subsampling method when --subsample is on. "forest_fire" '
+                                      'uses bigg\'s primitive (default; preserves existing behavior). '
+                                      '"metis" partitions the graph into K disjoint parts via pymetis.')
+    pipeline_parser.add_argument('-multiplicity_cap', type=str, default='minf',
+                                 choices=['m1', 'm2', 'minf'],
+                                 help='Per-node multiplicity cap across forest_fire draws. '
+                                      '"m1" = disjoint, "m2" = up to 2 draws per node, '
+                                      '"minf" = no cap (default; preserves existing behavior). '
+                                      'Ignored for metis (M=1 by construction).')
+    pipeline_parser.add_argument('-num_train_subgraphs', type=int, default=None,
+                                 help='Cap the training inner loop at the first N partitions '
+                                      '(default: all sampled subgraphs). For capacity benchmarking.')
+    pipeline_parser.add_argument('-num_gen_subgraphs', type=int, default=None,
+                                 help='Cap the generation loop at the first N partitions '
+                                      '(default: same as num_train_subgraphs). For capacity benchmarking.')
+    pipeline_parser.add_argument('-timing_log_path', type=str, default=None,
+                                 help='If set, write a JSON timing log (train/gen seconds, peak VRAM, '
+                                      'partition stats, status) to this path. Always written even on '
+                                      'failure; pipeline exits with code 2 on caught error.')
 
     pipeline_args, _ = pipeline_parser.parse_known_args()
 
@@ -254,42 +279,155 @@ def main():
     #Convert topology for treelib
     graph_nx = dgl_to_networkx(graph)
 
+    # --- Capacity-benchmark timing state ---
+    # Always populated; only flushed to disk when -timing_log_path is set.
+    # Phases (sampling/training/generation) update this in-place and the
+    # finalizer writes JSON regardless of success/failure.
+    timing_state = {
+        'dataset': DATASET,
+        'subsample_method': pipeline_args.subsample_method,
+        'multiplicity_cap': pipeline_args.multiplicity_cap,
+        'num_train_subgraphs': None,
+        'num_gen_subgraphs': None,
+        'num_epochs': cmd_args.num_epochs,
+        'partitions': [],
+        'avg_nodes': None,
+        'avg_edges': None,
+        'avg_density': None,
+        'train_seconds': None,
+        'gen_seconds': None,
+        'peak_vram_mb': None,
+        'peak_ram_mb': None,
+        'status': 'ok',
+        'error_msg': None,
+        'failure_phase': None,
+    }
+
+    def _write_timing_log():
+        if pipeline_args.timing_log_path:
+            os.makedirs(os.path.dirname(os.path.abspath(pipeline_args.timing_log_path)),
+                        exist_ok=True)
+            with open(pipeline_args.timing_log_path, 'w') as f:
+                json.dump(timing_state, f, indent=2)
+
+    def _record_failure(phase, exc):
+        msg = str(exc)
+        is_oom = (isinstance(exc, torch.cuda.OutOfMemoryError)
+                  or 'out of memory' in msg.lower())
+        timing_state['failure_phase'] = phase
+        timing_state['status'] = f'oom_{phase}' if is_oom else 'other_error'
+        timing_state['error_msg'] = traceback.format_exc()[-2000:]
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
     # --- Build list of (gid, sub_node_data, sub_label_mask, sub_num_nodes) ---
     # When subsampling is disabled this list has a single entry for the full graph.
-    if pipeline_args.subsample:
-        import math
-        n_total = graph_nx.number_of_nodes()
-        num_subgraphs = pipeline_args.num_subgraphs or math.ceil(n_total / pipeline_args.subsample_size)
-        print(f'Subsampling enabled: {num_subgraphs} forest fire samples, '
-              f'target_size={pipeline_args.subsample_size}, burn_prob={pipeline_args.burn_prob}')
-        raw_partitions = []
-        for _ in range(num_subgraphs):
-            raw_partitions.append(forest_fire_subsample(
-                graph_nx, node_data,
-                target_size=pipeline_args.subsample_size,
-                burn_prob=pipeline_args.burn_prob,
-            ))
-        print(f'  Produced {len(raw_partitions)} samples '
-              f'(sizes: {[sg.number_of_nodes() for sg, _, _ in raw_partitions]})')
+    try:
+        if pipeline_args.subsample:
+            import math
+            n_total = graph_nx.number_of_nodes()
+            num_subgraphs = pipeline_args.num_subgraphs or math.ceil(n_total / pipeline_args.subsample_size)
 
-        subgraphs = []  # list of (gid, sub_node_data, sub_label_mask, sub_num_nodes)
-        for sg, sub_nd, orig_idx in raw_partitions:
-            if pipeline_args.bfs_preprocess:
-                sg, sub_nd, perm = bfs_reorder(sg, sub_nd)
-                sub_lm = label_mask[orig_idx[perm]] if label_mask is not None else None
+            # Dispatch: keep the legacy bigg primitive for the default
+            # (forest_fire + minf) path so existing scripts are bit-identical.
+            # Otherwise route through the richer sampler in
+            # experiments/subsample_search/sampling.py.
+            use_legacy = (pipeline_args.subsample_method == 'forest_fire'
+                          and pipeline_args.multiplicity_cap == 'minf')
+
+            if use_legacy:
+                print(f'Subsampling enabled: {num_subgraphs} forest fire samples, '
+                      f'target_size={pipeline_args.subsample_size}, burn_prob={pipeline_args.burn_prob}')
+                raw_partitions = []
+                for _ in range(num_subgraphs):
+                    raw_partitions.append(forest_fire_subsample(
+                        graph_nx, node_data,
+                        target_size=pipeline_args.subsample_size,
+                        burn_prob=pipeline_args.burn_prob,
+                    ))
             else:
-                sub_lm = label_mask[orig_idx] if label_mask is not None else None
-            gid = TreeLib.InsertGraph(sg)
-            subgraphs.append((gid, sub_nd.to(cmd_args.device), sub_lm, sg.number_of_nodes()))
-    else:
-        # Single full graph
-        if pipeline_args.bfs_preprocess:
-            graph_nx, node_data, perm = bfs_reorder(graph_nx, node_data)
-            list_node_feats = [node_data]
-            if label_mask is not None:
-                label_mask = label_mask[perm]
-        TreeLib.InsertGraph(graph_nx)
-        subgraphs = [(0, node_data, label_mask, graph_nx.number_of_nodes())]
+                # Lazy bootstrap of experiments/subsample_search/sampling
+                _here = os.path.dirname(os.path.abspath(__file__))
+                _proj_root = os.path.abspath(os.path.join(_here, '..', '..', '..'))
+                _sampler_dir = os.path.join(_proj_root, 'experiments', 'subsample_search')
+                if _sampler_dir not in sys.path:
+                    sys.path.insert(0, _sampler_dir)
+                from sampling import sample_with_method  # noqa: E402
+
+                cap_map = {'m1': 1, 'm2': 2, 'minf': None}
+                mcap = cap_map[pipeline_args.multiplicity_cap]
+                print(f'Subsampling enabled (method={pipeline_args.subsample_method}, '
+                      f'multiplicity_cap={pipeline_args.multiplicity_cap}): '
+                      f'K={num_subgraphs}, target_size={pipeline_args.subsample_size}, '
+                      f'burn_prob={pipeline_args.burn_prob}')
+                raw_partitions = sample_with_method(
+                    method=pipeline_args.subsample_method,
+                    g_nx=graph_nx,
+                    node_data=node_data,
+                    K=num_subgraphs,
+                    seed=cmd_args.seed,
+                    multiplicity_cap=(1 if pipeline_args.subsample_method == 'metis' else mcap),
+                    target_size=pipeline_args.subsample_size,
+                    burn_prob=pipeline_args.burn_prob,
+                )
+
+            print(f'  Produced {len(raw_partitions)} samples '
+                  f'(sizes: {[sg.number_of_nodes() for sg, _, _ in raw_partitions]})')
+
+            # Optionally cap the trained-on set (capacity benchmark trains on N of K).
+            if pipeline_args.num_train_subgraphs is not None:
+                raw_partitions = raw_partitions[:pipeline_args.num_train_subgraphs]
+                print(f'  Capped to first {len(raw_partitions)} partitions for training '
+                      f'(num_train_subgraphs={pipeline_args.num_train_subgraphs}).')
+
+            subgraphs = []  # list of (gid, sub_node_data, sub_label_mask, sub_num_nodes)
+            for sg, sub_nd, orig_idx in raw_partitions:
+                if pipeline_args.bfs_preprocess:
+                    sg, sub_nd, perm = bfs_reorder(sg, sub_nd)
+                    sub_lm = label_mask[orig_idx[perm]] if label_mask is not None else None
+                else:
+                    sub_lm = label_mask[orig_idx] if label_mask is not None else None
+                gid = TreeLib.InsertGraph(sg)
+                subgraphs.append((gid, sub_nd.to(cmd_args.device), sub_lm, sg.number_of_nodes()))
+
+            # Record per-partition (n, m, density) for the trained-on set.
+            for sg_nx, _, _ in raw_partitions:
+                n = sg_nx.number_of_nodes()
+                m = sg_nx.number_of_edges()
+                density = (2.0 * m) / (n * (n - 1)) if n > 1 else 0.0
+                timing_state['partitions'].append({'n': n, 'm': m, 'density': density})
+        else:
+            # Single full graph
+            if pipeline_args.bfs_preprocess:
+                graph_nx, node_data, perm = bfs_reorder(graph_nx, node_data)
+                list_node_feats = [node_data]
+                if label_mask is not None:
+                    label_mask = label_mask[perm]
+            TreeLib.InsertGraph(graph_nx)
+            subgraphs = [(0, node_data, label_mask, graph_nx.number_of_nodes())]
+            n = graph_nx.number_of_nodes()
+            m = graph_nx.number_of_edges()
+            density = (2.0 * m) / (n * (n - 1)) if n > 1 else 0.0
+            timing_state['partitions'].append({'n': n, 'm': m, 'density': density})
+    except Exception as exc:
+        _record_failure('sampling', exc)
+        if pipeline_args.timing_log_path:
+            _write_timing_log()
+            print(f'[capacity] sampling phase failed ({timing_state["status"]}); '
+                  f'JSON written to {pipeline_args.timing_log_path}.', file=sys.stderr)
+            sys.exit(2)
+        raise
+
+    timing_state['num_train_subgraphs'] = len(subgraphs)
+    if timing_state['partitions']:
+        ns = [p['n'] for p in timing_state['partitions']]
+        ms = [p['m'] for p in timing_state['partitions']]
+        ds = [p['density'] for p in timing_state['partitions']]
+        timing_state['avg_nodes'] = sum(ns) / len(ns)
+        timing_state['avg_edges'] = sum(ms) / len(ms)
+        timing_state['avg_density'] = sum(ds) / len(ds)
 
     cmd_args.has_node_feats = True
     cmd_args.max_num_nodes = max(sub_num_nodes for _, _, _, sub_num_nodes in subgraphs)
@@ -430,141 +568,166 @@ def main():
     if gpu_available:
         torch.cuda.reset_peak_memory_stats()
 
-    # Calibration: forward-only pass on first subgraph to capture loss magnitudes
-    print('Calibration pass (no weight update)...')
-    model.reset_loss_trackers()
-    calib_gid, calib_nd, calib_lm, calib_total = subgraphs[0]
-    with torch.no_grad():
-        # Use forward_train on first chunk (sqrtn_forward_backward calls .backward(),
-        # incompatible with no_grad context)
-        calib_num = min(calib_total,
-                        calib_total if cmd_args.blksize < 0 else cmd_args.blksize)
-        ll, _ = model.forward_train([calib_gid],
-                                    node_feats=calib_nd[:calib_num],
-                                    num_nodes=calib_num,
-                                    label_mask=calib_lm[:calib_num] if calib_lm is not None else None)
-        calib_loss = (-ll / calib_num).item()
-
-    calib_cont = abs(model._ll_cont / calib_num) or 1.0
-    calib_bin = abs(model._ll_bin / calib_num) or 1.0
-    calib_label = abs(model._ll_label / calib_num) or 1.0
-    # KL is in calib_loss when VAE is on; strip it out so it isn't baked into w_cont/w_bin/w_label.
-    calib_kl_contrib = pipeline_args.kl_weight * abs(model._kl / calib_num) if pipeline_args.vae_feat else 0.0
-    calib_struct = abs(calib_loss - calib_cont - calib_bin - calib_label - calib_kl_contrib) or 1.0
-
-    model.w_cont = (calib_struct / calib_cont) * user_w_cont
-    model.w_bin = (calib_struct / calib_bin) * user_w_cont  # binary shares cont weight
-    model.w_label = (calib_struct / calib_label) * user_w_label
-
-    print(f'Calibration magnitudes — struct: {calib_struct:.4f}, '
-          f'cont: {calib_cont:.4f}, bin: {calib_bin:.4f}, label: {calib_label:.4f}')
-    print(f'Dynamic weights — w_cont: {model.w_cont:.4f}, w_bin: {model.w_bin:.4f}, w_label: {model.w_label:.4f}')
-
-    pbar = tqdm(range(cmd_args.num_epochs))
-    print(f'Start learn ({len(subgraphs)} subgraph(s), loss weights relative to struct: cont={user_w_cont}, label={user_w_label})')
-    for epoch in pbar:
-        # KL annealing: update the effective coefficient before any forward pass this epoch.
-        # base_kl_weight is the schedule's β=1 ceiling (the user's -kl_weight CLI value).
-        kl_beta = compute_kl_beta(epoch, pipeline_args.kl_schedule,
-                                  pipeline_args.kl_anneal_epochs,
-                                  pipeline_args.kl_cycle_epochs,
-                                  pipeline_args.kl_ramp_ratio)
-        model.kl_weight = kl_beta * base_kl_weight
-
-        # Anneal scheduled sampling probability linearly from 0 to ss_max_prob
-        if epoch < ss_start_epoch or ss_max_prob <= 0:
-            model.ss_prob = 0.0
-        else:
-            model.ss_prob = ss_max_prob * (epoch - ss_start_epoch) / ss_ramp_epochs
-
-        epoch_loss_val = 0.0
-        epoch_ll_cont = 0.0
-        epoch_ll_bin = 0.0
-        epoch_ll_label = 0.0
-        epoch_kl = 0.0
-        epoch_nodes = 0
-        epoch_grad_total = 0.0
-        epoch_grad_feat = 0.0
-        epoch_grad_label = 0.0
-        epoch_grad_state = 0.0
-        epoch_grad_struct = 0.0
-
-        for gid, sub_nd, sub_lm, sub_num_nodes in subgraphs:
-            optimizer.zero_grad()
-            model.reset_loss_trackers()
-
-            if cmd_args.blksize < 0 or sub_num_nodes <= cmd_args.blksize:
-                # Full pass
-                ll, _ = model.forward_train([gid], node_feats=sub_nd, label_mask=sub_lm)
-                loss = -ll / sub_num_nodes
-                loss.backward()
-                sg_loss_val = loss.item()
-            else:
-                # Chunked pass
-                ll, _ = sqrtn_forward_backward(model,
-                                               graph_ids=[gid],
-                                               list_node_starts=[0],
-                                               num_nodes=sub_num_nodes,
-                                               blksize=cmd_args.blksize,
-                                               loss_scale=1.0/sub_num_nodes,
-                                               node_feats=sub_nd,
-                                               label_mask=sub_lm)
-                sg_loss_val = -ll / sub_num_nodes
-
-            # Gradient-norm bookkeeping (before clip so we see the true magnitude).
-            grad_groups = _group_grad_norms()
-            import math as _m
-            sg_total_grad = _m.sqrt(sum(v ** 2 for v in grad_groups.values()))
-            epoch_grad_total  += sg_total_grad
-            epoch_grad_feat   += grad_groups['feat']
-            epoch_grad_label  += grad_groups['label']
-            epoch_grad_state  += grad_groups['state']
-            epoch_grad_struct += grad_groups['struct']
-
-            # Per-group gradient clipping: a struct spike no longer zeroes the
-            # feat/label/state heads. Each group is clipped to the same max_norm.
-            if cmd_args.grad_clip > 0:
-                for _params in _group_params().values():
-                    if _params:
-                        torch.nn.utils.clip_grad_norm_(_params, max_norm=cmd_args.grad_clip)
-            optimizer.step()
-
-            epoch_loss_val += sg_loss_val
-            epoch_ll_cont  += model._ll_cont
-            epoch_ll_bin   += model._ll_bin
-            epoch_ll_label += model._ll_label
-            epoch_kl       += model._kl
-            epoch_nodes    += sub_num_nodes
-
-        # Epoch-level monitoring (averaged across subgraphs)
-        avg_loss    = epoch_loss_val / len(subgraphs)
-        ll_cont_val  = -epoch_ll_cont  / epoch_nodes
-        ll_bin_val   = -epoch_ll_bin   / epoch_nodes
-        ll_label_val = -epoch_ll_label / epoch_nodes
-        kl_val       = epoch_kl / epoch_nodes
-        # KL adds kl_weight*kl_val to the displayed loss; strip it out for the structure residual.
-        # Use model.kl_weight (current effective β·base) so the residual is honest under annealing.
-        kl_loss_contrib = model.kl_weight * kl_val if pipeline_args.vae_feat else 0.0
-        ll_struct_val = avg_loss - ll_cont_val - ll_bin_val - ll_label_val - kl_loss_contrib
-
-        # Track memory usage
-        ram_mb = process.memory_info().rss / 1024 ** 2
-        peak_ram_mb = max(peak_ram_mb, ram_mb)
+    def _capture_peak_mem():
+        timing_state['peak_ram_mb'] = peak_ram_mb
         if gpu_available:
-            vram_mb = torch.cuda.max_memory_allocated() / 1024 ** 2
-            peak_vram_mb = max(peak_vram_mb, vram_mb)
+            try:
+                cur_peak = torch.cuda.max_memory_allocated() / 1024 ** 2
+                timing_state['peak_vram_mb'] = max(peak_vram_mb, cur_peak)
+            except Exception:
+                timing_state['peak_vram_mb'] = peak_vram_mb
 
-        bin_desc = f" | bin: {ll_bin_val:.4f}" if model.bin_feat_dim > 0 else ""
-        kl_desc = f" | β: {kl_beta:.2f} kl: {kl_val:.4f}" if pipeline_args.vae_feat else ""
-        n_sg = len(subgraphs)
-        grad_desc = (f" | ‖g‖: {epoch_grad_total / n_sg:.2e} "
-                     f"(feat {epoch_grad_feat / n_sg:.1e}, "
-                     f"label {epoch_grad_label / n_sg:.1e}, "
-                     f"state {epoch_grad_state / n_sg:.1e}, "
-                     f"struct {epoch_grad_struct / n_sg:.1e})")
-        pbar.set_description(
-            f"Loss: {avg_loss:.4f} | struct: {ll_struct_val:.4f} | cont: {ll_cont_val:.4f}{bin_desc} | label: {ll_label_val:.4f}{kl_desc}{grad_desc}"
-        )
+    train_t0 = time.perf_counter()
+    try:
+        # Calibration: forward-only pass on first subgraph to capture loss magnitudes
+        print('Calibration pass (no weight update)...')
+        model.reset_loss_trackers()
+        calib_gid, calib_nd, calib_lm, calib_total = subgraphs[0]
+        with torch.no_grad():
+            # Use forward_train on first chunk (sqrtn_forward_backward calls .backward(),
+            # incompatible with no_grad context)
+            calib_num = min(calib_total,
+                            calib_total if cmd_args.blksize < 0 else cmd_args.blksize)
+            ll, _ = model.forward_train([calib_gid],
+                                        node_feats=calib_nd[:calib_num],
+                                        num_nodes=calib_num,
+                                        label_mask=calib_lm[:calib_num] if calib_lm is not None else None)
+            calib_loss = (-ll / calib_num).item()
+
+        calib_cont = abs(model._ll_cont / calib_num) or 1.0
+        calib_bin = abs(model._ll_bin / calib_num) or 1.0
+        calib_label = abs(model._ll_label / calib_num) or 1.0
+        # KL is in calib_loss when VAE is on; strip it out so it isn't baked into w_cont/w_bin/w_label.
+        calib_kl_contrib = pipeline_args.kl_weight * abs(model._kl / calib_num) if pipeline_args.vae_feat else 0.0
+        calib_struct = abs(calib_loss - calib_cont - calib_bin - calib_label - calib_kl_contrib) or 1.0
+
+        model.w_cont = (calib_struct / calib_cont) * user_w_cont
+        model.w_bin = (calib_struct / calib_bin) * user_w_cont  # binary shares cont weight
+        model.w_label = (calib_struct / calib_label) * user_w_label
+
+        print(f'Calibration magnitudes — struct: {calib_struct:.4f}, '
+              f'cont: {calib_cont:.4f}, bin: {calib_bin:.4f}, label: {calib_label:.4f}')
+        print(f'Dynamic weights — w_cont: {model.w_cont:.4f}, w_bin: {model.w_bin:.4f}, w_label: {model.w_label:.4f}')
+
+        pbar = tqdm(range(cmd_args.num_epochs))
+        print(f'Start learn ({len(subgraphs)} subgraph(s), loss weights relative to struct: cont={user_w_cont}, label={user_w_label})')
+        for epoch in pbar:
+            # KL annealing: update the effective coefficient before any forward pass this epoch.
+            # base_kl_weight is the schedule's β=1 ceiling (the user's -kl_weight CLI value).
+            kl_beta = compute_kl_beta(epoch, pipeline_args.kl_schedule,
+                                      pipeline_args.kl_anneal_epochs,
+                                      pipeline_args.kl_cycle_epochs,
+                                      pipeline_args.kl_ramp_ratio)
+            model.kl_weight = kl_beta * base_kl_weight
+
+            # Anneal scheduled sampling probability linearly from 0 to ss_max_prob
+            if epoch < ss_start_epoch or ss_max_prob <= 0:
+                model.ss_prob = 0.0
+            else:
+                model.ss_prob = ss_max_prob * (epoch - ss_start_epoch) / ss_ramp_epochs
+
+            epoch_loss_val = 0.0
+            epoch_ll_cont = 0.0
+            epoch_ll_bin = 0.0
+            epoch_ll_label = 0.0
+            epoch_kl = 0.0
+            epoch_nodes = 0
+            epoch_grad_total = 0.0
+            epoch_grad_feat = 0.0
+            epoch_grad_label = 0.0
+            epoch_grad_state = 0.0
+            epoch_grad_struct = 0.0
+
+            for gid, sub_nd, sub_lm, sub_num_nodes in subgraphs:
+                optimizer.zero_grad()
+                model.reset_loss_trackers()
+
+                if cmd_args.blksize < 0 or sub_num_nodes <= cmd_args.blksize:
+                    # Full pass
+                    ll, _ = model.forward_train([gid], node_feats=sub_nd, label_mask=sub_lm)
+                    loss = -ll / sub_num_nodes
+                    loss.backward()
+                    sg_loss_val = loss.item()
+                else:
+                    # Chunked pass
+                    ll, _ = sqrtn_forward_backward(model,
+                                                   graph_ids=[gid],
+                                                   list_node_starts=[0],
+                                                   num_nodes=sub_num_nodes,
+                                                   blksize=cmd_args.blksize,
+                                                   loss_scale=1.0/sub_num_nodes,
+                                                   node_feats=sub_nd,
+                                                   label_mask=sub_lm)
+                    sg_loss_val = -ll / sub_num_nodes
+
+                # Gradient-norm bookkeeping (before clip so we see the true magnitude).
+                grad_groups = _group_grad_norms()
+                import math as _m
+                sg_total_grad = _m.sqrt(sum(v ** 2 for v in grad_groups.values()))
+                epoch_grad_total  += sg_total_grad
+                epoch_grad_feat   += grad_groups['feat']
+                epoch_grad_label  += grad_groups['label']
+                epoch_grad_state  += grad_groups['state']
+                epoch_grad_struct += grad_groups['struct']
+
+                # Per-group gradient clipping: a struct spike no longer zeroes the
+                # feat/label/state heads. Each group is clipped to the same max_norm.
+                if cmd_args.grad_clip > 0:
+                    for _params in _group_params().values():
+                        if _params:
+                            torch.nn.utils.clip_grad_norm_(_params, max_norm=cmd_args.grad_clip)
+                optimizer.step()
+
+                epoch_loss_val += sg_loss_val
+                epoch_ll_cont  += model._ll_cont
+                epoch_ll_bin   += model._ll_bin
+                epoch_ll_label += model._ll_label
+                epoch_kl       += model._kl
+                epoch_nodes    += sub_num_nodes
+
+            # Epoch-level monitoring (averaged across subgraphs)
+            avg_loss    = epoch_loss_val / len(subgraphs)
+            ll_cont_val  = -epoch_ll_cont  / epoch_nodes
+            ll_bin_val   = -epoch_ll_bin   / epoch_nodes
+            ll_label_val = -epoch_ll_label / epoch_nodes
+            kl_val       = epoch_kl / epoch_nodes
+            # KL adds kl_weight*kl_val to the displayed loss; strip it out for the structure residual.
+            # Use model.kl_weight (current effective β·base) so the residual is honest under annealing.
+            kl_loss_contrib = model.kl_weight * kl_val if pipeline_args.vae_feat else 0.0
+            ll_struct_val = avg_loss - ll_cont_val - ll_bin_val - ll_label_val - kl_loss_contrib
+
+            # Track memory usage
+            ram_mb = process.memory_info().rss / 1024 ** 2
+            peak_ram_mb = max(peak_ram_mb, ram_mb)
+            if gpu_available:
+                vram_mb = torch.cuda.max_memory_allocated() / 1024 ** 2
+                peak_vram_mb = max(peak_vram_mb, vram_mb)
+
+            bin_desc = f" | bin: {ll_bin_val:.4f}" if model.bin_feat_dim > 0 else ""
+            kl_desc = f" | β: {kl_beta:.2f} kl: {kl_val:.4f}" if pipeline_args.vae_feat else ""
+            n_sg = len(subgraphs)
+            grad_desc = (f" | ‖g‖: {epoch_grad_total / n_sg:.2e} "
+                         f"(feat {epoch_grad_feat / n_sg:.1e}, "
+                         f"label {epoch_grad_label / n_sg:.1e}, "
+                         f"state {epoch_grad_state / n_sg:.1e}, "
+                         f"struct {epoch_grad_struct / n_sg:.1e})")
+            pbar.set_description(
+                f"Loss: {avg_loss:.4f} | struct: {ll_struct_val:.4f} | cont: {ll_cont_val:.4f}{bin_desc} | label: {ll_label_val:.4f}{kl_desc}{grad_desc}"
+            )
+
+        timing_state['train_seconds'] = time.perf_counter() - train_t0
+    except Exception as exc:
+        timing_state['train_seconds'] = time.perf_counter() - train_t0
+        _capture_peak_mem()
+        _record_failure('training', exc)
+        if pipeline_args.timing_log_path:
+            _write_timing_log()
+            print(f'[capacity] training phase failed ({timing_state["status"]}); '
+                  f'JSON written to {pipeline_args.timing_log_path}.', file=sys.stderr)
+            sys.exit(2)
+        raise
+
+    _capture_peak_mem()
 
     print(f'\n=== Memory usage (training) ===')
     print(f'Peak RAM:  {peak_ram_mb:.1f} MB')
@@ -599,84 +762,106 @@ def main():
     model.eval()
     print('Start generate')
 
-    if pipeline_args.subsample:
-        # Generate one synthetic subgraph per training subgraph, save to a directory
-        out_dir = os.path.join(save_dir, save_name)
-        os.makedirs(out_dir, exist_ok=True)
+    n_gen = (pipeline_args.num_gen_subgraphs
+             if pipeline_args.num_gen_subgraphs is not None
+             else len(subgraphs))
+    timing_state['num_gen_subgraphs'] = n_gen
+    gen_t0 = time.perf_counter()
+    try:
+        if pipeline_args.subsample:
+            # Generate one synthetic subgraph per training subgraph, save to a directory
+            out_dir = os.path.join(save_dir, save_name)
+            os.makedirs(out_dir, exist_ok=True)
 
-        with torch.no_grad():
-            for i, (_, _, _, sub_num_nodes) in enumerate(subgraphs):
-                _, pred_edges, _, pred_node_feats, _ = model(sub_num_nodes, display=(i == 0))
+            with torch.no_grad():
+                for i, (_, _, _, sub_num_nodes) in enumerate(subgraphs[:n_gen]):
+                    _, pred_edges, _, pred_node_feats, _ = model(sub_num_nodes, display=(i == 0))
 
-                gen_cont_feats = pred_node_feats[:, :feat_dim]
-                gen_labels = pred_node_feats[:, feat_dim:]
+                    gen_cont_feats = pred_node_feats[:, :feat_dim]
+                    gen_labels = pred_node_feats[:, feat_dim:]
 
-                gen_nx = nx.Graph()
-                gen_nx.add_nodes_from(range(sub_num_nodes))
-                for edge in pred_edges:
-                    gen_nx.add_edge(edge[0], edge[1])
+                    gen_nx = nx.Graph()
+                    gen_nx.add_nodes_from(range(sub_num_nodes))
+                    for edge in pred_edges:
+                        gen_nx.add_edge(edge[0], edge[1])
 
-                gen_dgl = build_generated_dgl(gen_nx, graph,
-                                              features=gen_cont_feats,
-                                              labels=gen_labels)
-                dgl.save_graphs(os.path.join(out_dir, f'subgraph_{i}'), [gen_dgl])
-                print(f'  Saved subgraph {i} ({sub_num_nodes} nodes)')
+                    gen_dgl = build_generated_dgl(gen_nx, graph,
+                                                  features=gen_cont_feats,
+                                                  labels=gen_labels)
+                    dgl.save_graphs(os.path.join(out_dir, f'subgraph_{i}'), [gen_dgl])
+                    print(f'  Saved subgraph {i} ({sub_num_nodes} nodes)')
 
-        # Persist the real training subsamples alongside the synthetic outputs
-        # so EDA and the future training-source ablation can load them directly.
-        train_dir = os.path.join(out_dir, 'training_subsamples')
-        os.makedirs(train_dir, exist_ok=True)
-        for i, (sg_nx, sub_nd, orig_idx) in enumerate(raw_partitions):
-            train_dgl = dgl.from_networkx(sg_nx)
-            sub_nd_cpu = sub_nd.detach().cpu()
-            train_dgl.ndata['feature'] = sub_nd_cpu[:, :feat_dim]
-            train_dgl.ndata['label'] = sub_nd_cpu[:, feat_dim].long()
-            train_dgl.ndata['original_indices'] = orig_idx.cpu().long()
-            dgl.save_graphs(os.path.join(train_dir, f'subgraph_{i}'), [train_dgl])
-        print(f'  Saved {len(raw_partitions)} real training subsamples to {train_dir}')
+            # Persist the real training subsamples alongside the synthetic outputs
+            # so EDA and the future training-source ablation can load them directly.
+            train_dir = os.path.join(out_dir, 'training_subsamples')
+            os.makedirs(train_dir, exist_ok=True)
+            for i, (sg_nx, sub_nd, orig_idx) in enumerate(raw_partitions):
+                train_dgl = dgl.from_networkx(sg_nx)
+                sub_nd_cpu = sub_nd.detach().cpu()
+                train_dgl.ndata['feature'] = sub_nd_cpu[:, :feat_dim]
+                train_dgl.ndata['label'] = sub_nd_cpu[:, feat_dim].long()
+                train_dgl.ndata['original_indices'] = orig_idx.cpu().long()
+                dgl.save_graphs(os.path.join(train_dir, f'subgraph_{i}'), [train_dgl])
+            print(f'  Saved {len(raw_partitions)} real training subsamples to {train_dir}')
 
-        if norm_stats is not None:
-            torch.save(norm_stats, os.path.join(out_dir, 'norm_stats.pt'))
-        if binary_idx:
-            torch.save(binary_idx, os.path.join(out_dir, 'binary_idx.pt'))
-        if pipeline_args.cat_feat:
-            torch.save({'bin_edges': bin_edges,
-                        'bin_centers': bin_centers,
-                        'bin_sigma': pipeline_args.bin_sigma,
-                        'n_bins': pipeline_args.n_bins},
-                       os.path.join(out_dir, 'cat_bins.pt'))
+            if norm_stats is not None:
+                torch.save(norm_stats, os.path.join(out_dir, 'norm_stats.pt'))
+            if binary_idx:
+                torch.save(binary_idx, os.path.join(out_dir, 'binary_idx.pt'))
+            if pipeline_args.cat_feat:
+                torch.save({'bin_edges': bin_edges,
+                            'bin_centers': bin_centers,
+                            'bin_sigma': pipeline_args.bin_sigma,
+                            'n_bins': pipeline_args.n_bins},
+                           os.path.join(out_dir, 'cat_bins.pt'))
 
-    else:
-        # Single full graph — original code path
-        with torch.no_grad():
-            target_num_nodes = graph_nx.number_of_nodes()
-            _, pred_edges, _, pred_node_feats, _ = model(target_num_nodes, display=True)
+        else:
+            # Single full graph — original code path
+            with torch.no_grad():
+                target_num_nodes = graph_nx.number_of_nodes()
+                _, pred_edges, _, pred_node_feats, _ = model(target_num_nodes, display=True)
 
-        gen_cont_feats = pred_node_feats[:, :feat_dim]
-        gen_labels = pred_node_feats[:, feat_dim:]
+            gen_cont_feats = pred_node_feats[:, :feat_dim]
+            gen_labels = pred_node_feats[:, feat_dim:]
 
-        gen_nx = nx.Graph()
-        gen_nx.add_nodes_from(range(target_num_nodes))
-        for edge in pred_edges:
-            gen_nx.add_edge(edge[0], edge[1])
+            gen_nx = nx.Graph()
+            gen_nx.add_nodes_from(range(target_num_nodes))
+            for edge in pred_edges:
+                gen_nx.add_edge(edge[0], edge[1])
 
-        gen_dgl = build_generated_dgl(gen_nx, graph,
-                                      features=gen_cont_feats,
-                                      labels=gen_labels)
+            gen_dgl = build_generated_dgl(gen_nx, graph,
+                                          features=gen_cont_feats,
+                                          labels=gen_labels)
 
-        os.makedirs(save_dir, exist_ok=True)
-        dgl.save_graphs(os.path.join(save_dir, save_name), [gen_dgl])
+            os.makedirs(save_dir, exist_ok=True)
+            dgl.save_graphs(os.path.join(save_dir, save_name), [gen_dgl])
 
-        if norm_stats is not None:
-            torch.save(norm_stats, os.path.join(save_dir, save_name + '_norm_stats.pt'))
-        if binary_idx:
-            torch.save(binary_idx, os.path.join(save_dir, save_name + '_binary_idx.pt'))
-        if pipeline_args.cat_feat:
-            torch.save({'bin_edges': bin_edges,
-                        'bin_centers': bin_centers,
-                        'bin_sigma': pipeline_args.bin_sigma,
-                        'n_bins': pipeline_args.n_bins},
-                       os.path.join(save_dir, save_name + '_cat_bins.pt'))
+            if norm_stats is not None:
+                torch.save(norm_stats, os.path.join(save_dir, save_name + '_norm_stats.pt'))
+            if binary_idx:
+                torch.save(binary_idx, os.path.join(save_dir, save_name + '_binary_idx.pt'))
+            if pipeline_args.cat_feat:
+                torch.save({'bin_edges': bin_edges,
+                            'bin_centers': bin_centers,
+                            'bin_sigma': pipeline_args.bin_sigma,
+                            'n_bins': pipeline_args.n_bins},
+                           os.path.join(save_dir, save_name + '_cat_bins.pt'))
+
+        timing_state['gen_seconds'] = time.perf_counter() - gen_t0
+    except Exception as exc:
+        timing_state['gen_seconds'] = time.perf_counter() - gen_t0
+        _capture_peak_mem()
+        _record_failure('generation', exc)
+        if pipeline_args.timing_log_path:
+            _write_timing_log()
+            print(f'[capacity] generation phase failed ({timing_state["status"]}); '
+                  f'JSON written to {pipeline_args.timing_log_path}.', file=sys.stderr)
+            sys.exit(2)
+        raise
+
+    _capture_peak_mem()
+    if pipeline_args.timing_log_path:
+        _write_timing_log()
 
 
 if __name__ == '__main__':

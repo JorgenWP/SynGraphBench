@@ -95,6 +95,19 @@ Train BiGG with forest fire subsampling for VRAM-limited training. Same args as 
 Train BiGG structure-only baseline. Defaults: `tolokers 128 1 100 0.001 256`.
 Checkpoints saved with `structure_` prefix.
 
+**`bash scripts/train/train_bigg_capacity.sh [...same first 33 args as train_bigg_subsample.sh...] [subsample_method] [multiplicity_cap] [num_train_subgraphs] [num_gen_subgraphs] [timing_log_path]`**
+Run a single capacity-benchmark trial — short calibration run that emits a JSON timing log so the orchestrator can extrapolate "how many subgraphs fit in 1 hour at this size/density?". Same first 33 positions as `train_bigg_subsample.sh`; appends positions 34–38:
+* `subsample_method`: `forest_fire` (default) or `metis`. Metis dispatches via `experiments/subsample_search/sampling.py::sample_with_method`.
+* `multiplicity_cap`: `m1` / `m2` / `minf` (default `minf` = no cap, preserves legacy forest fire). Ignored for metis (M=1 by construction).
+* `num_train_subgraphs`: cap inner training loop at first N partitions (empty = all sampled).
+* `num_gen_subgraphs`: cap generation loop at first N partitions (empty = same as train).
+* `timing_log_path`: write JSON timing log here (status, train/gen seconds, peak VRAM, partition stats). Always written, even on caught failures (pipeline exits with code 2 + structured `status` field on OOM/error).
+
+Usually invoked by `experiments/bigg_capacity/capacity_benchmark.py`, which orchestrates the (dataset × method × partition_size) sweep, classifies results, and appends rows to a CSV with `extrap_K_at_50ep` and `extrap_K_at_300ep` columns. Run via:
+```bash
+sbatch scripts/train/train_bigg_capacity.slurm     # full sweep on gpu80g
+```
+
 **`bash scripts/train/train_cgt.sh [dataset] [gpt_epochs] [cluster_num] [cluster_size] [gpt_batch_size] [cg_depth] [cg_fanout] [trial_id] [task]`**
 Train CGT on a dataset. Defaults: `reddit 50 512 1 128 2 5 0 hidden_labels`. Calls `CGT/train.py`.
 `trial_id` selects which GADBench mask column (0-9) to use for the train/val/test split.
