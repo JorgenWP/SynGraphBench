@@ -29,11 +29,18 @@ import csv
 import json
 import math
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import time
 from typing import Optional
+
+
+# Forest fire method ids parse as `ff_b{burn}_M{cap}`, where burn is a float in
+# (0, 1] and cap is `1`, `2`, or `inf`. Examples: `ff_b0.5_M2`, `ff_b0.3_Minf`.
+_FF_RE = re.compile(r'^ff_b(?P<burn>[0-9]*\.?[0-9]+)_M(?P<cap>1|2|inf)$')
+_CAP_TAG_TO_FLAG = {'1': 'm1', '2': 'm2', 'inf': 'minf'}
 
 # Add bigg/ to path so we can use dgl.load_graphs without entering the bigg env's cwd.
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -122,20 +129,28 @@ def _build_method_config(method_id: str, partition_size: int, n_total: int,
             'burn_prob': 0.5,                  # ignored by metis but required by shell
             'method_tag': f'metis_K{K}',
         }
-    if method_id == 'ff_b0.5_M2':
-        # K = num_train_subgraphs; ff with M=2 needs K * ts <= 2 * N
+    m = _FF_RE.match(method_id)
+    if m:
+        burn = float(m['burn'])
+        cap_tag = m['cap']                          # '1' / '2' / 'inf'
+        cap_flag = _CAP_TAG_TO_FLAG[cap_tag]        # 'm1' / 'm2' / 'minf'
         K = num_train_subgraphs
-        if K * partition_size > 2 * n_total:
-            return None
+        # Forest fire with multiplicity cap M needs K * ts <= M * N.
+        # M=inf: no cap. M=2: factor 2. M=1: disjoint, factor 1.
+        if cap_tag != 'inf':
+            cap_factor = int(cap_tag)
+            if K * partition_size > cap_factor * n_total:
+                return None
         return {
             'subsample_method': 'forest_fire',
-            'multiplicity_cap': 'm2',
+            'multiplicity_cap': cap_flag,
             'K': K,
             'subsample_size': partition_size,
-            'burn_prob': 0.5,
-            'method_tag': f'ff_b0.5_M2_size{partition_size}',
+            'burn_prob': burn,
+            'method_tag': f'ff_b{burn}_M{cap_tag}_size{partition_size}',
         }
-    raise ValueError(f'Unknown method_id: {method_id!r}')
+    raise ValueError(f'Unknown method_id: {method_id!r}. '
+                     f'Supported: "metis", or "ff_b{{burn}}_M{{1|2|inf}}".')
 
 
 def _classify_result(returncode: int, json_path: str, stderr_text: str,
@@ -211,10 +226,11 @@ def run_one_trial(*, dataset: str, method_id: str, partition_size: int, n_total:
     cfg = _build_method_config(method_id, partition_size, n_total, args.num_train_subgraphs)
     if cfg is None:
         # Infeasible — record placeholder row.
+        sm = 'metis' if method_id == 'metis' else 'forest_fire'
         return {
             'dataset': dataset,
             'method_tag': f'{method_id}_size{partition_size}',
-            'subsample_method': method_id.split('_')[0],
+            'subsample_method': sm,
             'multiplicity_cap': '',
             'partition_size_target': partition_size,
             'K': '',
@@ -393,11 +409,19 @@ def main() -> int:
 
         for partition_size in partition_sizes:
             for method_id in methods:
-                method_tag_for_check = (
-                    f'metis_K{max(1, math.ceil(n_total / partition_size))}'
-                    if method_id == 'metis'
-                    else f'ff_b0.5_M2_size{partition_size}'
-                )
+                # Predict the method_tag without running the trial — used for
+                # CSV-resume dedup and hard-OOM skip rows.
+                if method_id == 'metis':
+                    method_tag_for_check = f'metis_K{max(1, math.ceil(n_total / partition_size))}'
+                    sm_for_skip = 'metis'
+                else:
+                    ff_m = _FF_RE.match(method_id)
+                    if ff_m is None:
+                        raise ValueError(
+                            f'Unknown method_id: {method_id!r}. '
+                            f'Supported: "metis", or "ff_b{{burn}}_M{{1|2|inf}}".')
+                    method_tag_for_check = f'ff_b{float(ff_m["burn"])}_M{ff_m["cap"]}_size{partition_size}'
+                    sm_for_skip = 'forest_fire'
 
                 if (dataset, method_tag_for_check, partition_size) in completed:
                     print(f'[capacity] skip {dataset}/{method_tag_for_check}/size={partition_size} '
@@ -408,7 +432,7 @@ def main() -> int:
                     row = {
                         'dataset': dataset,
                         'method_tag': method_tag_for_check,
-                        'subsample_method': method_id.split('_')[0],
+                        'subsample_method': sm_for_skip,
                         'multiplicity_cap': '',
                         'partition_size_target': partition_size,
                         'K': '',
