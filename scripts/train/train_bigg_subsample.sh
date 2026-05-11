@@ -7,7 +7,7 @@
 # training subgraph.
 #
 # Usage:
-#   bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor] [mdn_base] [kl_schedule] [kl_anneal_epochs] [kl_cycle_epochs] [kl_ramp_ratio]
+#   bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor] [mdn_base] [kl_schedule] [kl_anneal_epochs] [kl_cycle_epochs] [kl_ramp_ratio] [load_subsamples] [subsampling_config] [split_id]
 #
 # normalize:        feature normalisation — one of "zscore", "minmax", "row", "quantile", or "none" (default: none)
 # loss_weights:     comma-separated cont,label weights relative to struct, applied after dynamic normalization (default: 1,1)
@@ -40,12 +40,20 @@
 #                   β resets to 0 every cycle. (default: 0)
 # kl_ramp_ratio:    fraction of cycle spent ramping when kl_schedule=cyclic (paper R, default 0.5).
 #                   0.5 → first 50%% of cycle ramps 0→1, last 50%% sits at 1.
+# load_subsamples:  "true" to load pre-computed training subgraphs from
+#                   datasets/bigg_subsamples/<dataset>/<subsampling_config>/split<split_id>.pkl
+#                   instead of sampling at runtime. When on, subsample_size/burn_prob/num_subgraphs
+#                   are ignored (default: false).
+# subsampling_config: params_tag of the persisted subsample set (e.g. "ff_b0.5_M1", "metis_K5").
+#                   Required when load_subsamples=true.
+# split_id:         GADBench split id (0..4) selecting which split<id>.pkl to load (default: 0).
 #
 # Examples:
 #   bash scripts/train/train_bigg_subsample.sh reddit -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true -4.0 2000 0.3
 #   bash scripts/train/train_bigg_subsample.sh reddit -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true -4.0 2000 0.3 3 true
 #   bash scripts/train/train_bigg_subsample.sh tolokers -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true -10.0 500 0.2 15 false true 16 1.0
 #   bash scripts/train/train_bigg_subsample.sh tolokers -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 false true -10.0 500 0.2 15 false false 16 1.0 true 32
+#   bash scripts/train/train_bigg_subsample.sh tolokers -1 1 300 0.001 256 0.3 0.0 0 True zscore 0.1,0.1 true true -10.0 500 0.2 15 false false 16 1.0 false 32 "" false 8 -4.0 gaussian none 0 0 0.5 true ff_b0.5_M1 0
 #
 
 set -e
@@ -84,6 +92,9 @@ KL_SCHEDULE="${30:-none}"
 KL_ANNEAL_EPOCHS="${31:-0}"
 KL_CYCLE_EPOCHS="${32:-0}"
 KL_RAMP_RATIO="${33:-0.5}"
+LOAD_SUBSAMPLES="${34:-false}"
+SUBSAMPLING_CONFIG="${35:-}"
+SPLIT_ID="${36:-0}"
 
 cd "$(dirname "$0")/../../bigg"
 
@@ -121,6 +132,9 @@ echo "KL schedule:     $KL_SCHEDULE"
 echo "KL anneal eps:   $KL_ANNEAL_EPOCHS"
 echo "KL cycle eps:    $KL_CYCLE_EPOCHS"
 echo "KL ramp ratio:   $KL_RAMP_RATIO"
+echo "Load subsamples: $LOAD_SUBSAMPLES"
+echo "Subsampling cfg: ${SUBSAMPLING_CONFIG:-(none)}"
+echo "Split id:        $SPLIT_ID"
 echo ""
 
 NORM_FLAG=""
@@ -168,6 +182,19 @@ if [ "$MDN_FEAT" = "true" ]; then
   MDN_FLAG="--mdn_feat"
 fi
 
+# Subsample source: runtime sampling (default) vs loading pre-computed partitions.
+if [ "$LOAD_SUBSAMPLES" = "true" ]; then
+  if [ -z "$SUBSAMPLING_CONFIG" ]; then
+    echo "ERROR: load_subsamples=true requires subsampling_config (positional arg 35)." >&2
+    exit 1
+  fi
+  SUBSAMPLE_FLAGS="--load_subsamples -subsampling_config $SUBSAMPLING_CONFIG -split_id $SPLIT_ID"
+  SUBSAMPLE_TAG="loadsub_${SUBSAMPLING_CONFIG}_split${SPLIT_ID}"
+else
+  SUBSAMPLE_FLAGS="--subsample -subsample_size $SUBSAMPLE_SIZE -burn_prob $BURN_PROB $NUM_SUBGRAPHS_FLAG"
+  SUBSAMPLE_TAG="sub${SUBSAMPLE_SIZE}_p${BURN_PROB}"
+fi
+
 python -m bigg.extension.pipeline \
   -data_dir "$DATASET" \
   -model_type conditional \
@@ -188,10 +215,7 @@ python -m bigg.extension.pipeline \
   $HETERO_FLAG \
   $MASK_FLAG \
   -logvar_floor "$LOGVAR_FLOOR" \
-  --subsample \
-  -subsample_size "$SUBSAMPLE_SIZE" \
-  -burn_prob "$BURN_PROB" \
-  $NUM_SUBGRAPHS_FLAG \
+  $SUBSAMPLE_FLAGS \
   $BINARY_FLAG \
   $VAE_FLAG \
   -vae_dim "$VAE_DIM" \
@@ -207,4 +231,4 @@ python -m bigg.extension.pipeline \
   -kl_anneal_epochs "$KL_ANNEAL_EPOCHS" \
   -kl_cycle_epochs "$KL_CYCLE_EPOCHS" \
   -kl_ramp_ratio "$KL_RAMP_RATIO" \
-  -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LOSS_WEIGHTS}_${HETERO_FEAT}_lvf${LOGVAR_FLOOR}_bin${BINARY_FEAT}_vae${VAE_FEAT}_vd${VAE_DIM}_kl${KL_WEIGHT}_cat${CAT_FEAT}_nb${N_BINS}_mdn${MDN_FEAT}_k${MDN_COMPONENTS}_sub${SUBSAMPLE_SIZE}_p${BURN_PROB}"
+  -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LOSS_WEIGHTS}_${HETERO_FEAT}_lvf${LOGVAR_FLOOR}_bin${BINARY_FEAT}_vae${VAE_FEAT}_vd${VAE_DIM}_kl${KL_WEIGHT}_cat${CAT_FEAT}_nb${N_BINS}_mdn${MDN_FEAT}_k${MDN_COMPONENTS}_${SUBSAMPLE_TAG}"

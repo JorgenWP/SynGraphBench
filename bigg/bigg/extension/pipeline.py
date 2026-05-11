@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import time
+import pickle
 import traceback
 import argparse
 import psutil
@@ -139,6 +140,18 @@ def main():
                                  help='Forest fire burn probability — controls subgraph density (default: 0.3)')
     pipeline_parser.add_argument('-num_subgraphs', type=int, default=None,
                                  help='Number of subgraphs to generate. Default: ceil(N / subsample_size)')
+    pipeline_parser.add_argument('--load_subsamples', action='store_true', default=False,
+                                 help='Load pre-computed training subgraphs from '
+                                      'datasets/bigg_subsamples/<dataset>/<subsampling_config>/'
+                                      'split<split_id>.pkl instead of sampling at runtime. '
+                                      'Mutually exclusive with --subsample.')
+    pipeline_parser.add_argument('-subsampling_config', type=str, default=None,
+                                 help='params_tag of the pre-computed subsample set to load '
+                                      "(e.g. 'ff_b0.5_M1', 'metis_K5'). Required when "
+                                      '--load_subsamples is set.')
+    pipeline_parser.add_argument('-split_id', type=int, default=0,
+                                 help='GADBench split id (0..4) selecting which '
+                                      'split<id>.pkl to load (default: 0).')
     pipeline_parser.add_argument('-kl_schedule', type=str, default='none',
                                  choices=['none', 'linear', 'cyclic'],
                                  help='KL annealing schedule for the VAE coefficient. '
@@ -228,6 +241,28 @@ def main():
             and pipeline_args.kl_cycle_epochs > cmd_args.num_epochs):
         print(f'WARNING: -kl_cycle_epochs ({pipeline_args.kl_cycle_epochs}) > num_epochs '
               f'({cmd_args.num_epochs}); β will never reach 1.')
+
+    # --load_subsamples disables runtime sampling; the two modes are exclusive.
+    if pipeline_args.load_subsamples and pipeline_args.subsample:
+        raise ValueError('--load_subsamples and --subsample are mutually exclusive')
+    if pipeline_args.load_subsamples and not pipeline_args.subsampling_config:
+        raise ValueError('--load_subsamples requires -subsampling_config <params_tag>')
+    if pipeline_args.load_subsamples:
+        # Warn on runtime-sampling knobs that have no effect in load mode.
+        _ignored = []
+        if pipeline_args.subsample_size != 2000:
+            _ignored.append(f'-subsample_size={pipeline_args.subsample_size}')
+        if pipeline_args.burn_prob != 0.3:
+            _ignored.append(f'-burn_prob={pipeline_args.burn_prob}')
+        if pipeline_args.num_subgraphs is not None:
+            _ignored.append(f'-num_subgraphs={pipeline_args.num_subgraphs}')
+        if pipeline_args.subsample_method != 'forest_fire':
+            _ignored.append(f'-subsample_method={pipeline_args.subsample_method}')
+        if pipeline_args.multiplicity_cap != 'minf':
+            _ignored.append(f'-multiplicity_cap={pipeline_args.multiplicity_cap}')
+        if _ignored:
+            print('WARNING: --load_subsamples ignores runtime-sampling args: '
+                  + ', '.join(_ignored))
 
     set_device(cmd_args.gpu)
     setup_treelib(cmd_args)
@@ -325,7 +360,56 @@ def main():
     # --- Build list of (gid, sub_node_data, sub_label_mask, sub_num_nodes) ---
     # When subsampling is disabled this list has a single entry for the full graph.
     try:
-        if pipeline_args.subsample:
+        raw_partitions = None  # set by --subsample or --load_subsamples branches
+
+        if pipeline_args.load_subsamples:
+            # Lazy bootstrap of experiments/subsample_search/splitsource. The
+            # persisted pickle's orig_idx values index into the split's
+            # train+val LCC-relabeled space, so we need the SplitSource to
+            # map them back to full-graph node ids.
+            _here = os.path.dirname(os.path.abspath(__file__))
+            _proj_root = os.path.abspath(os.path.join(_here, '..', '..', '..'))
+            _sampler_dir = os.path.join(_proj_root, 'experiments', 'subsample_search')
+            if _sampler_dir not in sys.path:
+                sys.path.insert(0, _sampler_dir)
+            from splitsource import load_split_source  # noqa: E402
+
+            data_dir_abs = os.path.join(_proj_root, 'datasets', 'original')
+            print(f'Loading subsamples from disk: config={pipeline_args.subsampling_config}, '
+                  f'split_id={pipeline_args.split_id}')
+            src = load_split_source(DATASET, pipeline_args.split_id, data_dir=data_dir_abs)
+
+            pkl_path = os.path.join(_proj_root, 'datasets', 'bigg_subsamples', DATASET,
+                                    pipeline_args.subsampling_config,
+                                    f'split{pipeline_args.split_id}.pkl')
+            if not os.path.exists(pkl_path):
+                raise FileNotFoundError(
+                    f'Subsample pickle not found: {pkl_path}. '
+                    f'Generate it via experiments/subsample_search/run_grid.py first.')
+            with open(pkl_path, 'rb') as f:
+                payload = pickle.load(f)
+            print(f'  Loaded {len(payload["partitions"])} partitions (meta={payload["meta"]})')
+
+            # The pickled sub_nd is unnormalized LCC-space features+label; we
+            # discard it and re-extract from the (already-normalized) full
+            # graph node_data so the normalization population matches the
+            # runtime --subsample path.
+            orig_ids_full = src.orig_ids.long()
+            raw_partitions = []
+            for sg_nx, _stored_sub_nd, orig_idx_lcc in payload['partitions']:
+                full_idx = orig_ids_full[orig_idx_lcc.long()]
+                sub_nd = node_data[full_idx.to(node_data.device)]
+                # Saved subgraphs come from dgl.to_networkx().to_undirected(),
+                # which yields a MultiGraph; TreeLib expects a simple Graph.
+                if sg_nx.is_multigraph():
+                    sg_simple = nx.Graph()
+                    sg_simple.add_nodes_from(sg_nx.nodes())
+                    sg_simple.add_edges_from(sg_nx.edges())
+                    sg_nx = sg_simple
+                raw_partitions.append((sg_nx, sub_nd, full_idx))
+            print(f'  Subgraph sizes: {[sg.number_of_nodes() for sg, _, _ in raw_partitions]}')
+
+        elif pipeline_args.subsample:
             import math
             n_total = graph_nx.number_of_nodes()
             num_subgraphs = pipeline_args.num_subgraphs or math.ceil(n_total / pipeline_args.subsample_size)
@@ -376,6 +460,7 @@ def main():
             print(f'  Produced {len(raw_partitions)} samples '
                   f'(sizes: {[sg.number_of_nodes() for sg, _, _ in raw_partitions]})')
 
+        if raw_partitions is not None:
             # Optionally cap the trained-on set (capacity benchmark trains on N of K).
             if pipeline_args.num_train_subgraphs is not None:
                 raw_partitions = raw_partitions[:pipeline_args.num_train_subgraphs]
@@ -755,7 +840,13 @@ def main():
         mdn_tag = f'_{mdn_base_tag}{pipeline_args.mdn_components}_lsf{pipeline_args.mdn_logsigma_floor}'
     else:
         mdn_tag = ''
-    sub_tag = f'_sub{len(subgraphs)}_size{pipeline_args.subsample_size}_p{pipeline_args.burn_prob}' if pipeline_args.subsample else ''
+    if pipeline_args.load_subsamples:
+        sub_tag = (f'_loadsub_{pipeline_args.subsampling_config}'
+                   f'_split{pipeline_args.split_id}_n{len(subgraphs)}')
+    elif pipeline_args.subsample:
+        sub_tag = f'_sub{len(subgraphs)}_size{pipeline_args.subsample_size}_p{pipeline_args.burn_prob}'
+    else:
+        sub_tag = ''
     save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{vae_tag}{kl_sched_tag}{cat_tag}{mdn_tag}{sub_tag}'
     save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
 
@@ -768,7 +859,7 @@ def main():
     timing_state['num_gen_subgraphs'] = n_gen
     gen_t0 = time.perf_counter()
     try:
-        if pipeline_args.subsample:
+        if pipeline_args.subsample or pipeline_args.load_subsamples:
             # Generate one synthetic subgraph per training subgraph, save to a directory
             out_dir = os.path.join(save_dir, save_name)
             os.makedirs(out_dir, exist_ok=True)
