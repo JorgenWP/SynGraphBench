@@ -17,7 +17,7 @@ The two paradigms are **not directly comparable** on a common evaluation framewo
 
 ## BiGG — Whole-Graph Generation
 
-BiGG generates a **complete, new graph** — both topology (edges) and node features — from scratch. The output is a full DGL graph that is a drop-in replacement for the original. The original graph is discarded entirely during evaluation; downstream models train and are tested purely on the generated graph.
+BiGG generates a **complete, new graph** — both topology (edges) and node features — from scratch. The output is a full DGL graph that is a drop-in replacement for the original at *training* time only: the downstream GNN trains and validates on the synthetic graph, but is tested on the **original graph's test nodes/edges** via `CrossGraphGNNDetector` / `CrossGraphLinkPredictor` (`scripts/benchmark/models/cross_graph_*.py`). This matches the CGT path's evaluation protocol — both paradigms are scored against the same real test set.
 
 The generative model captures the joint distribution of graph structure and node attributes, and samples from it to produce a synthetic counterpart.
 
