@@ -5,7 +5,7 @@
 # four trailing args for the capacity-specific flags.
 #
 # Usage:
-#   bash scripts/train/train_bigg_capacity.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor] [mdn_base] [kl_schedule] [kl_anneal_epochs] [kl_cycle_epochs] [kl_ramp_ratio] [subsample_method] [multiplicity_cap] [num_train_subgraphs] [num_gen_subgraphs] [timing_log_path]
+#   bash scripts/train/train_bigg_capacity.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor] [mdn_base] [kl_schedule] [kl_anneal_epochs] [kl_cycle_epochs] [kl_ramp_ratio] [subsample_method] [multiplicity_cap] [num_train_subgraphs] [num_gen_subgraphs] [timing_log_path] [recal_momentum]
 #
 # Capacity-specific args:
 #   subsample_method:    "forest_fire" or "metis" (default: forest_fire)
@@ -13,6 +13,8 @@
 #   num_train_subgraphs: cap inner training loop at first N partitions (default: empty = all)
 #   num_gen_subgraphs:   cap generation loop at first N partitions (default: empty = same as train)
 #   timing_log_path:     write JSON timing log to this path (default: empty = no log)
+#   recal_momentum:      EMA momentum for dynamic loss-weight recalibration in [0,1]. 1.0
+#                        (default) disables recalibration; 0.9/0.99 = ~10/~100 epoch horizon.
 
 set -e
 
@@ -54,6 +56,7 @@ MULTIPLICITY_CAP="${35:-minf}"
 NUM_TRAIN_SUBGRAPHS="${36:-}"
 NUM_GEN_SUBGRAPHS="${37:-}"
 TIMING_LOG_PATH="${38:-}"
+RECAL_MOMENTUM="${39:-1.0}"
 
 cd "$(dirname "$0")/../../bigg"
 
@@ -68,6 +71,7 @@ echo "Num train subgraphs:   ${NUM_TRAIN_SUBGRAPHS:-all}"
 echo "Num gen subgraphs:     ${NUM_GEN_SUBGRAPHS:-same as train}"
 echo "Epochs:                $EPOCHS"
 echo "Timing log path:       ${TIMING_LOG_PATH:-<not set>}"
+echo "Recal momentum:        $RECAL_MOMENTUM"
 echo ""
 
 NORM_FLAG=""
@@ -174,4 +178,5 @@ python -m bigg.extension.pipeline \
   $NUM_TRAIN_SUBGRAPHS_FLAG \
   $NUM_GEN_SUBGRAPHS_FLAG \
   $TIMING_LOG_FLAG \
+  -recal_momentum "$RECAL_MOMENTUM" \
   -save_dir "checkpoints/bigg/capacity_${DATASET}_${SUBSAMPLE_METHOD}_${MULTIPLICITY_CAP}_size${SUBSAMPLE_SIZE}_K${NUM_SUBGRAPHS:-auto}"

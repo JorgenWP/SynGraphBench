@@ -67,6 +67,12 @@ KL_RAMP_RATIO=0.5       # cyclic: fraction of cycle spent ramping (paper R, defa
 LOAD_SUBSAMPLES=false   # "true" to load pre-computed subgraphs from datasets/bigg_subsamples; ignores SUBSAMPLE_SIZE/BURN_PROB/NUM_SUBGRAPHS
 SUBSAMPLING_CONFIG=     # params_tag (e.g. "ff_b0.5_M1") — required when LOAD_SUBSAMPLES=true
 SPLIT_ID=0              # GADBench split id (0..4) selecting which split<id>.pkl to load
+RECAL_MOMENTUM=1.0      # EMA momentum for dynamic loss-weight recalibration in [0,1]. 1.0 disables (backward compat); 0.9/0.99 = ~10/~100 epoch horizon.
+SAVE_MODEL=false        # "true" to persist model.state_dict + reconstruction args to model.pt alongside synthetic outputs (for offline diagnostics).
+SAVE_MODEL_EVERY=0      # if > 0 (and SAVE_MODEL=true), also save model_epoch{N}.pt every N epochs during training.
+
+# SAVE_MODEL / SAVE_MODEL_EVERY are consumed via env-var by train_bigg_subsample.sh (not positional args).
+export SAVE_MODEL SAVE_MODEL_EVERY
 
 # Run the BiGG subsampled training and generation script
-bash scripts/train/train_bigg_subsample.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$LOGVAR_FLOOR" "$SUBSAMPLE_SIZE" "$BURN_PROB" "$NUM_SUBGRAPHS" "$BINARY_FEAT" "$VAE_FEAT" "$VAE_DIM" "$KL_WEIGHT" "$CAT_FEAT" "$N_BINS" "$BIN_SIGMA" "$MDN_FEAT" "$MDN_COMPONENTS" "$MDN_LOGSIGMA_FLOOR" "$MDN_BASE" "$KL_SCHEDULE" "$KL_ANNEAL_EPOCHS" "$KL_CYCLE_EPOCHS" "$KL_RAMP_RATIO" "$LOAD_SUBSAMPLES" "$SUBSAMPLING_CONFIG" "$SPLIT_ID"
+bash scripts/train/train_bigg_subsample.sh "$DATASET" "$BLKSIZE" "$BSIZE" "$EPOCHS" "$LR" "$EMBED_DIM" "$NOISE_STD" "$SS_MAX_PROB" "$SS_START_EPOCH" "$BFS_PREPROCESS" "$NORMALIZE" "$LOSS_WEIGHTS" "$HETERO_FEAT" "$MASK_TEST_LABELS" "$LOGVAR_FLOOR" "$SUBSAMPLE_SIZE" "$BURN_PROB" "$NUM_SUBGRAPHS" "$BINARY_FEAT" "$VAE_FEAT" "$VAE_DIM" "$KL_WEIGHT" "$CAT_FEAT" "$N_BINS" "$BIN_SIGMA" "$MDN_FEAT" "$MDN_COMPONENTS" "$MDN_LOGSIGMA_FLOOR" "$MDN_BASE" "$KL_SCHEDULE" "$KL_ANNEAL_EPOCHS" "$KL_CYCLE_EPOCHS" "$KL_RAMP_RATIO" "$LOAD_SUBSAMPLES" "$SUBSAMPLING_CONFIG" "$SPLIT_ID" "$RECAL_MOMENTUM"

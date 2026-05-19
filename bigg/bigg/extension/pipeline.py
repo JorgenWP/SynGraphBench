@@ -132,6 +132,14 @@ def main():
     pipeline_parser.add_argument('--mask_test_labels', action='store_true', default=False,
                                  help='Exclude test node labels (split 0) from label loss to prevent '
                                       'data leakage in anomaly detection benchmarks')
+    pipeline_parser.add_argument('--save_model', action='store_true', default=False,
+                                 help='Persist model.state_dict + reconstruction args to model.pt '
+                                      'alongside the synthetic outputs after training, for offline '
+                                      'diagnostics (default: off).')
+    pipeline_parser.add_argument('-save_model_every', type=int, default=0,
+                                 help='If > 0 (and --save_model is on), also persist a snapshot '
+                                      'model_epoch{N}.pt every N epochs during training. '
+                                      'Final model.pt is still written at end. Default: 0 (off).')
     pipeline_parser.add_argument('--subsample', action='store_true', default=False,
                                  help='Sample subgraphs via forest fire for VRAM-limited training')
     pipeline_parser.add_argument('-subsample_size', type=int, default=2000,
@@ -169,6 +177,17 @@ def main():
                                  help='Fraction of cycle spent ramping when -kl_schedule cyclic '
                                       '(paper R, default 0.5). 0.5 → first 50%% ramps 0→1, last 50%% '
                                       'sits at 1.')
+    pipeline_parser.add_argument('-recal_momentum', type=float, default=1.0,
+                                 help='EMA momentum for dynamic loss-weight recalibration. '
+                                      'Each epoch updates ema = m*ema + (1-m)*current per component, '
+                                      'then recomputes w_cont/w_bin/w_label from the EMA ratios '
+                                      '(user_w_cont/user_w_label from -loss_weights still apply as '
+                                      'multiplicative priors). Range [0,1]. 1.0 (default) disables '
+                                      'recalibration — weights stay at the one-time calibration '
+                                      'values, bit-identical to pre-feature behavior. 0.0 = no '
+                                      'smoothing (track latest epoch exactly). Typical: 0.9 (~10 '
+                                      'epoch horizon), 0.99 (~100 epoch horizon). KL is unaffected '
+                                      '(annealed separately via -kl_schedule).')
     pipeline_parser.add_argument('-subsample_method', type=str, default='forest_fire',
                                  choices=['forest_fire', 'metis'],
                                  help='Subsampling method when --subsample is on. "forest_fire" '
@@ -197,6 +216,9 @@ def main():
     lw = [float(x) for x in pipeline_args.loss_weights.split(',')]
     assert len(lw) == 2, f'Expected 2 loss weights (cont,label), got {len(lw)}'
     user_w_cont, user_w_label = lw
+
+    if not (0.0 <= pipeline_args.recal_momentum <= 1.0):
+        raise ValueError(f'-recal_momentum must be in [0, 1], got {pipeline_args.recal_momentum}')
 
     # AR categorical is its own predictor; reject combinations that don't apply.
     if pipeline_args.cat_feat and (pipeline_args.hetero_feat or pipeline_args.vae_feat):
@@ -662,6 +684,46 @@ def main():
             except Exception:
                 timing_state['peak_vram_mb'] = peak_vram_mb
 
+    # Build save name and directory (computed before training so periodic
+    # checkpoint snapshots can write under the same out_dir / save_dir).
+    norm_tag = pipeline_args.normalize if pipeline_args.normalize is not None else 'none'
+    bfs_tag = 'bfs' if pipeline_args.bfs_preprocess else 'nobfs'
+    lw_tag = pipeline_args.loss_weights.replace(',', '_')
+    hetero_tag = 'hetero' if pipeline_args.hetero_feat else 'det'
+    lvf_tag = f'_lvf{pipeline_args.logvar_floor}' if pipeline_args.hetero_feat else ''
+    mask_tag = '_masked' if pipeline_args.mask_test_labels else ''
+    bin_tag = '_binfeat' if pipeline_args.binary_feat else ''
+    vae_tag = f'_vae{pipeline_args.vae_dim}_kl{pipeline_args.kl_weight}' if pipeline_args.vae_feat else ''
+    if pipeline_args.vae_feat and pipeline_args.kl_schedule == 'linear':
+        kl_sched_tag = f'_klan{pipeline_args.kl_anneal_epochs}'
+    elif pipeline_args.vae_feat and pipeline_args.kl_schedule == 'cyclic':
+        kl_sched_tag = f'_klcyc{pipeline_args.kl_cycle_epochs}r{int(pipeline_args.kl_ramp_ratio * 100)}'
+    else:
+        kl_sched_tag = ''
+    cat_tag = f'_cat{pipeline_args.n_bins}_smed{pipeline_args.bin_sigma.median().item():.2f}' if pipeline_args.cat_feat else ''
+    if pipeline_args.mdn_feat:
+        mdn_base_tag = 'lnmdn' if pipeline_args.mdn_base == 'logit_normal' else 'mdn'
+        mdn_tag = f'_{mdn_base_tag}{pipeline_args.mdn_components}_lsf{pipeline_args.mdn_logsigma_floor}'
+    else:
+        mdn_tag = ''
+    recal_tag = f'_recalM{pipeline_args.recal_momentum}' if pipeline_args.recal_momentum < 1.0 else ''
+    if pipeline_args.load_subsamples:
+        sub_tag = (f'_loadsub_{pipeline_args.subsampling_config}'
+                   f'_split{pipeline_args.split_id}_n{len(subgraphs)}')
+    elif pipeline_args.subsample:
+        sub_tag = f'_sub{len(subgraphs)}_size{pipeline_args.subsample_size}_p{pipeline_args.burn_prob}'
+    else:
+        sub_tag = ''
+    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{vae_tag}{kl_sched_tag}{cat_tag}{mdn_tag}{recal_tag}{sub_tag}'
+    save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
+    use_subdir = pipeline_args.subsample or pipeline_args.load_subsamples
+    os.makedirs(save_dir, exist_ok=True)
+    if use_subdir:
+        out_dir = os.path.join(save_dir, save_name)
+        os.makedirs(out_dir, exist_ok=True)
+    else:
+        out_dir = None
+
     train_t0 = time.perf_counter()
     try:
         # Calibration: forward-only pass on first subgraph to capture loss magnitudes
@@ -693,6 +755,12 @@ def main():
         print(f'Calibration magnitudes — struct: {calib_struct:.4f}, '
               f'cont: {calib_cont:.4f}, bin: {calib_bin:.4f}, label: {calib_label:.4f}')
         print(f'Dynamic weights — w_cont: {model.w_cont:.4f}, w_bin: {model.w_bin:.4f}, w_label: {model.w_label:.4f}')
+
+        # Seed EMAs from calibration for periodic recalibration (active when recal_momentum < 1.0)
+        ema_struct = calib_struct
+        ema_cont   = calib_cont
+        ema_bin    = calib_bin
+        ema_label  = calib_label
 
         pbar = tqdm(range(cmd_args.num_epochs))
         print(f'Start learn ({len(subgraphs)} subgraph(s), loss weights relative to struct: cont={user_w_cont}, label={user_w_label})')
@@ -772,6 +840,8 @@ def main():
 
             # Epoch-level monitoring (averaged across subgraphs)
             avg_loss    = epoch_loss_val / len(subgraphs)
+            # Per-component trackers store UNWEIGHTED NLLs (customized_models.py applies
+            # w_cont/w_bin/w_label only to the aggregated loss before backward).
             ll_cont_val  = -epoch_ll_cont  / epoch_nodes
             ll_bin_val   = -epoch_ll_bin   / epoch_nodes
             ll_label_val = -epoch_ll_label / epoch_nodes
@@ -779,7 +849,30 @@ def main():
             # KL adds kl_weight*kl_val to the displayed loss; strip it out for the structure residual.
             # Use model.kl_weight (current effective β·base) so the residual is honest under annealing.
             kl_loss_contrib = model.kl_weight * kl_val if pipeline_args.vae_feat else 0.0
-            ll_struct_val = avg_loss - ll_cont_val - ll_bin_val - ll_label_val - kl_loss_contrib
+            # Back out current weights to recover unweighted struct (avg_loss is weighted).
+            ll_struct_val = (avg_loss
+                             - model.w_cont  * ll_cont_val
+                             - model.w_bin   * ll_bin_val
+                             - model.w_label * ll_label_val
+                             - kl_loss_contrib)
+
+            # Periodic EMA recalibration of loss weights (gated on momentum < 1.0).
+            # KL stays outside — it's annealed separately via kl_schedule.
+            m = pipeline_args.recal_momentum
+            if m < 1.0:
+                cur_cont   = abs(ll_cont_val)  or 1.0
+                cur_bin    = abs(ll_bin_val)   or 1.0
+                cur_label  = abs(ll_label_val) or 1.0
+                cur_struct = abs(ll_struct_val) or 1.0
+
+                ema_struct = m * ema_struct + (1.0 - m) * cur_struct
+                ema_cont   = m * ema_cont   + (1.0 - m) * cur_cont
+                ema_bin    = m * ema_bin    + (1.0 - m) * cur_bin
+                ema_label  = m * ema_label  + (1.0 - m) * cur_label
+
+                model.w_cont  = (ema_struct / ema_cont)  * user_w_cont
+                model.w_bin   = (ema_struct / ema_bin)   * user_w_cont
+                model.w_label = (ema_struct / ema_label) * user_w_label
 
             # Track memory usage
             ram_mb = process.memory_info().rss / 1024 ** 2
@@ -790,6 +883,8 @@ def main():
 
             bin_desc = f" | bin: {ll_bin_val:.4f}" if model.bin_feat_dim > 0 else ""
             kl_desc = f" | β: {kl_beta:.2f} kl: {kl_val:.4f}" if pipeline_args.vae_feat else ""
+            recal_desc = (f" | w: c={model.w_cont:.2f} b={model.w_bin:.2f} l={model.w_label:.2f}"
+                          if pipeline_args.recal_momentum < 1.0 else "")
             n_sg = len(subgraphs)
             grad_desc = (f" | ‖g‖: {epoch_grad_total / n_sg:.2e} "
                          f"(feat {epoch_grad_feat / n_sg:.1e}, "
@@ -797,8 +892,23 @@ def main():
                          f"state {epoch_grad_state / n_sg:.1e}, "
                          f"struct {epoch_grad_struct / n_sg:.1e})")
             pbar.set_description(
-                f"Loss: {avg_loss:.4f} | struct: {ll_struct_val:.4f} | cont: {ll_cont_val:.4f}{bin_desc} | label: {ll_label_val:.4f}{kl_desc}{grad_desc}"
+                f"Loss: {avg_loss:.4f} | struct: {ll_struct_val:.4f} | cont: {ll_cont_val:.4f}{bin_desc} | label: {ll_label_val:.4f}{kl_desc}{recal_desc}{grad_desc}"
             )
+
+            if (pipeline_args.save_model
+                    and pipeline_args.save_model_every > 0
+                    and (epoch + 1) % pipeline_args.save_model_every == 0):
+                snap_path = (os.path.join(out_dir, f'model_epoch{epoch + 1}.pt')
+                             if use_subdir
+                             else os.path.join(save_dir, save_name + f'_model_epoch{epoch + 1}.pt'))
+                torch.save({'state_dict': model.state_dict(),
+                            'cmd_args': vars(cmd_args),
+                            'pipeline_args': vars(pipeline_args),
+                            'feat_dim': feat_dim,
+                            'num_classes': num_classes,
+                            'binary_idx': binary_idx,
+                            'epoch': epoch + 1},
+                           snap_path)
 
         timing_state['train_seconds'] = time.perf_counter() - train_t0
     except Exception as exc:
@@ -819,37 +929,6 @@ def main():
     if gpu_available:
         print(f'Peak VRAM: {peak_vram_mb:.1f} MB')
 
-    # Build save name and directory
-    norm_tag = pipeline_args.normalize if pipeline_args.normalize is not None else 'none'
-    bfs_tag = 'bfs' if pipeline_args.bfs_preprocess else 'nobfs'
-    lw_tag = pipeline_args.loss_weights.replace(',', '_')
-    hetero_tag = 'hetero' if pipeline_args.hetero_feat else 'det'
-    lvf_tag = f'_lvf{pipeline_args.logvar_floor}' if pipeline_args.hetero_feat else ''
-    mask_tag = '_masked' if pipeline_args.mask_test_labels else ''
-    bin_tag = '_binfeat' if pipeline_args.binary_feat else ''
-    vae_tag = f'_vae{pipeline_args.vae_dim}_kl{pipeline_args.kl_weight}' if pipeline_args.vae_feat else ''
-    if pipeline_args.vae_feat and pipeline_args.kl_schedule == 'linear':
-        kl_sched_tag = f'_klan{pipeline_args.kl_anneal_epochs}'
-    elif pipeline_args.vae_feat and pipeline_args.kl_schedule == 'cyclic':
-        kl_sched_tag = f'_klcyc{pipeline_args.kl_cycle_epochs}r{int(pipeline_args.kl_ramp_ratio * 100)}'
-    else:
-        kl_sched_tag = ''
-    cat_tag = f'_cat{pipeline_args.n_bins}_smed{pipeline_args.bin_sigma.median().item():.2f}' if pipeline_args.cat_feat else ''
-    if pipeline_args.mdn_feat:
-        mdn_base_tag = 'lnmdn' if pipeline_args.mdn_base == 'logit_normal' else 'mdn'
-        mdn_tag = f'_{mdn_base_tag}{pipeline_args.mdn_components}_lsf{pipeline_args.mdn_logsigma_floor}'
-    else:
-        mdn_tag = ''
-    if pipeline_args.load_subsamples:
-        sub_tag = (f'_loadsub_{pipeline_args.subsampling_config}'
-                   f'_split{pipeline_args.split_id}_n{len(subgraphs)}')
-    elif pipeline_args.subsample:
-        sub_tag = f'_sub{len(subgraphs)}_size{pipeline_args.subsample_size}_p{pipeline_args.burn_prob}'
-    else:
-        sub_tag = ''
-    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{vae_tag}{kl_sched_tag}{cat_tag}{mdn_tag}{sub_tag}'
-    save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
-
     model.eval()
     print('Start generate')
 
@@ -860,10 +939,8 @@ def main():
     gen_t0 = time.perf_counter()
     try:
         if pipeline_args.subsample or pipeline_args.load_subsamples:
-            # Generate one synthetic subgraph per training subgraph, save to a directory
-            out_dir = os.path.join(save_dir, save_name)
-            os.makedirs(out_dir, exist_ok=True)
-
+            # Generate one synthetic subgraph per training subgraph, save to a directory.
+            # out_dir was pre-created before the training loop.
             with torch.no_grad():
                 for i, (_, _, _, sub_num_nodes) in enumerate(subgraphs[:n_gen]):
                     _, pred_edges, _, pred_node_feats, _ = model(sub_num_nodes, display=(i == 0))
@@ -905,6 +982,14 @@ def main():
                             'bin_sigma': pipeline_args.bin_sigma,
                             'n_bins': pipeline_args.n_bins},
                            os.path.join(out_dir, 'cat_bins.pt'))
+            if pipeline_args.save_model:
+                torch.save({'state_dict': model.state_dict(),
+                            'cmd_args': vars(cmd_args),
+                            'pipeline_args': vars(pipeline_args),
+                            'feat_dim': feat_dim,
+                            'num_classes': num_classes,
+                            'binary_idx': binary_idx},
+                           os.path.join(out_dir, 'model.pt'))
 
         else:
             # Single full graph — original code path
@@ -924,7 +1009,7 @@ def main():
                                           features=gen_cont_feats,
                                           labels=gen_labels)
 
-            os.makedirs(save_dir, exist_ok=True)
+            # save_dir was pre-created before the training loop.
             dgl.save_graphs(os.path.join(save_dir, save_name), [gen_dgl])
 
             if norm_stats is not None:
@@ -937,6 +1022,14 @@ def main():
                             'bin_sigma': pipeline_args.bin_sigma,
                             'n_bins': pipeline_args.n_bins},
                            os.path.join(save_dir, save_name + '_cat_bins.pt'))
+            if pipeline_args.save_model:
+                torch.save({'state_dict': model.state_dict(),
+                            'cmd_args': vars(cmd_args),
+                            'pipeline_args': vars(pipeline_args),
+                            'feat_dim': feat_dim,
+                            'num_classes': num_classes,
+                            'binary_idx': binary_idx},
+                           os.path.join(save_dir, save_name + '_model.pt'))
 
         timing_state['gen_seconds'] = time.perf_counter() - gen_t0
     except Exception as exc:

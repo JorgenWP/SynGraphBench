@@ -71,7 +71,7 @@ Train BiGG conditional model (features + labels). Defaults: `tolokers 1024 1 50 
 * `logvar_floor`: Lower clamp for log-variance in hetero_feat mode (default: -4.0).
 * `binary_feat`: `true` to auto-detect binary feature columns and use BCE loss + Bernoulli sampling instead of Gaussian head. Appends `_binfeat` to save name. Binary columns skip normalization.
 
-**`bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor] [mdn_base] [kl_schedule] [kl_anneal_epochs] [kl_cycle_epochs] [kl_ramp_ratio] [load_subsamples] [subsampling_config] [split_id]`**
+**`bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor] [mdn_base] [kl_schedule] [kl_anneal_epochs] [kl_cycle_epochs] [kl_ramp_ratio] [load_subsamples] [subsampling_config] [split_id] [recal_momentum]`**
 Train BiGG with forest fire subsampling for VRAM-limited training. Same args as above, plus:
 * `subsample_size`: target nodes per subgraph (default: 2000).
 * `burn_prob`: forest fire burn probability — controls subgraph density (default: 0.3).
@@ -93,6 +93,11 @@ Train BiGG with forest fire subsampling for VRAM-limited training. Same args as 
 * `kl_anneal_epochs`: linear ramp duration (epochs) — β ramps 0 → 1 over this many epochs, then sits at 1. Required when `kl_schedule=linear`.
 * `kl_cycle_epochs`: cyclic schedule cycle length (epochs) — β resets to 0 every cycle. Required when `kl_schedule=cyclic`. Paper M = `ceil(epochs / kl_cycle_epochs)`.
 * `kl_ramp_ratio`: cyclic ramp fraction within each cycle (paper R, default 0.5). 0.5 → first half of cycle ramps 0→1, second half sits at 1. Lower values = faster ramp, longer fix phase.
+* `recal_momentum`: EMA momentum for dynamic loss-weight recalibration in `[0,1]` (default 1.0 disables recalibration — bit-identical to one-time calibration). With `m<1`, each epoch updates `ema = m*ema + (1-m)*current` for struct/cont/bin/label and recomputes `w_cont/w_bin/w_label` from the EMA ratios. `user_w_cont`/`user_w_label` from `loss_weights` still apply as multiplicative priors. KL is unaffected (annealed separately via `kl_schedule`). Effective horizon ≈ `1/(1-m)` epochs: `0.9` ≈ 10 epochs, `0.99` ≈ 100 epochs. Appends `_recalM{value}` to the save name when `m<1`.
+
+`SAVE_MODEL` env-var (default `false`): when `true`, persists `model.state_dict` + reconstruction args (`cmd_args`, `pipeline_args`, `feat_dim`, `num_classes`, `binary_idx`) to `model.pt` alongside the synthetic outputs after training. Subsample branch writes `<out_dir>/model.pt`; single-graph branch writes `<save_dir>/<save_name>_model.pt`. Consumed as an env-var rather than a positional arg; the slurm wrapper exports it before calling the shell script. Used by offline diagnostics in `experiments/diagnostics/`.
+
+`SAVE_MODEL_EVERY` env-var (default `0`, requires `SAVE_MODEL=true`): when `> 0`, also writes a `model_epoch{N}.pt` snapshot every N epochs during training (same payload as `model.pt`, plus `epoch` field). Subsample branch writes `<out_dir>/model_epoch{N}.pt`; single-graph branch writes `<save_dir>/<save_name>_model_epoch{N}.pt`. Lets diagnostics measure overfitting trajectories — e.g. how MDN label-embed sensitivity evolves across training. The final `model.pt` is always written at end of training when `SAVE_MODEL=true`.
 
 **`bash scripts/train/train_bigg_structure.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim]`**
 Train BiGG structure-only baseline. Defaults: `tolokers 128 1 100 0.001 256`.

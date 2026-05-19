@@ -118,6 +118,20 @@ def parse_args():
                             help='Use semi-supervised split (0 or 1)')
     data_group.add_argument('--trial_id', type=int, default=0,
                             help='Trial ID for mask split (must match CGT training)')
+    data_group.add_argument('--cdf_invert', type=str, default='linear',
+                            choices=['linear', 'nearest'],
+                            help='Inversion strategy when the saved normalization '
+                                 'method is "cdf". "linear" (default) linearly '
+                                 'interpolates between adjacent sorted training '
+                                 'values; can manufacture intra-gap values when '
+                                 'the decoder rank lands in a density-spike gap. '
+                                 '"nearest" snaps each predicted rank to the '
+                                 'closest sorted training value so the inverted '
+                                 'output stays on the empirical support. Ignored '
+                                 'for non-cdf normalizations. The selection is '
+                                 'reflected in the inverted-graph cache name so '
+                                 'switching modes does not silently reuse stale '
+                                 'caches.')
 
     # --- Training ---
     train_group = parser.add_argument_group('Training')
@@ -198,6 +212,19 @@ def apply_normalization(features, stats):
             uniform = uniform.clamp(eps, 1.0 - eps)
             transformed[:, d] = math.sqrt(2) * torch.erfinv(2 * uniform - 1)
         cont_features = transformed
+    elif method == 'cdf':
+        sorted_values = stats['sorted_values']  # (N_train, D_cont)
+        N_train = sorted_values.shape[0]
+        D = cont_features.shape[1]
+        eps = 1e-6
+        transformed = torch.empty_like(cont_features)
+        for d in range(D):
+            col = cont_features[:, d]
+            sv = sorted_values[:, d]
+            ranks = torch.searchsorted(sv, col).clamp(0, N_train - 1).float()
+            uniform = (ranks + 0.5) / N_train
+            transformed[:, d] = uniform.clamp(eps, 1.0 - eps)
+        cont_features = transformed
 
     if binary_idx:
         features = features.clone()
@@ -208,10 +235,10 @@ def apply_normalization(features, stats):
     return features
 
 
-def invert_normalization(features, stats):
+def invert_normalization(features, stats, cdf_mode='linear'):
     """Invert a previously computed normalization to recover original-space features.
 
-    Only lossless methods (zscore, minmax, quantile) are invertible.
+    Only lossless methods (zscore, minmax, quantile, cdf) are invertible.
     Raises ``ValueError`` for ``'row'`` normalization (lossy).
 
     Parameters
@@ -221,6 +248,14 @@ def invert_normalization(features, stats):
     stats : dict
         Stats dict saved by BiGG pipeline.
         If stats contains ``'binary_idx'``, those columns are left untouched.
+    cdf_mode : {'linear', 'nearest'}
+        Inversion strategy for the ``cdf`` method. ``'linear'`` (default)
+        linearly interpolates between adjacent sorted training values — can
+        manufacture values that don't exist in the training distribution when
+        the predicted rank lands in a density-spike gap. ``'nearest'`` snaps
+        each predicted rank to the closest sorted training value, keeping the
+        inverted output strictly on the empirical support at the cost of
+        intra-gap resolution. Ignored for non-cdf methods.
     """
     binary_idx = stats.get('binary_idx', [])
     if binary_idx:
@@ -251,6 +286,30 @@ def invert_normalization(features, stats):
             frac = indices - lo.float()
             inverted[:, d] = sv[lo] * (1 - frac) + sv[hi] * frac
         cont_features = inverted
+    elif method == 'cdf':
+        if cdf_mode not in ('linear', 'nearest'):
+            raise ValueError(f"cdf_mode must be 'linear' or 'nearest', got {cdf_mode!r}")
+        sorted_values = stats['sorted_values']  # (N_train, D_cont)
+        N_train = sorted_values.shape[0]
+        D = cont_features.shape[1]
+        inverted = torch.empty_like(cont_features)
+        for d in range(D):
+            col = cont_features[:, d]
+            sv = sorted_values[:, d]
+            uniform = col.clamp(0.0, 1.0)
+            indices = (uniform * (N_train - 1)).clamp(0, N_train - 1)
+            if cdf_mode == 'nearest':
+                # Snap each predicted rank to the closest sorted training value,
+                # so the inverted output stays strictly on the empirical support
+                # (no manufactured intra-gap values).
+                nearest = indices.round().long().clamp(0, N_train - 1)
+                inverted[:, d] = sv[nearest]
+            else:
+                lo = indices.long().clamp(0, N_train - 2)
+                hi = lo + 1
+                frac = indices - lo.float()
+                inverted[:, d] = sv[lo] * (1 - frac) + sv[hi] * frac
+        cont_features = inverted
     elif method == 'row':
         raise ValueError(
             "Row (L2) normalization is lossy and cannot be inverted — "
@@ -266,7 +325,28 @@ def invert_normalization(features, stats):
     return features
 
 
-def load_bigg_synthetic_graph(path):
+_INVERTIBLE_METHODS = ('zscore', 'minmax', 'quantile', 'cdf')
+
+
+def _invert_to_raw_space(features, stats, cdf_mode='linear'):
+    """Invert features back to raw space when the saved normalization is lossless.
+
+    Returns ``(features, None)`` when inversion was applied (no further
+    test-side normalization needed). Returns ``(features, stats)`` unchanged
+    for lossy methods (``row``) or when ``stats`` is ``None`` — the caller is
+    expected to keep applying the normalization to cross-graph test features.
+
+    ``cdf_mode`` is forwarded to ``invert_normalization`` (only meaningful when
+    the saved method is ``cdf``).
+    """
+    if stats is None:
+        return features, None
+    if stats.get('method') in _INVERTIBLE_METHODS:
+        return invert_normalization(features, stats, cdf_mode=cdf_mode), None
+    return features, stats
+
+
+def load_bigg_synthetic_graph(path, cdf_mode='linear'):
     """Load a BiGG-generated DGL graph from *path*.
 
     *path* may be either:
@@ -274,7 +354,12 @@ def load_bigg_synthetic_graph(path):
     - A directory (subsampled run): all ``subgraph_*`` files are loaded and
       combined into one block-diagonal graph via ``dgl.batch()``.
 
-    Also returns the norm_stats dict (or None) located alongside the graph.
+    Features are inverted to raw space when a lossless normalization
+    (``zscore``/``minmax``/``quantile``/``cdf``) was used during training, in
+    which case the returned norm_stats is ``None`` so callers skip applying
+    the normalization to cross-graph test features. For lossy ``row``
+    normalization the stats pass through unchanged. ``cdf_mode`` selects the
+    cdf inversion strategy (see ``invert_normalization``).
     """
     if os.path.isdir(path):
         subgraph_files = sorted(
@@ -289,24 +374,34 @@ def load_bigg_synthetic_graph(path):
         combined = dgl.batch(graphs)
         stats_path = os.path.join(path, 'norm_stats.pt')
         norm_stats = torch.load(stats_path, weights_only=False) if os.path.exists(stats_path) else None
+        feats, norm_stats = _invert_to_raw_space(combined.ndata['feature'], norm_stats, cdf_mode=cdf_mode)
+        combined.ndata['feature'] = feats
         print(f'  Loaded {len(graphs)} subgraphs → combined: '
-              f'{combined.num_nodes()} nodes, {combined.num_edges()} edges')
+              f'{combined.num_nodes()} nodes, {combined.num_edges()} edges'
+              + (' (features inverted to raw space)' if norm_stats is None and os.path.exists(stats_path) else ''))
         return combined, norm_stats
     else:
         graphs, _ = dgl.load_graphs(path)
+        graph = graphs[0]
         stats_path = path + '_norm_stats.pt'
         norm_stats = torch.load(stats_path, weights_only=False) if os.path.exists(stats_path) else None
-        return graphs[0], norm_stats
+        feats, norm_stats = _invert_to_raw_space(graph.ndata['feature'], norm_stats, cdf_mode=cdf_mode)
+        graph.ndata['feature'] = feats
+        return graph, norm_stats
 
 
-def load_bigg_real_subsampled_graph(path, original_graph):
+def load_bigg_real_subsampled_graph(path, original_graph, cdf_mode='linear'):
     """Load the real forest-fire subsamples saved alongside a BiGG subsampled run.
 
     Reads every ``subgraph_*`` file in ``{path}/training_subsamples/`` and
-    batches them into a single block-diagonal graph. Split masks are generated
-    with the same per-split proportions as *original_graph* (test_masks are left
-    zeroed — testing happens on the full original graph, so the syn-side mask
-    is unused, matching the synthetic cross-graph code path).
+    batches them into a single block-diagonal graph. Train/val supervision is
+    looked up via each node's saved ``original_indices`` against the dataset's
+    original train/val masks, with first-occurrence dedup so a node that appears
+    in multiple subsamples (multiplicity_cap > 1) supervises only once. This
+    matches ``build_combined_graph`` in
+    ``experiments/subsample_search/masking.py`` so the benchmark scores the
+    same supervision set the grid utility evaluates. test_masks are left zeroed
+    — testing happens on the full original graph.
 
     Returns (combined_graph, norm_stats) or (None, None) if the directory is
     missing / empty.
@@ -327,29 +422,43 @@ def load_bigg_real_subsampled_graph(path, original_graph):
     combined = dgl.batch(graphs)
     num_nodes = combined.num_nodes()
 
+    if 'original_indices' not in combined.ndata:
+        raise KeyError(
+            f"training subsamples in {sub_dir} are missing 'original_indices'; "
+            f"regenerate them via the BiGG pipeline.")
+    orig_ids = combined.ndata['original_indices'].long().cpu()
+
+    flat = orig_ids.numpy()
+    _, first_pos = np.unique(flat, return_index=True)
+    is_first = torch.zeros(num_nodes, dtype=torch.bool)
+    is_first[torch.from_numpy(first_pos).long()] = True
+
     num_splits = original_graph.ndata['train_masks'].shape[1]
-    orig_n = original_graph.num_nodes()
+    orig_train = original_graph.ndata['train_masks'].bool().cpu()
+    orig_val   = original_graph.ndata['val_masks'].bool().cpu()
     train_masks = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
     val_masks   = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
     test_masks  = torch.zeros(num_nodes, num_splits, dtype=torch.uint8)
     for col in range(num_splits):
-        train_frac = original_graph.ndata['train_masks'][:, col].sum().item() / orig_n
-        val_frac   = original_graph.ndata['val_masks'][:, col].sum().item()   / orig_n
-        n_train = max(1, round(train_frac * num_nodes))
-        n_val   = max(1, round(val_frac   * num_nodes))
-        if n_train + n_val > num_nodes:
-            n_val = num_nodes - n_train
-        perm = torch.randperm(num_nodes)
-        train_masks[perm[:n_train],              col] = 1
-        val_masks  [perm[n_train:n_train+n_val], col] = 1
+        train_at_node = orig_train[orig_ids, col]
+        val_at_node   = orig_val[orig_ids, col]
+        train_masks[:, col] = (is_first & train_at_node).to(torch.uint8)
+        val_masks[:, col]   = (is_first & val_at_node).to(torch.uint8)
     combined.ndata['train_masks'] = train_masks
     combined.ndata['val_masks']   = val_masks
     combined.ndata['test_masks']  = test_masks
 
     stats_path = os.path.join(path, 'norm_stats.pt')
     norm_stats = torch.load(stats_path, weights_only=False) if os.path.exists(stats_path) else None
+    feats, norm_stats = _invert_to_raw_space(combined.ndata['feature'], norm_stats, cdf_mode=cdf_mode)
+    combined.ndata['feature'] = feats
     print(f'  Loaded {len(graphs)} real training subsamples → combined: '
-          f'{combined.num_nodes()} nodes, {combined.num_edges()} edges')
+          f'{combined.num_nodes()} nodes, {combined.num_edges()} edges'
+          + (' (features inverted to raw space)' if norm_stats is None and os.path.exists(stats_path) else ''))
+    print(f'  Supervision (split 0): train={int(train_masks[:, 0].sum())} '
+          f'val={int(val_masks[:, 0].sum())} '
+          f'unsupervised={int(num_nodes - train_masks[:, 0].sum() - val_masks[:, 0].sum())} '
+          f'(first-occurrence dedup applied)')
     return combined, norm_stats
 
 

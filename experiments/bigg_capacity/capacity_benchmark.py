@@ -249,7 +249,7 @@ def run_one_trial(*, dataset: str, method_id: str, partition_size: int, n_total:
     if os.path.exists(timing_log):
         os.remove(timing_log)
 
-    # Build positional args for train_bigg_capacity.sh (38 positions).
+    # Build positional args for train_bigg_capacity.sh (39 positions).
     shell_args = [
         dataset,                       # 1 dataset
         '-1',                          # 2 blksize
@@ -289,6 +289,7 @@ def run_one_trial(*, dataset: str, method_id: str, partition_size: int, n_total:
         str(args.num_train_subgraphs), # 36 num_train_subgraphs
         str(args.num_gen_subgraphs),   # 37 num_gen_subgraphs
         timing_log,                    # 38 timing_log_path
+        '1.0',                         # 39 recal_momentum (disabled; capacity benchmark uses static weights)
     ]
 
     shell_path = os.path.join(_PROJECT_ROOT, 'scripts', 'train', 'train_bigg_capacity.sh')

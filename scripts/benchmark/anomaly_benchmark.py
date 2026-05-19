@@ -495,6 +495,7 @@ def main():
     print(f"  Synthetic dir:  {args.synthetic_dir}")
     print(f"  Output dir:     {args.output_dir}")
     print(f"  Trial ID:       {args.trial_id}")
+    print(f"  CDF invert:     {args.cdf_invert}")
 
     print("\nTraining:")
     print(f"  Trials:         {args.trials}")
@@ -568,20 +569,45 @@ def main():
         else:
             # Full graph (BiGG, etc.): train+val on synthetic, test on original.
             # For subsampled runs (directory), combine subgraphs into one file.
+            # Synthetic features are inverted back to raw space at load time
+            # (when a lossless normalization was used during training), so all
+            # benchmark rows live in the dataset's native feature space and
+            # the original-vs-synthetic delta isn't conflated with normalization.
+            # The ``_v2`` suffix invalidates caches that pre-date that change.
+            # The ``cdf_invert`` mode is appended to the cache stem when not
+            # the default ``linear`` so switching modes doesn't reuse stale
+            # caches that were inverted with a different strategy.
+            cdf_tag = '' if args.cdf_invert == 'linear' else f'_{args.cdf_invert}'
             eval_stem = stem
             norm_stats_path = os.path.join(task_dir, stem + '_norm_stats.pt')
             if os.path.isdir(syn_path):
-                combined_path = os.path.join(task_dir, stem + '_combined')
+                combined_stem = stem + '_combined_v2' + cdf_tag
+                combined_path = os.path.join(task_dir, combined_stem)
                 if not os.path.exists(combined_path):
                     print(f'  Combining subgraphs → {combined_path}')
-                    combined_graph, norm_stats = load_bigg_synthetic_graph(syn_path)
+                    combined_graph, norm_stats = load_bigg_synthetic_graph(
+                        syn_path, cdf_mode=args.cdf_invert)
                     dgl.save_graphs(combined_path, [combined_graph])
                     if norm_stats is not None:
                         torch.save(norm_stats, combined_path + '_norm_stats.pt')
                 else:
                     print(f'  Using cached combined graph: {combined_path}')
-                eval_stem = stem + '_combined'
+                eval_stem = combined_stem
                 norm_stats_path = combined_path + '_norm_stats.pt'
+            else:
+                inverted_stem = stem + '_inverted_v2' + cdf_tag
+                inverted_path = os.path.join(task_dir, inverted_stem)
+                if not os.path.exists(inverted_path):
+                    print(f'  Inverting synthetic features → {inverted_path}')
+                    syn_graph, norm_stats = load_bigg_synthetic_graph(
+                        syn_path, cdf_mode=args.cdf_invert)
+                    dgl.save_graphs(inverted_path, [syn_graph])
+                    if norm_stats is not None:
+                        torch.save(norm_stats, inverted_path + '_norm_stats.pt')
+                else:
+                    print(f'  Using cached inverted synthetic graph: {inverted_path}')
+                eval_stem = inverted_stem
+                norm_stats_path = inverted_path + '_norm_stats.pt'
 
             results = evaluate_models_cross_graph(
                 dataset_name, models, args.data_dir, task_dir, eval_stem,
@@ -597,7 +623,7 @@ def main():
             # so the delta between the two isolates generative-model fidelity
             # from the subsampling effect.
             if os.path.isdir(syn_path):
-                real_sub_stem = stem + '_real_sub_combined'
+                real_sub_stem = stem + '_real_sub_combined_v3' + cdf_tag
                 real_sub_path = os.path.join(task_dir, real_sub_stem)
                 real_sub_norm_path = real_sub_path + '_norm_stats.pt'
                 real_sub_ready = os.path.exists(real_sub_path)
@@ -606,7 +632,7 @@ def main():
                     orig_for_masks = GADBenchDataset(
                         dataset_name, prefix=args.data_dir + '/').graph
                     real_combined, real_norm = load_bigg_real_subsampled_graph(
-                        syn_path, orig_for_masks)
+                        syn_path, orig_for_masks, cdf_mode=args.cdf_invert)
                     if real_combined is not None:
                         print(f'  Combining real subsamples → {real_sub_path}')
                         dgl.save_graphs(real_sub_path, [real_combined])
