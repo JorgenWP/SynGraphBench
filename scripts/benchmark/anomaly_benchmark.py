@@ -45,7 +45,8 @@ from bench_utils import (
     parse_args,
     load_cgt_synthetic_data, build_cgt_datasets,
     build_original_cg_datasets, print_comparison,
-    load_bigg_synthetic_graph, apply_normalization,
+    load_bigg_synthetic_graph, load_bigg_real_subsampled_graph,
+    apply_normalization,
     resolve_cgt_trial_paths, make_cgt_rebuild_fn,
     _assert_pt_alignment, format_duration,
 )
@@ -387,14 +388,21 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
 def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn_file_name,
                                 trials, semi_supervised, trial_id,
                                 epochs, patience, lr, drop_rate, h_feats, num_layers,
-                                norm_stats_path=None, curve_records=None):
-    """Train GNNs on synthetic graph, validate on synthetic val, test on original test nodes.
+                                norm_stats_path=None, curve_records=None,
+                                source_label='synthetic-graph'):
+    """Train GNNs on a train-source graph, validate on its val mask, test on original test nodes.
+
+    *source_label* identifies the training-source in printed banners and result
+    rows — e.g. ``'synthetic-graph'`` (BiGG-generated subgraphs) or
+    ``'real-subsampled-graph'`` (the real forest-fire subsamples used to train
+    the generative model). The rest of the pipeline is identical.
 
     Per-epoch val/test AUPRC curves are appended to curve_records (if provided),
     averaged across trials, for val/test divergence analysis.
     """
     from models.cross_graph_detector import (CrossGraphGNNDetector,
                                                 CrossGraphXGBGraphDetector,
+                                                CrossGraphXGBDetector,
                                                 CROSS_GRAPH_SUPPORTED_MODELS)
 
     # Load normalization stats if available
@@ -411,7 +419,7 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
             continue
 
         print(f"\n{'='*60}")
-        print(f"  SYNTHETIC-GRAPH (CROSS) | {dataset_name} | {model_name}")
+        print(f"  {source_label.upper()} (CROSS) | {dataset_name} | {model_name}")
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
@@ -450,6 +458,8 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
             print(f"  Trial {t}, seed={seed}")
             if model_name == 'XGBGraph':
                 detector = CrossGraphXGBGraphDetector(train_config, model_config, syn_data, orig_data)
+            elif model_name == 'XGBoost':
+                detector = CrossGraphXGBDetector(train_config, model_config, syn_data, orig_data)
             else:
                 detector = CrossGraphGNNDetector(train_config, model_config, syn_data, orig_data)
 
@@ -480,7 +490,7 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
 
         if auc_list:
             results.append({
-                'source': 'synthetic-graph', 'dataset': dataset_name, 'model': model_name,
+                'source': source_label, 'dataset': dataset_name, 'model': model_name,
                 'AUROC_mean': np.mean(auc_list), 'AUROC_std': np.std(auc_list),
                 'AUPRC_mean': np.mean(pre_list), 'AUPRC_std': np.std(pre_list),
                 'RecK_mean':  np.mean(rec_list),  'RecK_std':  np.std(rec_list),
@@ -495,7 +505,7 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
             test_arr = np.array([pad(c) for c in test_curves])
             for epoch in range(max_len):
                 curve_records.append({
-                    'source': 'synthetic-graph',
+                    'source': source_label,
                     'dataset': dataset_name, 'model': model_name, 'epoch': epoch,
                     'val_auprc_mean':  float(val_arr[:, epoch].mean()),
                     'val_auprc_std':   float(val_arr[:, epoch].std()),
@@ -551,6 +561,7 @@ def main():
     print(f"  Synthetic dir:  {args.synthetic_dir}")
     print(f"  Output dir:     {args.output_dir}")
     print(f"  Trial ID:       {args.trial_id}")
+    print(f"  CDF invert:     {args.cdf_invert}")
 
     print("\nTraining:")
     print(f"  Trials:         {args.trials}")
@@ -631,20 +642,45 @@ def main():
         else:
             # Full graph (BiGG, etc.): train+val on synthetic, test on original.
             # For subsampled runs (directory), combine subgraphs into one file.
+            # Synthetic features are inverted back to raw space at load time
+            # (when a lossless normalization was used during training), so all
+            # benchmark rows live in the dataset's native feature space and
+            # the original-vs-synthetic delta isn't conflated with normalization.
+            # The ``_v2`` suffix invalidates caches that pre-date that change.
+            # The ``cdf_invert`` mode is appended to the cache stem when not
+            # the default ``linear`` so switching modes doesn't reuse stale
+            # caches that were inverted with a different strategy.
+            cdf_tag = '' if args.cdf_invert == 'linear' else f'_{args.cdf_invert}'
             eval_stem = stem
             norm_stats_path = os.path.join(task_dir, stem + '_norm_stats.pt')
             if os.path.isdir(syn_path):
-                combined_path = os.path.join(task_dir, stem + '_combined')
+                combined_stem = stem + '_combined_v2' + cdf_tag
+                combined_path = os.path.join(task_dir, combined_stem)
                 if not os.path.exists(combined_path):
                     print(f'  Combining subgraphs → {combined_path}')
-                    combined_graph, norm_stats = load_bigg_synthetic_graph(syn_path)
+                    combined_graph, norm_stats = load_bigg_synthetic_graph(
+                        syn_path, cdf_mode=args.cdf_invert)
                     dgl.save_graphs(combined_path, [combined_graph])
                     if norm_stats is not None:
                         torch.save(norm_stats, combined_path + '_norm_stats.pt')
                 else:
                     print(f'  Using cached combined graph: {combined_path}')
-                eval_stem = stem + '_combined'
+                eval_stem = combined_stem
                 norm_stats_path = combined_path + '_norm_stats.pt'
+            else:
+                inverted_stem = stem + '_inverted_v2' + cdf_tag
+                inverted_path = os.path.join(task_dir, inverted_stem)
+                if not os.path.exists(inverted_path):
+                    print(f'  Inverting synthetic features → {inverted_path}')
+                    syn_graph, norm_stats = load_bigg_synthetic_graph(
+                        syn_path, cdf_mode=args.cdf_invert)
+                    dgl.save_graphs(inverted_path, [syn_graph])
+                    if norm_stats is not None:
+                        torch.save(norm_stats, inverted_path + '_norm_stats.pt')
+                else:
+                    print(f'  Using cached inverted synthetic graph: {inverted_path}')
+                eval_stem = inverted_stem
+                norm_stats_path = inverted_path + '_norm_stats.pt'
 
             results = evaluate_models_cross_graph(
                 dataset_name, models, args.data_dir, task_dir, eval_stem,
@@ -653,6 +689,48 @@ def main():
                 args.lr, args.drop_rate, args.h_feats, args.num_layers,
                 norm_stats_path=norm_stats_path,
                 curve_records=all_curve_records)
+            all_results.extend(results)
+
+            # Train on the REAL forest-fire subsamples, test on full original.
+            # Shares subsampling + cross-graph testing with the synthetic path,
+            # so the delta between the two isolates generative-model fidelity
+            # from the subsampling effect.
+            if os.path.isdir(syn_path):
+                real_sub_stem = stem + '_real_sub_combined_v3' + cdf_tag
+                real_sub_path = os.path.join(task_dir, real_sub_stem)
+                real_sub_norm_path = real_sub_path + '_norm_stats.pt'
+                real_sub_ready = os.path.exists(real_sub_path)
+
+                if not real_sub_ready:
+                    orig_for_masks = GADBenchDataset(
+                        dataset_name, prefix=args.data_dir + '/').graph
+                    real_combined, real_norm = load_bigg_real_subsampled_graph(
+                        syn_path, orig_for_masks, cdf_mode=args.cdf_invert)
+                    if real_combined is not None:
+                        print(f'  Combining real subsamples → {real_sub_path}')
+                        dgl.save_graphs(real_sub_path, [real_combined])
+                        if real_norm is not None:
+                            torch.save(real_norm, real_sub_norm_path)
+                        real_sub_ready = True
+                    else:
+                        print(f'  No training_subsamples/ found in {syn_path}; '
+                              f'skipping real-subsampled source.')
+                else:
+                    print(f'  Using cached real-subsampled combined graph: {real_sub_path}')
+
+                if real_sub_ready:
+                    real_norm_arg = (real_sub_norm_path
+                                     if os.path.exists(real_sub_norm_path) else None)
+                    results = evaluate_models_cross_graph(
+                        dataset_name, models, args.data_dir, task_dir, real_sub_stem,
+                        args.trials, args.semi_supervised, args.trial_id,
+                        args.epochs, args.patience,
+                        args.lr, args.drop_rate, args.h_feats, args.num_layers,
+                        norm_stats_path=real_norm_arg,
+                        curve_records=all_curve_records,
+                        source_label='real-subsampled-graph')
+                    all_results.extend(results)
+            continue
         all_results.extend(results)
 
     phase2_elapsed = time.time() - t_phase2

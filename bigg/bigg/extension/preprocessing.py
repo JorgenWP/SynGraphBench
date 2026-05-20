@@ -258,7 +258,7 @@ def forest_fire_subsample(graph_nx, node_data, target_size, burn_prob, seed_node
 # Feature normalisation
 # ---------------------------------------------------------------------------
 
-NORMALIZATION_METHODS = ('zscore', 'minmax', 'row', 'quantile')
+NORMALIZATION_METHODS = ('zscore', 'minmax', 'row', 'quantile', 'cdf')
 
 
 def normalize_features(features, method):
@@ -329,6 +329,22 @@ def normalize_features(features, method):
             transformed[:, d] = math.sqrt(2) * torch.erfinv(2 * uniform - 1)
         features = transformed
 
+    elif method == 'cdf':
+        # Rank-based empirical CDF: any distribution → Uniform[0, 1]
+        N, D = features.shape
+        sorted_values, _ = features.sort(dim=0)
+        stats['sorted_values'] = sorted_values
+
+        eps = 1e-6
+        transformed = torch.empty_like(features)
+        for d in range(D):
+            col = features[:, d]
+            sv = sorted_values[:, d]
+            ranks = torch.searchsorted(sv, col).clamp(0, N - 1).float()
+            uniform = (ranks + 0.5) / N
+            transformed[:, d] = uniform.clamp(eps, 1.0 - eps)
+        features = transformed
+
     return features, stats
 
 
@@ -372,13 +388,27 @@ def apply_normalization(features, stats):
             transformed[:, d] = math.sqrt(2) * torch.erfinv(2 * uniform - 1)
         features = transformed
 
+    elif method == 'cdf':
+        sorted_values = stats['sorted_values']  # (N_train, D)
+        N_train = sorted_values.shape[0]
+        D = features.shape[1]
+        eps = 1e-6
+        transformed = torch.empty_like(features)
+        for d in range(D):
+            col = features[:, d]
+            sv = sorted_values[:, d]
+            ranks = torch.searchsorted(sv, col).clamp(0, N_train - 1).float()
+            uniform = (ranks + 0.5) / N_train
+            transformed[:, d] = uniform.clamp(eps, 1.0 - eps)
+        features = transformed
+
     return features
 
 
 def invert_normalization(features, stats):
     """Invert a previously computed normalization to recover original-space features.
 
-    Only lossless methods (zscore, minmax, quantile) are invertible.
+    Only lossless methods (zscore, minmax, quantile, cdf) are invertible.
     Raises ``ValueError`` for ``'row'`` normalization (lossy).
 
     Parameters
@@ -410,6 +440,22 @@ def invert_normalization(features, stats):
             # Normal CDF: N(0,1) → uniform [0, 1]
             uniform = 0.5 * (1.0 + torch.erf(col / math.sqrt(2)))
             # Uniform → index into sorted training values
+            indices = (uniform * (N_train - 1)).clamp(0, N_train - 1)
+            lo = indices.long().clamp(0, N_train - 2)
+            hi = lo + 1
+            frac = indices - lo.float()
+            inverted[:, d] = sv[lo] * (1 - frac) + sv[hi] * frac
+        features = inverted
+    elif method == 'cdf':
+        sorted_values = stats['sorted_values']  # (N_train, D)
+        N_train = sorted_values.shape[0]
+        D = features.shape[1]
+        inverted = torch.empty_like(features)
+        for d in range(D):
+            col = features[:, d]
+            sv = sorted_values[:, d]
+            # Already uniform in [0, 1] — index directly into sorted training values
+            uniform = col.clamp(0.0, 1.0)
             indices = (uniform * (N_train - 1)).clamp(0, N_train - 1)
             lo = indices.long().clamp(0, N_train - 2)
             hi = lo + 1
@@ -509,3 +555,112 @@ def build_generated_dgl(gen_nx, original_graph, features=None, labels=None):
     gen_dgl.ndata['test_masks']  = test_masks
 
     return gen_dgl
+
+
+# ---------------------------------------------------------------------------
+# Per-feature quantile binning (for AR categorical feature predictor)
+# ---------------------------------------------------------------------------
+
+def fit_feature_bins(cont_feats, n_bins):
+    """Fit per-feature quantile bin edges and centers.
+
+    Parameters
+    ----------
+    cont_feats : torch.Tensor
+        (N, F) continuous feature matrix, in whatever space the predictor will
+        operate on (typically post-normalisation).
+    n_bins : int
+        Number of bins per feature.
+
+    Returns
+    -------
+    edges : torch.Tensor
+        (F, n_bins - 1) inner bin boundaries, monotone increasing along dim=1.
+        Suitable for ``torch.searchsorted`` / ``torch.bucketize``.
+    centers : torch.Tensor
+        (F, n_bins) per-bin representative values. When a bin is non-empty the
+        center is the empirical mean of the training values assigned to it;
+        empty bins fall back to the nearest non-empty bin's center so that
+        every bin position emits a valid in-distribution value (important
+        under k-means-privatized inputs, where mass collapses to k centroids
+        and most bins are empty).
+
+    Notes
+    -----
+    Edges are inner quantiles (probs 1/B..(B-1)/B), so the outer bins extend to
+    +/- infinity at inference. Duplicate quantiles (from mass points) produce
+    zero-width bins by design — value-space soft labels handle this correctly.
+    """
+    assert cont_feats.dim() == 2, f"expected (N, F), got {cont_feats.shape}"
+    assert n_bins >= 2, f"n_bins must be >= 2, got {n_bins}"
+
+    feats = cont_feats.detach().float()
+    N, F = feats.shape
+
+    # Inner quantile probabilities: 1/B, 2/B, ..., (B-1)/B
+    probs = torch.linspace(0.0, 1.0, n_bins + 1)[1:-1]  # (n_bins - 1,)
+    # torch.quantile: (probs, F) when we pass feats as (N, F) with dim=0
+    edges = torch.quantile(feats, probs, dim=0).T.contiguous()  # (F, n_bins - 1)
+
+    # Assign each value to a bin via searchsorted
+    # values.T: (F, N); edges: (F, B-1) -> idx: (F, N) in [0, B]
+    idx = torch.searchsorted(edges, feats.T.contiguous())
+    idx = idx.clamp(max=n_bins - 1)
+
+    # Per-bin empirical mean, with nearest-non-empty fallback for empty bins.
+    centers = torch.zeros(F, n_bins)
+    for f in range(F):
+        col = feats[:, f]
+        col_idx = idx[f]
+        populated = []
+        for b in range(n_bins):
+            mask = col_idx == b
+            if mask.any():
+                centers[f, b] = col[mask].mean()
+                populated.append(b)
+
+        if len(populated) == 0:
+            # Degenerate: no values assigned to any bin. Fall back to 0.
+            continue
+        if len(populated) == n_bins:
+            continue
+
+        # Fill empty bins with the center of the nearest populated bin.
+        # Ties (equidistant left/right) go to the left.
+        pop_tensor = torch.tensor(populated)
+        for b in range(n_bins):
+            if b in populated:
+                continue
+            dists = (pop_tensor - b).abs()
+            nearest = populated[int(dists.argmin().item())]
+            centers[f, b] = centers[f, nearest]
+
+    return edges, centers
+
+
+def default_bin_sigma(centers, fraction=0.5):
+    """Per-feature bin sigma: *fraction* of the median positive spacing between
+    that feature's bin centers.
+
+    Data-adaptive across feature regimes in a single mechanism:
+    * Binary / few-value features (wide center gaps) get large sigma.
+    * Dense continuous features (tight center gaps) get small sigma.
+    * K-means-privatized features (k centers, gaps depend on k) scale automatically.
+
+    This removes the need for a separate binary-feature head — every column is
+    handled uniformly by cat_feat with a sigma calibrated to its own scale.
+
+    Returns
+    -------
+    torch.Tensor
+        (F,) per-feature sigma values. Features whose centers are fully
+        collapsed (no positive spacing) fall back to 1.0.
+    """
+    F = centers.shape[0]
+    spacings = centers[:, 1:] - centers[:, :-1]  # (F, n_bins - 1)
+    sigmas = torch.full((F,), 1.0)
+    for f in range(F):
+        positive = spacings[f][spacings[f] > 0]
+        if positive.numel() > 0:
+            sigmas[f] = fraction * positive.median()
+    return sigmas

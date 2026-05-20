@@ -2,17 +2,24 @@
 # Evaluate GNN models on original vs synthetic graph data.
 #
 # Usage:
-#   bash scripts/benchmark/run_anomaly_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [task]
+#   bash scripts/benchmark/run_anomaly_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [task] [cdf_invert]
 #
 # Arguments:
 #   datasets        Comma-separated dataset names (default: reddit)
-#   models          Comma-separated model names (default: GCN,GIN,GraphSAGE,XGBGraph)
+#   models          Comma-separated model names (default: GCN,GIN,GraphSAGE,XGBGraph,XGBoost)
+#                   XGBoost is the feature-only diagnostic row (trains on syn raw features,
+#                   tests on orig raw features — no graph either side).
 #   trials          Number of evaluation trials (default: 1)
 #   generator       Generative model folder under datasets/synthetic/ (default: cgt)
 #                   Supported: cgt, bigg
 #   synthetic_name  Exact filename stem for a specific variant (default: uses dataset name)
 #   task            Task subfolder under <dataset>/ (default: hidden_labels)
 #                   Supported: hidden_labels, hidden_links, structure
+#   cdf_invert      Inversion strategy for cdf-normalized runs (default: linear)
+#                   linear  — linearly interpolate between adjacent sorted training values
+#                   nearest — snap predicted ranks to the closest sorted training value
+#                             (keeps inverted output on the empirical support; cache key
+#                             is suffixed so switching modes doesn't reuse stale caches)
 #
 # Examples:
 #   bash scripts/benchmark/run_anomaly_benchmark.sh reddit GCN,GIN 3 cgt
@@ -24,11 +31,12 @@ set -e
 
 # Configuration with defaults
 DATASETS="${1:-reddit}"
-MODELS="${2:-GCN,GIN,GraphSAGE,XGBGraph}"
+MODELS="${2:-GCN,GIN,GraphSAGE,XGBGraph,XGBoost}"
 TRIALS="${3:-1}"
 GENERATOR="${4:-cgt}"
 SYNTHETIC_NAME="${5:-}"
 TASK="${6:-hidden_labels}"
+CDF_INVERT="${7:-linear}"
 
 # Map generator to its synthetic type (evaluation mode)
 case "$GENERATOR" in
@@ -48,6 +56,7 @@ echo "Generator:        $GENERATOR  (datasets/synthetic/$GENERATOR/)"
 echo "Synthetic type:   $SYNTHETIC_TYPE"
 echo "Synthetic name:   ${SYNTHETIC_NAME:-'(use dataset name)'}"
 echo "Task:             $TASK"
+echo "CDF invert:       $CDF_INVERT"
 echo ""
 
 EXTRA_ARGS=""
@@ -62,4 +71,5 @@ python -u scripts/benchmark/anomaly_benchmark.py \
     --generator "$GENERATOR" \
     --synthetic_type "$SYNTHETIC_TYPE" \
     --task "$TASK" \
+    --cdf_invert "$CDF_INVERT" \
     $EXTRA_ARGS

@@ -11,7 +11,7 @@ if _gadbench not in sys.path:
 
 from models.anomaly_detection.detector import BaseDetector
 
-CROSS_GRAPH_SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph']
+CROSS_GRAPH_SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph', 'XGBoost']
 
 
 class CrossGraphGNNDetector(BaseDetector):
@@ -162,6 +162,70 @@ class CrossGraphXGBGraphDetector(BaseDetector):
         eval_metric = roc_auc_score if train_config['metric'] == "AUROC" else average_precision_score
         self.model = xgb.XGBClassifier(
             tree_method='hist', eval_metric=eval_metric, verbose=2, **cfg)
+
+        self.best_score = -1
+        self.patience_knt = 0
+
+    def train(self):
+        train_X = self.syn_feats[self.syn_train_mask].cpu().numpy()
+        train_y = self.syn_labels[self.syn_train_mask].cpu().numpy()
+        val_X = self.syn_feats[self.syn_val_mask].cpu().numpy()
+        val_y = self.syn_labels[self.syn_val_mask].cpu().numpy()
+        test_X = self.orig_feats[self.orig_test_mask].cpu().numpy()
+        test_y = self.orig_labels[self.orig_test_mask].cpu().numpy()
+        weights = np.where(train_y == 0, 1, self.weight)
+
+        self.model.fit(train_X, train_y, sample_weight=weights,
+                       eval_set=[(val_X, val_y)], verbose=False)
+        pred_val_y = self.model.predict_proba(val_X)[:, 1]
+        pred_y = self.model.predict_proba(test_X)[:, 1]
+        val_score = self.eval(val_y, pred_val_y)
+        self.best_score = val_score[self.train_config['metric']]
+        test_score = self.eval(test_y, pred_y)
+        return test_score
+
+
+class CrossGraphXGBDetector(BaseDetector):
+    """
+    Feature-only diagnostic: train XGBoost on synthetic raw features,
+    test on original raw features. No graph structure used on either side.
+
+    Diagnostic: compare the resulting AUROC against the original-side XGBoost
+    baseline. A synthetic >> original gap means anomalies are too separable
+    by features alone — the generator has over-encoded the label into the
+    features and the downstream GNN wins aren't measuring topology use.
+
+    Train:      synthetic graph train nodes  (XGBoost fit)
+    Val:        synthetic graph val nodes     (XGBoost eval_set)
+    Test:       original graph test nodes     (final evaluation)
+    """
+
+    def __init__(self, train_config, model_config, syn_data, orig_data):
+        import xgboost as xgb
+        from sklearn.metrics import roc_auc_score, average_precision_score
+
+        device = train_config['device']
+        self.train_config = train_config
+        self.model_config = model_config
+
+        syn_graph = syn_data.graph.to(device)
+        self.syn_feats = syn_graph.ndata['feature']
+        self.syn_labels = syn_graph.ndata['label']
+        self.syn_train_mask = syn_graph.ndata['train_mask'].bool()
+        self.syn_val_mask = syn_graph.ndata['val_mask'].bool()
+
+        orig_graph = orig_data.graph.to(device)
+        self.orig_feats = orig_graph.ndata['feature']
+        self.orig_labels = orig_graph.ndata['label']
+        self.orig_test_mask = orig_graph.ndata['test_mask'].bool()
+
+        syn_train_labels = self.syn_labels[self.syn_train_mask]
+        pos = syn_train_labels.sum().item()
+        self.weight = (len(syn_train_labels) - pos) / max(pos, 1)
+
+        eval_metric = roc_auc_score if train_config['metric'] == 'AUROC' else average_precision_score
+        self.model = xgb.XGBClassifier(
+            tree_method='hist', eval_metric=eval_metric, verbose=2)
 
         self.best_score = -1
         self.patience_knt = 0
