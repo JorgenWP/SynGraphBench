@@ -18,9 +18,10 @@ import networkx as nx
 # Loading & conversion
 # ---------------------------------------------------------------------------
 
-def load_dgl_graph(dataset, base_path='../datasets/original/'):
-    """Load first DGL graph from *base_path/dataset*."""
-    graphs, _ = dgl.load_graphs(base_path + dataset)
+def load_dgl_graph(dataset, base_path='../datasets/original/', input_path=None):
+    """Load first DGL graph from *input_path* if given, else from *base_path/dataset*."""
+    path = input_path if input_path is not None else (base_path + dataset)
+    graphs, _ = dgl.load_graphs(path)
     return graphs[0]
 
 

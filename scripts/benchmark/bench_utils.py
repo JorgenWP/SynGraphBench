@@ -46,6 +46,15 @@ def parse_link_args():
                                  '(hidden_labels, hidden_links, or structure). '
                                  'Resolved path: '
                                  '<synthetic_dir>/<generator>/<dataset>/<task>/<stem>[.pt].')
+    data_group.add_argument('--graph_path', type=str, default=None,
+                            help='Override the resolved synthetic graph path. '
+                                 'When set, this exact file is loaded as the '
+                                 'synthetic graph (bypassing '
+                                 '<synthetic_dir>/<generator>/<dataset>/<task>/<stem>). '
+                                 'Used for task-agnostic artifacts like '
+                                 'datasets/kanon/<dataset>/<stem>.dgl. '
+                                 'Only valid with --synthetic_type graph and a '
+                                 'single dataset in --datasets.')
 
     lp_group = parser.add_argument_group('Link prediction')
     lp_group.add_argument('--val_ratio', type=float, default=0.05,
@@ -114,6 +123,15 @@ def parse_args():
                                  '(hidden_labels, hidden_links, or structure). '
                                  'Resolved path: '
                                  '<synthetic_dir>/<generator>/<dataset>/<task>/<stem>[.pt].')
+    data_group.add_argument('--graph_path', type=str, default=None,
+                            help='Override the resolved synthetic graph path. '
+                                 'When set, this exact file is loaded as the '
+                                 'synthetic graph (bypassing '
+                                 '<synthetic_dir>/<generator>/<dataset>/<task>/<stem>). '
+                                 'Used for task-agnostic artifacts like '
+                                 'datasets/kanon/<dataset>/<stem>.dgl. '
+                                 'Only valid with --synthetic_type graph and a '
+                                 'single dataset in --datasets.')
     data_group.add_argument('--semi_supervised', type=int, default=0,
                             help='Use semi-supervised split (0 or 1)')
     data_group.add_argument('--trial_id', type=int, default=0,

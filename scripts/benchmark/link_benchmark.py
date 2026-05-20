@@ -526,27 +526,37 @@ def main():
 
     for dataset_name in datasets:
         # Resolve path: synthetic_dir/<generator>/<dataset>/<task>/<stem>[.pt]
-        gen_dir = os.path.join(args.synthetic_dir, args.generator)
-        dataset_dir = os.path.join(gen_dir, dataset_name)
-        task_dir = os.path.join(dataset_dir, args.task)
-        stem = args.synthetic_name
-        if args.synthetic_type == 'comp-graph':
-            variant_dir = os.path.join(task_dir, stem)
-            canonical_path = os.path.join(variant_dir, f'{stem}.pt')
-            trial_paths = resolve_cgt_trial_paths(canonical_path, args.trials)
-            if trial_paths is None:
-                if os.path.exists(canonical_path):
-                    print(f"  Falling back to single-file CGT .pt for all "
-                          f"{args.trials} trials: {canonical_path}")
-                    trial_paths = [canonical_path] * args.trials
-                else:
-                    print(f"\n  Skipping {dataset_name}: no per-trial .pt at "
-                          f"{variant_dir}/{stem}_t*.pt and no canonical "
-                          f"{canonical_path}")
-                    continue
-            syn_path = trial_paths[0]
+        # If --graph_path is set, override path resolution entirely (used for
+        # task-agnostic artifacts like datasets/kanon/<dataset>/<stem>.dgl).
+        if args.graph_path is not None:
+            if args.synthetic_type != 'graph':
+                raise ValueError('--graph_path is only supported with '
+                                 '--synthetic_type graph.')
+            syn_path = args.graph_path
+            task_dir = os.path.dirname(os.path.abspath(syn_path))
+            stem = os.path.splitext(os.path.basename(syn_path))[0]
         else:
-            syn_path = os.path.join(task_dir, stem)
+            gen_dir = os.path.join(args.synthetic_dir, args.generator)
+            dataset_dir = os.path.join(gen_dir, dataset_name)
+            task_dir = os.path.join(dataset_dir, args.task)
+            stem = args.synthetic_name
+            if args.synthetic_type == 'comp-graph':
+                variant_dir = os.path.join(task_dir, stem)
+                canonical_path = os.path.join(variant_dir, f'{stem}.pt')
+                trial_paths = resolve_cgt_trial_paths(canonical_path, args.trials)
+                if trial_paths is None:
+                    if os.path.exists(canonical_path):
+                        print(f"  Falling back to single-file CGT .pt for all "
+                              f"{args.trials} trials: {canonical_path}")
+                        trial_paths = [canonical_path] * args.trials
+                    else:
+                        print(f"\n  Skipping {dataset_name}: no per-trial .pt at "
+                              f"{variant_dir}/{stem}_t*.pt and no canonical "
+                              f"{canonical_path}")
+                        continue
+                syn_path = trial_paths[0]
+            else:
+                syn_path = os.path.join(task_dir, stem)
 
             if not os.path.exists(syn_path):
                 print(f"\n  Skipping {dataset_name}: {syn_path} not found")

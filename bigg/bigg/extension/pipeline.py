@@ -209,6 +209,11 @@ def main():
                                  help='If set, write a JSON timing log (train/gen seconds, peak VRAM, '
                                       'partition stats, status) to this path. Always written even on '
                                       'failure; pipeline exits with code 2 on caught error.')
+    pipeline_parser.add_argument('-input_graph', type=str, default=None,
+                                 help='Override path to input DGL graph (e.g. a k-anonymized variant '
+                                      'at datasets/kanon/<dataset>/<stem>.dgl). When set, supersedes '
+                                      'the default ../datasets/original/<dataset> lookup. -dataset '
+                                      'is still used for save naming.')
 
     pipeline_args, _ = pipeline_parser.parse_known_args()
 
@@ -291,7 +296,7 @@ def main():
 
     #Load dataset
     DATASET = cmd_args.data_dir
-    graph = load_dgl_graph(DATASET)
+    graph = load_dgl_graph(DATASET, input_path=pipeline_args.input_graph)
 
     #Get features and labels
     cont_feats = graph.ndata['feature']
