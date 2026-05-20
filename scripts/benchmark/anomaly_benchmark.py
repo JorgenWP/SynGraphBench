@@ -604,15 +604,25 @@ def main():
 
     for dataset_name in datasets:
         # Resolve path: synthetic_dir/<generator>/<dataset>/<task>/<stem>[.pt]
-        gen_dir = os.path.join(args.synthetic_dir, args.generator)
-        dataset_dir = os.path.join(gen_dir, dataset_name)
-        task_dir = os.path.join(dataset_dir, args.task)
-        stem = args.synthetic_name
-        if args.synthetic_type == 'comp-graph':
-            variant_dir = os.path.join(task_dir, stem)
-            syn_path = os.path.join(variant_dir, f'{stem}.pt')
+        # If --graph_path is set, override path resolution entirely (used for
+        # task-agnostic artifacts like datasets/kanon/<dataset>/<stem>.dgl).
+        if args.graph_path is not None:
+            if args.synthetic_type != 'graph':
+                raise ValueError('--graph_path is only supported with '
+                                 '--synthetic_type graph.')
+            syn_path = args.graph_path
+            task_dir = os.path.dirname(os.path.abspath(syn_path))
+            stem = os.path.splitext(os.path.basename(syn_path))[0]
         else:
-            syn_path = os.path.join(task_dir, stem)
+            gen_dir = os.path.join(args.synthetic_dir, args.generator)
+            dataset_dir = os.path.join(gen_dir, dataset_name)
+            task_dir = os.path.join(dataset_dir, args.task)
+            stem = args.synthetic_name
+            if args.synthetic_type == 'comp-graph':
+                variant_dir = os.path.join(task_dir, stem)
+                syn_path = os.path.join(variant_dir, f'{stem}.pt')
+            else:
+                syn_path = os.path.join(task_dir, stem)
 
         # Prefer per-trial files; fall back to single file.
         if args.synthetic_type == 'comp-graph':
