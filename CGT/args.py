@@ -26,6 +26,9 @@ def get_parser():
                         help='Dataset location.')
     parser.add_argument('--trial_id', type=int, default=0,
                         help='GADBench mask column index for train/val/test split (0-9)')
+    parser.add_argument('--semi_supervised', type=int, default=0,
+                        help='Use semi-supervised GADBench mask split (0 or 1). '
+                             'Shifts mask column by +10 via split_ids_from_dgl.')
     parser.add_argument('--save_dir', type=str, default="save",
                         help='Save location.')
     parser.add_argument('--dataset', type=str, default="cora",
@@ -33,6 +36,12 @@ def get_parser():
     parser.add_argument('--task', type=str, default="hidden_labels",
                         choices=['hidden_labels', 'hidden_links'],
                         help='Pipeline task (determines output subdirectory).')
+    parser.add_argument('--val_ratio', type=float, default=0.05,
+                        help='Edge val fraction for hidden_links (must match '
+                             'the downstream LinkDataset.split ratio).')
+    parser.add_argument('--test_ratio', type=float, default=0.10,
+                        help='Edge test fraction for hidden_links (must match '
+                             'the downstream LinkDataset.split ratio).')
 
     # GNN structure-related hyperparameters
     parser.add_argument('--hidden_dim', type=int, default=64,
@@ -185,8 +194,12 @@ def print_args(args):
     print(f"\n  [Clustering]")
     print(f"  cluster_num:      {args.cluster_num}")
     print(f"  cluster_size:     {args.cluster_size}")
-    print(f"  cluster_samples:  {args.cluster_sample_num}")
+    print(f"  cluster_sample_num:   {args.cluster_sample_num}")
     print(f"  dp_feature:       {args.dp_feature}")
+    if args.dp_feature:
+        print(f"    dp_epsilon:           {args.dp_epsilon}")
+        print(f"    dp_delta:             {args.dp_delta}")
+        print(f"    dp_sigma:             {args.dp_sigma}")
 
     print(f"\n  [Computation Graph]")
     print(f"  cg_depth:         {args.cg_depth}")

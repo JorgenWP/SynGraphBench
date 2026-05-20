@@ -36,10 +36,13 @@ if _script_dir not in sys.path:
 
 from link_utils import LinkDataset, save_results
 from models.link_prediction.link_predictor import BaseGNNLinkPredictor, XGBGraphLinkPredictor
-from models.link_prediction.cgt_link_predictor import CompGraphLinkPredictor
+from models.link_prediction.cgt_link_predictor import (
+    CompGraphLinkPredictor, CGTXGBoostLinkPredictor, CGTXGBGraphLinkPredictor)
 from bench_utils import (
     parse_link_args, load_cgt_synthetic_data,
-    print_comparison,
+    print_comparison, resolve_cgt_trial_paths,
+    _assert_link_pt_alignment, build_synthetic_dgl_graph,
+    format_duration,
 )
 from models.cross_graph_link_predictor import (
     CrossGraphLinkPredictor, CrossGraphXGBGraphLinkPredictor,
@@ -49,6 +52,12 @@ from models.cross_graph_link_predictor import (
 SEED_LIST = list(range(3407, 10000, 10))
 
 SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph']
+CGT_LP_SUPPORTED_MODELS = SUPPORTED_MODELS + ['XGBoost']
+
+CGT_LP_TREE_MODELS = {
+    'XGBoost': CGTXGBoostLinkPredictor,
+    'XGBGraph': CGTXGBGraphLinkPredictor,
+}
 
 
 def set_seed(seed=3407):
@@ -70,6 +79,10 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
     results = []
 
     for model_name in models:
+        if model_name == 'XGBoost':
+            print(f"  NOTE: 'XGBoost' is CGT-only for link prediction. "
+                  f"Skipping full-graph eval.")
+            continue
         if model_name not in SUPPORTED_MODELS:
             print(f"  WARNING: '{model_name}' not supported for link prediction. Skipping.")
             continue
@@ -79,7 +92,7 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
-        time_cost = 0
+        time_list = []
 
         prefix = (synthetic_dir + '/') if data_source != 'original' else (data_dir + '/original/')
         data = LinkDataset(dataset_name, prefix=prefix)
@@ -116,7 +129,8 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
             st = time.time()
             test_score = detector.train()
             ed = time.time()
-            time_cost += ed - st
+            dt = ed - st
+            time_list.append(dt)
 
             auc_list.append(test_score['AUROC'])
             pre_list.append(test_score['AUPRC'])
@@ -124,11 +138,18 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
 
             print(f"  -> AUROC={test_score['AUROC']:.4f}, "
                   f"AUPRC={test_score['AUPRC']:.4f}, "
-                  f"RecK={test_score['RecK']:.4f}")
+                  f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
 
             del detector
 
         del data
+
+        if time_list:
+            total = sum(time_list)
+            print(f"  [{model_name} on {dataset_name}] {len(time_list)} trials — "
+                  f"total {format_duration(total)}, "
+                  f"mean {format_duration(total / len(time_list))} "
+                  f"± {format_duration(float(np.std(time_list)))}")
 
         if auc_list:
             results.append({
@@ -141,21 +162,25 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
                 'AUPRC_std': np.std(pre_list),
                 'RecK_mean': np.mean(rec_list),
                 'RecK_std': np.std(rec_list),
-                'time_per_trial': time_cost / len(auc_list),
+                'time_per_trial': sum(time_list) / len(time_list),
             })
 
     return results
 
 
-def _run_cg_link_trials(dataset_name, cg_models, data, source_label,
+def _run_cg_link_trials(dataset_name, cg_models, base_data, source_label,
                         trials, val_ratio, test_ratio, neg_sampling, decoder,
                         epochs, patience, batch_size, lr, drop_rate,
-                        h_feats, num_layers, step_num, sample_num):
-    """Run CompGraphLinkPredictor trials for a set of models.
+                        h_feats, num_layers, step_num, sample_num,
+                        syn_graph_factory=None):
+    """Run MergedCompGraphLinkPredictor trials across models and trials.
 
-    Each trial re-splits the edges (via data.split) so that different
-    train/val/test edge sets are used, then builds computation graph
-    trees and trains the link predictor.
+    For each trial:
+      - Split base_data's edges (same split logic as full-graph LP).
+      - If syn_graph_factory is provided (synthetic-cgt mode), build a
+        per-trial synthetic graph from that trial's CGT .pt file and wrap
+        it in a LinkDataset. The factory also runs alignment checks.
+      - Train and evaluate the merged-CG link predictor.
     """
     results = []
 
@@ -165,7 +190,7 @@ def _run_cg_link_trials(dataset_name, cg_models, data, source_label,
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
-        time_cost = 0
+        time_list = []
 
         for t in range(trials):
             torch.cuda.empty_cache()
@@ -173,7 +198,16 @@ def _run_cg_link_trials(dataset_name, cg_models, data, source_label,
             set_seed(seed)
 
             print(f"  Trial {t}, seed={seed}")
-            data.split(val_ratio, test_ratio, t, neg_sampling)
+            base_data.split(val_ratio, test_ratio, t, neg_sampling)
+
+            if syn_graph_factory is not None:
+                syn_graph = syn_graph_factory(t, base_data.test_pos_edges)
+                trial_data = LinkDataset.__new__(LinkDataset)
+                trial_data.name = dataset_name + f'_synthetic_cgt_t{t}'
+                trial_data.graph = syn_graph.long()
+                trial_data.split(val_ratio, test_ratio, t, neg_sampling)
+            else:
+                trial_data = base_data
 
             train_config = {
                 'device': 'cuda' if torch.cuda.is_available() else 'cpu',
@@ -195,11 +229,15 @@ def _run_cg_link_trials(dataset_name, cg_models, data, source_label,
                 'num_layers': num_layers,
             }
 
-            detector = CompGraphLinkPredictor(train_config, model_config, data)
+            detector_cls = CGT_LP_TREE_MODELS.get(
+                model_name, CompGraphLinkPredictor)
+            detector = detector_cls(
+                train_config, model_config, trial_data)
             st = time.time()
             test_score = detector.train()
             ed = time.time()
-            time_cost += ed - st
+            dt = ed - st
+            time_list.append(dt)
 
             auc_list.append(test_score['AUROC'])
             pre_list.append(test_score['AUPRC'])
@@ -207,9 +245,18 @@ def _run_cg_link_trials(dataset_name, cg_models, data, source_label,
 
             print(f"  -> AUROC={test_score['AUROC']:.4f}, "
                   f"AUPRC={test_score['AUPRC']:.4f}, "
-                  f"RecK={test_score['RecK']:.4f}")
+                  f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
 
             del detector
+            if syn_graph_factory is not None:
+                del trial_data
+
+        if time_list:
+            total = sum(time_list)
+            print(f"  [{model_name} on {dataset_name}] {len(time_list)} trials — "
+                  f"total {format_duration(total)}, "
+                  f"mean {format_duration(total / len(time_list))} "
+                  f"± {format_duration(float(np.std(time_list)))}")
 
         if auc_list:
             results.append({
@@ -222,7 +269,7 @@ def _run_cg_link_trials(dataset_name, cg_models, data, source_label,
                 'AUPRC_std': np.std(pre_list),
                 'RecK_mean': np.mean(rec_list),
                 'RecK_std': np.std(rec_list),
-                'time_per_trial': time_cost / len(auc_list),
+                'time_per_trial': sum(time_list) / len(time_list),
             })
 
     return results
@@ -231,56 +278,64 @@ def _run_cg_link_trials(dataset_name, cg_models, data, source_label,
 def evaluate_link_models_cgt(dataset_name, models, data_dir,
                              trials, val_ratio, test_ratio,
                              neg_sampling, decoder, epochs, patience,
-                             syn_path, batch_size, lr, drop_rate,
+                             trial_paths, batch_size, lr, drop_rate,
                              h_feats, num_layers):
-    """Evaluate link prediction using CGT computation graph trees.
+    """Evaluate link prediction on CGT merged computation graphs.
 
     Runs two comparisons:
-      1. Original-CG: node embeddings via computation graph trees built
-         from the original graph's train edges (baseline for CG format).
-      2. Synthetic-CGT: node embeddings via computation graph trees built
-         from a synthetic graph's train edges, tested on original graph's
-         test edges. The synthetic graph is reconstructed from CGT cluster
-         centers (root node features replaced with synthetic features).
+      1. Original-CG: merged endpoint trees built from the original graph
+         (with the trial's test edges withheld), baseline for the CG
+         format.
+      2. Synthetic-CGT: merged endpoint trees built from a hybrid graph
+         whose train/val root features are replaced by CGT cluster-center
+         features (via build_synthetic_dgl_graph). Each trial loads its
+         own .pt with alignment-checked test edges.
     """
     results = []
 
     data = LinkDataset(dataset_name, prefix=data_dir + '/original/')
-    syn_data = load_cgt_synthetic_data(syn_path)
 
-    cg_models = [m for m in models if m in SUPPORTED_MODELS]
-    skipped = [m for m in models if m not in SUPPORTED_MODELS]
+    # CG params come from the first trial's .pt (all trials share these)
+    first_syn = load_cgt_synthetic_data(trial_paths[0])
+    step_num = first_syn.get('cg_depth', first_syn.get('subgraph_step_num'))
+    sample_num = first_syn.get('cg_fanout', first_syn.get('subgraph_sample_num'))
+
+    cg_models = [m for m in models if m in CGT_LP_SUPPORTED_MODELS]
+    skipped = [m for m in models if m not in CGT_LP_SUPPORTED_MODELS]
     if skipped:
         print(f"  NOTE: {skipped} not supported for CG link prediction. Skipping.")
 
-    # Extract CGT computation graph parameters
-    step_num = syn_data.get('cg_depth', syn_data.get('subgraph_step_num'))
-    sample_num = syn_data.get('cg_fanout', syn_data.get('subgraph_sample_num'))
+    if 'XGBGraph' in cg_models and num_layers != step_num:
+        raise ValueError(
+            f"XGBGraph on CGT link prediction requires num_layers == step_num; "
+            f"got num_layers={num_layers}, step_num={step_num} "
+            f"(from {trial_paths[0]}).")
 
-    # --- Original data as computation graphs (CG baseline) ---
+    # --- Original-CG baseline: same graph for every trial ---
     results.extend(_run_cg_link_trials(
         dataset_name, cg_models, data, 'original-cg',
         trials, val_ratio, test_ratio, neg_sampling, decoder,
         epochs, patience, batch_size, lr, drop_rate,
         h_feats, num_layers, step_num, sample_num))
 
-    # --- CGT synthetic computation graphs ---
-    # Build a synthetic graph by replacing train/val node features with
-    # CGT-generated cluster center features, then run CG link prediction.
-    # Test edges still come from the original graph's edge split.
-    from bench_utils import build_synthetic_dgl_graph
-    syn_graph = build_synthetic_dgl_graph(data.graph, syn_data)
-    syn_link_data = LinkDataset.__new__(LinkDataset)
-    syn_link_data.name = dataset_name + '_synthetic_cgt'
-    syn_link_data.graph = syn_graph.long()
+    # --- Synthetic-CGT: per-trial hybrid graph built from per-trial .pt ---
+    def make_syn_graph(t, expected_test_edges):
+        syn_data = load_cgt_synthetic_data(trial_paths[t])
+        _assert_link_pt_alignment(
+            syn_data, expected_trial_id=t,
+            expected_test_edges=expected_test_edges,
+            source_label=f'synthetic-cgt[t={t}]')
+        return build_synthetic_dgl_graph(
+            data.graph, syn_data, trial_id=t)
 
     results.extend(_run_cg_link_trials(
-        dataset_name, cg_models, syn_link_data, 'synthetic-cgt',
+        dataset_name, cg_models, data, 'synthetic-cgt',
         trials, val_ratio, test_ratio, neg_sampling, decoder,
         epochs, patience, batch_size, lr, drop_rate,
-        h_feats, num_layers, step_num, sample_num))
+        h_feats, num_layers, step_num, sample_num,
+        syn_graph_factory=make_syn_graph))
 
-    del data, syn_link_data
+    del data
     return results
 
 
@@ -308,7 +363,7 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
-        time_cost = 0
+        time_list = []
 
         for t in range(trials):
             torch.cuda.empty_cache()
@@ -363,15 +418,23 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
             st = time.time()
             test_score = detector.train()
             ed = time.time()
-            time_cost += ed - st
+            dt = ed - st
+            time_list.append(dt)
 
             auc_list.append(test_score['AUROC'])
             pre_list.append(test_score['AUPRC'])
             rec_list.append(test_score['RecK'])
             print(f"  -> AUROC={test_score['AUROC']:.4f}, "
                   f"AUPRC={test_score['AUPRC']:.4f}, "
-                  f"RecK={test_score['RecK']:.4f}")
+                  f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
             del detector, syn_data, orig_data
+
+        if time_list:
+            total = sum(time_list)
+            print(f"  [{model_name} on {dataset_name}] {len(time_list)} trials — "
+                  f"total {format_duration(total)}, "
+                  f"mean {format_duration(total / len(time_list))} "
+                  f"± {format_duration(float(np.std(time_list)))}")
 
         if auc_list:
             results.append({
@@ -384,7 +447,7 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
                 'AUPRC_std': np.std(pre_list),
                 'RecK_mean': np.mean(rec_list),
                 'RecK_std': np.std(rec_list),
-                'time_per_trial': time_cost / len(auc_list),
+                'time_per_trial': sum(time_list) / len(time_list) if time_list else 0,
             })
 
     return results
@@ -392,6 +455,7 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
 
 def main():
     args = parse_link_args()
+    script_start = time.time()
 
     # Resolve default paths relative to project root
     if args.data_dir is None:
@@ -467,13 +531,26 @@ def main():
         task_dir = os.path.join(dataset_dir, args.task)
         stem = args.synthetic_name
         if args.synthetic_type == 'comp-graph':
-            syn_path = os.path.join(task_dir, f'{stem}.pt')
+            variant_dir = os.path.join(task_dir, stem)
+            canonical_path = os.path.join(variant_dir, f'{stem}.pt')
+            trial_paths = resolve_cgt_trial_paths(canonical_path, args.trials)
+            if trial_paths is None:
+                if os.path.exists(canonical_path):
+                    print(f"  Falling back to single-file CGT .pt for all "
+                          f"{args.trials} trials: {canonical_path}")
+                    trial_paths = [canonical_path] * args.trials
+                else:
+                    print(f"\n  Skipping {dataset_name}: no per-trial .pt at "
+                          f"{variant_dir}/{stem}_t*.pt and no canonical "
+                          f"{canonical_path}")
+                    continue
+            syn_path = trial_paths[0]
         else:
             syn_path = os.path.join(task_dir, stem)
 
-        if not os.path.exists(syn_path):
-            print(f"\n  Skipping {dataset_name}: {syn_path} not found")
-            continue
+            if not os.path.exists(syn_path):
+                print(f"\n  Skipping {dataset_name}: {syn_path} not found")
+                continue
 
         print(f"\n  Found {args.synthetic_type} synthetic data: {syn_path}")
 
@@ -482,7 +559,7 @@ def main():
                 dataset_name, models, args.data_dir,
                 args.trials, args.val_ratio, args.test_ratio,
                 args.neg_sampling, args.decoder,
-                args.epochs, args.patience, syn_path,
+                args.epochs, args.patience, trial_paths,
                 args.batch_size, args.lr, args.drop_rate,
                 args.h_feats, args.num_layers)
         else:
@@ -511,6 +588,8 @@ def main():
         print_comparison(all_results, datasets, models)
     else:
         print("\nNo results to save.")
+
+    print(f"\n[Total] {format_duration(time.time() - script_start)}")
 
 
 if __name__ == '__main__':

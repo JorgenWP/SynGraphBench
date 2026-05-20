@@ -1,18 +1,19 @@
 #!/bin/sh
-#SBATCH --account=share-ie-idi      # "share-ie-idi" "ie-idi" 
-#SBATCH --job-name="CGT_TRAIN"
-#SBATCH --time=00:45:00             # Time limit (hh:mm:ss)
+#SBATCH --account=share-ie-idi      # "share-ie-idi" "ie-idi"
+#SBATCH --job-name="CGT_<task>_TRAIN_<dataset>_k<k-anonymity>_c<cluster-num>_<description>"
+#SBATCH --time=02:30:00             # Time limit (hh:mm:ss)
 
 #SBATCH --partition=GPUQ            # Asking for GPU
-#SBATCH --gres=gpu:2                # Number of GPUs 
+#SBATCH --gres=gpu:1                # Number of GPUs
+#SBATCH --constraint=gpu16g
 #SBATCH --mem=10G                   # Gigabytes of system memory (not GPU memory)
-#SBATCH --nodes=2                   # Number of compute nodes
-#SBATCH --ntasks-per-node=2         # Number of tasks per node
+#SBATCH --nodes=1                   # Number of compute nodes
+#SBATCH --ntasks-per-node=1         # Number of tasks per node
 
-#SBATCH --output=output/cgt/train/output.txt    # Specifying 'stdout'
-#SBATCH --error=output/cgt/train/error.txt      # Specifying 'stderr'
+#SBATCH --output=output/cgt/train/<dataset>/<task>/output_k<k-anonymity>_c<cluster-num>_<description>.txt    # Specifying 'stdout'
+#SBATCH --error=output/cgt/train/<dataset>/<task>/error_k<k-anonymity>_c<cluster-num>_<description>.err      # Specifying 'stderr'
 
-#SBATCH --mail-user=<email>@stud.ntnu.no         # The email to send notifications to
+#SBATCH --mail-user=<username>@stud.ntnu.no         # The email to send notifications to
 #SBATCH --mail-type=ALL
 
 WORKDIR=${SLURM_SUBMIT_DIR}
@@ -32,12 +33,19 @@ conda activate CGT
 # Arguments
 DATASET="reddit"
 GPT_EPOCHS=50
-CLUSTER_NUM=512
-CLUSTER_SIZE=1
 GPT_BATCH_SIZE=128
+# Privacy/Clustering (CLUSTER_NUM * CLUSTER_SIZE ≤ CLUSTER_SAMPLE_NUM)
+# CLUSTER_SAMPLE_NUM caps how many nodes are subsampled to fit KMeansConstrained.
+# Set it >= graph size to fit on all nodes (removes artificial cluster_num cap
+# and strengthens the k-anonymity guarantee). Default 5000 matches legacy behaviour.
+CLUSTER_SIZE=500
+CLUSTER_NUM=10
+CLUSTER_SAMPLE_NUM=10984
+# ---------------------------
 CG_DEPTH=2
 CG_FANOUT=5
+NUM_TRIALS=10
 TASK="hidden_labels"
 
-# Run the CGT training and generation script
-bash scripts/train/train_cgt.sh "$DATASET" "$GPT_EPOCHS" "$CLUSTER_NUM" "$CLUSTER_SIZE" "$GPT_BATCH_SIZE" "$CG_DEPTH" "$CG_FANOUT" 0 "$TASK"
+# Run CGT training on all trials
+bash scripts/train/train_cgt.sh "$DATASET" "$GPT_EPOCHS" "$CLUSTER_NUM" "$CLUSTER_SIZE" "$GPT_BATCH_SIZE" "$CG_DEPTH" "$CG_FANOUT" "$NUM_TRIALS" "$TASK" "$CLUSTER_SAMPLE_NUM"

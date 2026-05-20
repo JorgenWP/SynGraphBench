@@ -62,6 +62,14 @@ class MLPDecoder(nn.Module):
         h_hadamard = h[edges[:, 0]] * h[edges[:, 1]]
         return self.layers(h_hadamard).squeeze(-1)
 
+    def score_from_pair(self, h_u, h_v):
+        """Score pre-aligned endpoint embeddings without an `h`-index step.
+
+        Used by merged-CG link prediction where h_u, h_v are extracted
+        directly from per-edge computation graphs.
+        """
+        return self.layers(h_u * h_v).squeeze(-1)
+
 
 class BaseGNNLinkPredictor(BaseDetector):
     def __init__(self, train_config, model_config, data):

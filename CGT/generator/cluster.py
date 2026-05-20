@@ -68,12 +68,13 @@ def DP_kmeans(feats, cluster_num, cluster_sample_num, epsilon=10, delta=1e-6):
     centers = pca.inverse_transform(clustering_result.centers)
     return centers, centers.shape[0]
 
-def cluster_feats(args, feats):
+def cluster_feats(args, feats, fit_ids=None):
     """
     Cluster feature vectors
 
     Input:
         org_feats: original feature matrices
+        fit_ids: optional node id subset used to fit k-means (e.g. train+val); assignment still covers all nodes
     Return:
         cluster_ids: list of cluster ids where each feature belongs to
         cluster_centers: centers of clusters
@@ -81,11 +82,15 @@ def cluster_feats(args, feats):
     """
     # Define cluster centers
     start_time = perf_counter()
+    fit_feats = feats if fit_ids is None else feats[fit_ids]
+    method = 'DP' if args.dp_feature else 'constrained'
+    print(f"[Clustering] fitting k-means on {len(fit_feats)}/{feats.shape[0]} nodes, "
+          f"feat_dim={feats.shape[1]}, target k={args.cluster_num}, method={method}")
     if args.dp_feature:
-        cluster_centers, cluster_num = DP_kmeans(feats, args.cluster_num, args.cluster_sample_num)
+        cluster_centers, cluster_num = DP_kmeans(fit_feats, args.cluster_num, args.cluster_sample_num)
         args.cluster_num = cluster_num
     else:
-        cluster_centers = kmeans(feats, args.cluster_num, args.cluster_size, args.cluster_sample_num)
+        cluster_centers = kmeans(fit_feats, args.cluster_num, args.cluster_size, args.cluster_sample_num)
 
     # Cluster the original dataset
     batch_size = 1000
@@ -96,6 +101,12 @@ def cluster_feats(args, feats):
         else:
             idx = list(range(batch * batch_size, feats.shape[0]))
         cluster_ids[idx] = ((feats[idx, None, :] - cluster_centers[None, :, :]) ** 2).sum(-1).argmin(1)
+
+    sizes = np.bincount(cluster_ids.astype(int), minlength=cluster_centers.shape[0])
+    empty = int((sizes == 0).sum())
+    print(f"[Clustering] produced {cluster_centers.shape[0]} clusters (empty={empty}); "
+          f"member counts: min={sizes.min()}, max={sizes.max()}, "
+          f"mean={sizes.mean():.1f}, median={int(np.median(sizes))}, std={sizes.std():.1f}")
 
     # Append empty_id
     cluster_ids = torch.LongTensor(np.append(cluster_ids, args.cluster_num))

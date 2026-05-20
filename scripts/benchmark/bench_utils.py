@@ -538,20 +538,32 @@ def build_synthetic_dgl_graph(original_graph, synthetic_data,
     return syn_graph
 
 
+def format_duration(seconds):
+    """Render a wall-clock duration as 's' / 'm Ss' / 'h Mm'."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    if seconds < 3600:
+        m, s = divmod(int(round(seconds)), 60)
+        return f"{m}m {s}s"
+    h, rem = divmod(int(round(seconds)), 3600)
+    m = rem // 60
+    return f"{h}h {m}m"
+
+
 def print_comparison(all_results, datasets, models):
     """Print formatted comparison of original vs synthetic results."""
     sources = sorted(set(r['source'] for r in all_results))
 
-    print("\n" + "=" * 90)
+    print("\n" + "=" * 105)
     print("RESULTS COMPARISON")
-    print("=" * 90)
+    print("=" * 105)
 
     for dataset in datasets:
         print(f"\n  Dataset: {dataset}")
         header = (f"  {'Model':<14} {'Source':<24} "
-                  f"{'AUROC':>15} {'AUPRC':>15} {'RecK':>15}")
+                  f"{'AUROC':>15} {'AUPRC':>15} {'RecK':>15} {'Time/trial':>12}")
         print(header)
-        print(f"  {'-' * 86}")
+        print(f"  {'-' * 101}")
 
         for model in models:
             for source in sources:
@@ -564,8 +576,9 @@ def print_comparison(all_results, datasets, models):
                     auroc = f"{r['AUROC_mean']:.4f}\u00b1{r['AUROC_std']:.4f}"
                     auprc = f"{r['AUPRC_mean']:.4f}\u00b1{r['AUPRC_std']:.4f}"
                     reck = f"{r['RecK_mean']:.4f}\u00b1{r['RecK_std']:.4f}"
+                    tpt = format_duration(r.get('time_per_trial', 0.0))
                     print(f"  {model:<14} {source:<24} "
-                          f"{auroc:>15} {auprc:>15} {reck:>15}")
+                          f"{auroc:>15} {auprc:>15} {reck:>15} {tpt:>12}")
             print()
 
 
@@ -576,6 +589,85 @@ def _extract_cg_params(syn_data):
     noise_num = syn_data.get('noise_num', 0)
     self_conn = syn_data.get('self_connection', False)
     return step_num, sample_num, noise_num, self_conn
+
+
+def _assert_pt_alignment(syn_data, expected_trial_id, expected_semi_supervised,
+                         expected_test_ids, source_label):
+    """Verify a CGT .pt file matches the benchmark's split configuration.
+
+    Hard-fails on metadata mismatch or structural test-id disagreement.
+    Warns + falls back to the structural check when the .pt predates
+    provenance metadata (no 'trial_id' / 'semi_supervised' keys).
+    """
+    saved_trial = syn_data.get('trial_id')
+    saved_semi = syn_data.get('semi_supervised')
+
+    if saved_trial is None or saved_semi is None:
+        print(f"  WARNING [{source_label}]: .pt lacks provenance metadata "
+              f"(trial_id/semi_supervised). Falling back to structural check. "
+              f"Re-run CGT training to embed metadata.")
+    else:
+        assert saved_trial == expected_trial_id, (
+            f"[{source_label}] trial_id mismatch: .pt was trained with "
+            f"trial_id={saved_trial}, benchmark expects {expected_trial_id}.")
+        assert bool(saved_semi) == bool(expected_semi_supervised), (
+            f"[{source_label}] semi_supervised mismatch: .pt="
+            f"{bool(saved_semi)}, benchmark={bool(expected_semi_supervised)}.")
+
+    saved_test = set(int(x) for x in syn_data['ids']['test'])
+    got_test = set(int(x) for x in expected_test_ids)
+    assert saved_test == got_test, (
+        f"[{source_label}] test split desync: .pt's ids['test'] "
+        f"(|S|={len(saved_test)}) != mask-derived test_ids "
+        f"(|S|={len(got_test)}). Likely trial_id or semi_supervised mismatch, "
+        f"or a renamed/moved .pt.")
+
+
+def _assert_link_pt_alignment(syn_data, expected_trial_id, expected_test_edges,
+                              source_label):
+    """Verify a CGT .pt file was trained under the same hidden_links split.
+
+    Link-prediction provenance: the .pt must carry `hidden_test_edges`
+    equal to the downstream `LinkDataset.split(trial_id).test_pos_edges`.
+    Any mismatch means CGT saw edges that the GNN is about to test on
+    (or vice versa), which breaks the fairness invariant.
+    """
+    saved_trial = syn_data.get('trial_id')
+    saved_task = syn_data.get('task')
+
+    if saved_task != 'hidden_links':
+        print(f"  WARNING [{source_label}]: .pt task={saved_task!r} != "
+              f"'hidden_links'. CGT may not have withheld test edges.")
+
+    if saved_trial is None:
+        print(f"  WARNING [{source_label}]: .pt lacks trial_id metadata. "
+              f"Re-train CGT to embed it.")
+    elif saved_trial != expected_trial_id:
+        raise AssertionError(
+            f"[{source_label}] trial_id mismatch: .pt was trained with "
+            f"trial_id={saved_trial}, benchmark expects {expected_trial_id}.")
+
+    saved_edges = syn_data.get('hidden_test_edges')
+    if saved_edges is None:
+        print(f"  WARNING [{source_label}]: .pt lacks hidden_test_edges; "
+              f"cannot verify test-edge alignment.")
+        return
+
+    if torch.is_tensor(saved_edges):
+        saved_set = {(int(r[0]), int(r[1])) for r in saved_edges.cpu()}
+    else:
+        saved_set = {(int(s), int(d)) for s, d in saved_edges}
+    exp = expected_test_edges.cpu() if torch.is_tensor(expected_test_edges) \
+        else expected_test_edges
+    expected_set = {(int(r[0]), int(r[1])) for r in exp}
+
+    if saved_set != expected_set:
+        raise AssertionError(
+            f"[{source_label}] hidden_test_edges mismatch: "
+            f"saved |S|={len(saved_set)}, expected |S|={len(expected_set)}. "
+            f"CGT's trial-{expected_trial_id} edge split differs from the "
+            f"downstream split. Check val_ratio/test_ratio and that both "
+            f"sides derive seed as 3407 + trial_id*10.")
 
 
 def resolve_cgt_trial_paths(syn_path, num_trials):
@@ -618,6 +710,14 @@ def make_cgt_rebuild_fn(original_graph, trial_paths,
         mask_col = (trial_id_offset + t) + (10 if semi_supervised else 0)
         test_ids = original_graph.ndata['test_masks'][:, mask_col].bool().nonzero(
             as_tuple=True)[0].numpy()
+
+        _assert_pt_alignment(
+            syn_data,
+            expected_trial_id=trial_id_offset + t,
+            expected_semi_supervised=semi_supervised,
+            expected_test_ids=test_ids,
+            source_label=f'synthetic-cgt[t={t}]',
+        )
 
         test_ds = OriginalCompGraphDataset(
             adj_list, features, labels, test_ids,

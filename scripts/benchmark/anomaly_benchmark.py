@@ -48,8 +48,16 @@ from bench_utils import (
     load_bigg_synthetic_graph, load_bigg_real_subsampled_graph,
     apply_normalization,
     resolve_cgt_trial_paths, make_cgt_rebuild_fn,
+    _assert_pt_alignment, format_duration,
 )
-from models.anomaly_detection.cgt_detector import CompGraphDetector, CG_SUPPORTED_MODELS
+from models.anomaly_detection.cgt_detector import (
+    CompGraphDetector, CG_SUPPORTED_MODELS,
+    CGTXGBoostDetector, CGTXGBGraphDetector)
+
+CGT_TREE_MODELS = {
+    'XGBoost': CGTXGBoostDetector,
+    'XGBGraph': CGTXGBGraphDetector,
+}
 
 SEED_LIST = list(range(3407, 10000, 10))
 
@@ -82,7 +90,7 @@ def evaluate_models(dataset_name, models, data_dir,
 
         auc_list, pre_list, rec_list = [], [], []
         val_curves, test_curves = [], []
-        time_cost = 0
+        time_list = []
 
         for t in range(trials):
             torch.cuda.empty_cache()
@@ -121,7 +129,8 @@ def evaluate_models(dataset_name, models, data_dir,
             st = time.time()
             test_score = detector.train()
             ed = time.time()
-            time_cost += ed - st
+            dt = ed - st
+            time_list.append(dt)
 
             auc_list.append(test_score['AUROC'])
             pre_list.append(test_score['AUPRC'])
@@ -133,9 +142,16 @@ def evaluate_models(dataset_name, models, data_dir,
 
             print(f"  -> AUROC={test_score['AUROC']:.4f}, "
                   f"AUPRC={test_score['AUPRC']:.4f}, "
-                  f"RecK={test_score['RecK']:.4f}")
+                  f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
 
             del detector
+
+        if time_list:
+            total = sum(time_list)
+            print(f"  [{model_name}] {len(time_list)} trials — "
+                  f"total {format_duration(total)}, "
+                  f"mean {format_duration(total / len(time_list))} "
+                  f"± {format_duration(float(np.std(time_list)))}")
 
         del data
 
@@ -150,7 +166,7 @@ def evaluate_models(dataset_name, models, data_dir,
                 'AUPRC_std': np.std(pre_list),
                 'RecK_mean': np.mean(rec_list),
                 'RecK_std': np.std(rec_list),
-                'time_per_trial': time_cost / len(auc_list),
+                'time_per_trial': sum(time_list) / len(time_list),
             })
 
         if val_curves and curve_records is not None:
@@ -192,7 +208,7 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
-        time_cost = 0
+        time_list = []
 
         for t in range(trials):
             torch.cuda.empty_cache()
@@ -223,13 +239,15 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
                 model_config['h_feats'] = 16
 
             print(f"  Trial {t}, seed={seed}")
-            detector = CompGraphDetector(
+            detector_cls = CGT_TREE_MODELS.get(model_name, CompGraphDetector)
+            detector = detector_cls(
                 train_config, model_config, train_ds, val_ds, test_ds)
 
             st = time.time()
             test_score = detector.train()
             ed = time.time()
-            time_cost += ed - st
+            dt = ed - st
+            time_list.append(dt)
 
             auc_list.append(test_score['AUROC'])
             pre_list.append(test_score['AUPRC'])
@@ -237,9 +255,16 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
 
             print(f"  -> AUROC={test_score['AUROC']:.4f}, "
                   f"AUPRC={test_score['AUPRC']:.4f}, "
-                  f"RecK={test_score['RecK']:.4f}")
+                  f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
 
             del detector
+
+        if time_list:
+            total = sum(time_list)
+            print(f"  [{model_name}] {len(time_list)} trials — "
+                  f"total {format_duration(total)}, "
+                  f"mean {format_duration(total / len(time_list))} "
+                  f"± {format_duration(float(np.std(time_list)))}")
 
         if auc_list:
             results.append({
@@ -252,7 +277,7 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
                 'AUPRC_std': np.std(pre_list),
                 'RecK_mean': np.mean(rec_list),
                 'RecK_std': np.std(rec_list),
-                'time_per_trial': time_cost / len(auc_list),
+                'time_per_trial': sum(time_list) / len(time_list),
             })
 
     return results
@@ -277,15 +302,34 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
 
     # Load data once per dataset
     data = GADBenchDataset(dataset_name, prefix=data_dir + '/')
-    syn_data = load_cgt_synthetic_data(syn_path)
+    # Prefer per-trial files (_t0.pt, _t1.pt, …); fall back to single file.
+    trial_paths_probe = resolve_cgt_trial_paths(syn_path, trials)
+    if trial_paths_probe is not None:
+        syn_data = load_cgt_synthetic_data(trial_paths_probe[0])
+    elif os.path.exists(syn_path):
+        syn_data = load_cgt_synthetic_data(syn_path)
+    else:
+        raise FileNotFoundError(
+            f"Synthetic data not found: {syn_path}\n"
+            f"Also could not find per-trial files (_t0..t{trials-1}.pt).")
 
     feat_dim = data.graph.ndata['feature'].shape[1]
 
-    cg_models = [m for m in models if m in CG_SUPPORTED_MODELS]
-    skipped = [m for m in models if m not in CG_SUPPORTED_MODELS]
+    supported = set(CG_SUPPORTED_MODELS) | set(CGT_TREE_MODELS)
+    cg_models = [m for m in models if m in supported]
+    skipped = [m for m in models if m not in supported]
     if skipped:
         print(f"  NOTE: {skipped} not supported in computation graph mode. "
               f"Skipping.")
+
+    if 'XGBGraph' in cg_models:
+        cg_depth_pt = int(
+            syn_data.get('cg_depth', syn_data.get('subgraph_step_num')))
+        if cg_depth_pt != num_layers:
+            raise ValueError(
+                f"XGBGraph on CGT requires num_layers == cg_depth; "
+                f"got num_layers={num_layers}, cg_depth={cg_depth_pt} "
+                f"(in {syn_path}).")
 
     # --- Original data as computation graphs (CG baseline) ---
     # Rebuild datasets each trial so that different mask splits are used,
@@ -319,6 +363,18 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
             batch_size, lr, drop_rate, h_feats, num_layers,
             rebuild_datasets_fn=rebuild_fn))
     else:
+        # Single-file mode: verify the .pt was trained under the same
+        # trial_id / semi_supervised the benchmark is running with.
+        mask_col = trial_id + (10 if semi_supervised else 0)
+        single_test_ids = data.graph.ndata['test_masks'][:, mask_col].bool().nonzero(
+            as_tuple=True)[0].numpy()
+        _assert_pt_alignment(
+            syn_data,
+            expected_trial_id=trial_id,
+            expected_semi_supervised=semi_supervised,
+            expected_test_ids=single_test_ids,
+            source_label='synthetic-cgt[single-file]',
+        )
         syn_train, syn_val, test_ds = build_cgt_datasets(data.graph, syn_data)
         results.extend(_run_cg_trials(
             dataset_name, cg_models, syn_train, syn_val, test_ds,
@@ -368,7 +424,7 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
 
         auc_list, pre_list, rec_list = [], [], []
         val_curves, test_curves = [], []
-        time_cost = 0
+        time_list = []
 
         for t in range(trials):
             torch.cuda.empty_cache()
@@ -410,12 +466,14 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
             st = time.time()
             test_score = detector.train()
             ed = time.time()
-            time_cost += ed - st
+            dt = ed - st
+            time_list.append(dt)
 
             auc_list.append(test_score['AUROC'])
             pre_list.append(test_score['AUPRC'])
             rec_list.append(test_score['RecK'])
-            print(f"  -> AUROC={test_score['AUROC']:.4f}, AUPRC={test_score['AUPRC']:.4f}, RecK={test_score['RecK']:.4f}")
+            print(f"  -> AUROC={test_score['AUROC']:.4f}, AUPRC={test_score['AUPRC']:.4f}, "
+                  f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
 
             if 'val_auprc_curve' in test_score:
                 val_curves.append(test_score['val_auprc_curve'])
@@ -423,13 +481,20 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
 
             del detector, syn_data, orig_data
 
+        if time_list:
+            total = sum(time_list)
+            print(f"  [{model_name}] {len(time_list)} trials — "
+                  f"total {format_duration(total)}, "
+                  f"mean {format_duration(total / len(time_list))} "
+                  f"± {format_duration(float(np.std(time_list)))}")
+
         if auc_list:
             results.append({
                 'source': source_label, 'dataset': dataset_name, 'model': model_name,
                 'AUROC_mean': np.mean(auc_list), 'AUROC_std': np.std(auc_list),
                 'AUPRC_mean': np.mean(pre_list), 'AUPRC_std': np.std(pre_list),
                 'RecK_mean':  np.mean(rec_list),  'RecK_std':  np.std(rec_list),
-                'time_per_trial': time_cost / len(auc_list),
+                'time_per_trial': sum(time_list) / len(time_list),
             })
 
         if val_curves and curve_records is not None:
@@ -452,6 +517,7 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
 
 
 def main():
+    t_start = time.time()
     args = parse_args()
 
     # Resolve default paths relative to project root
@@ -516,6 +582,7 @@ def main():
     print("\n" + "#" * 80)
     print("# PHASE 1: EVALUATING ON ORIGINAL DATA")
     print("#" * 80)
+    t_phase1 = time.time()
 
     for dataset_name in datasets:
         results = evaluate_models(
@@ -526,10 +593,14 @@ def main():
             curve_records=all_curve_records)
         all_results.extend(results)
 
+    phase1_elapsed = time.time() - t_phase1
+    print(f"\n[Phase 1: original-data] {format_duration(phase1_elapsed)}")
+
     # --- Phase 2: Evaluate on synthetic data ---
     print("\n" + "#" * 80)
     print("# PHASE 2: EVALUATING ON SYNTHETIC DATA")
     print("#" * 80)
+    t_phase2 = time.time()
 
     for dataset_name in datasets:
         # Resolve path: synthetic_dir/<generator>/<dataset>/<task>/<stem>[.pt]
@@ -538,22 +609,24 @@ def main():
         task_dir = os.path.join(dataset_dir, args.task)
         stem = args.synthetic_name
         if args.synthetic_type == 'comp-graph':
-            syn_path = os.path.join(task_dir, f'{stem}.pt')
+            variant_dir = os.path.join(task_dir, stem)
+            syn_path = os.path.join(variant_dir, f'{stem}.pt')
         else:
             syn_path = os.path.join(task_dir, stem)
 
-        if not os.path.exists(syn_path):
-            # Check for per-trial files before skipping (CGT multi-trial)
-            if args.synthetic_type == 'comp-graph':
-                trial_paths = resolve_cgt_trial_paths(syn_path, args.trials)
-                if trial_paths is not None:
-                    print(f"\n  Found {len(trial_paths)} per-trial .pt files for {dataset_name}")
-                else:
-                    print(f"\n  Skipping {dataset_name}: {syn_path} not found")
-                    continue
+        # Prefer per-trial files; fall back to single file.
+        if args.synthetic_type == 'comp-graph':
+            trial_paths = resolve_cgt_trial_paths(syn_path, args.trials)
+            if trial_paths is not None:
+                print(f"\n  Found {len(trial_paths)} per-trial .pt files for {dataset_name}")
+            elif os.path.exists(syn_path):
+                print(f"\n  Found {args.synthetic_type} synthetic data: {syn_path}")
             else:
                 print(f"\n  Skipping {dataset_name}: {syn_path} not found")
                 continue
+        elif not os.path.exists(syn_path):
+            print(f"\n  Skipping {dataset_name}: {syn_path} not found")
+            continue
         else:
             print(f"\n  Found {args.synthetic_type} synthetic data: {syn_path}")
 
@@ -660,6 +733,9 @@ def main():
             continue
         all_results.extend(results)
 
+    phase2_elapsed = time.time() - t_phase2
+    print(f"\n[Phase 2: synthetic-data] {format_duration(phase2_elapsed)}")
+
     # --- Save and display results ---
     if all_results:
         results_df = pd.DataFrame(all_results)
@@ -680,6 +756,8 @@ def main():
         curves_path = os.path.join(args.output_dir, 'divergence_curves.csv')
         curves_df.to_csv(curves_path, index=False)
         print(f"  Divergence curves saved to: {curves_path}")
+
+    print(f"\n[Total] {format_duration(time.time() - t_start)}")
 
 
 if __name__ == '__main__':

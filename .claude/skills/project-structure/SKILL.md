@@ -24,13 +24,12 @@ SynGraphBench/
 │   │   ├── anomaly_benchmark.py    # Project-level anomaly detection benchmark (original vs. synthetic)
 │   │   ├── link_benchmark.py       # Link prediction benchmark
 │   │   ├── bench_utils.py          # Arg parsing, data loading, CGT helpers
-│   │   ├── bigg_benchmark.slurm    # SLURM template for BiGG evaluation
-│   │   ├── cgt_benchmark.slurm     # SLURM template for CGT evaluation
+│   │   ├── bigg_benchmark.slurm            # SLURM template for BiGG anomaly evaluation
+│   │   ├── cgt_anomaly_benchmark.slurm     # SLURM template for CGT anomaly evaluation
+│   │   ├── cgt_link_benchmark.slurm        # SLURM template for CGT link prediction evaluation
 │   │   └── models/
 │   │       ├── cross_graph_detector.py         # Cross-graph anomaly (GNN + XGBGraph)
 │   │       └── cross_graph_link_predictor.py   # Cross-graph link prediction (GNN + XGBGraph)
-│   ├── pipeline/
-│   │   └── run_cgt_pipeline.slurm  # Full CGT pipeline SLURM job
 │   └── test/               # Quick test/example scripts
 ├── datasets/
 │   ├── original/           # Original DGL datasets (reddit, tolokers, amazon, …)
@@ -38,7 +37,8 @@ SynGraphBench/
 │       ├── cgt/            # CGT outputs: .pt files with cluster centers + sequence indices
 │       │   └── <dataset>/
 │       │       └── <task>/
-│       │           └── <dataset>_e<epochs>_k<clusters>_d<depth>_f<fanout>.pt
+│       │           └── <variant>/          # Hyperparameter variant grouping trials
+│       │               └── <variant>_t<trial_id>.pt
 │       └── bigg/           # BiGG outputs: full DGL graph files
 │           └── <dataset>/
 │               └── <task>/
@@ -61,19 +61,19 @@ SynGraphBench/
 
 ## Synthetic Dataset Naming Convention
 
-All synthetic outputs follow the structure `datasets/synthetic/<generative_model>/<dataset>/<task>/<file_name>`. The dataset and task are encoded in the directory hierarchy; filenames contain only the arguments that define the generated data.
+All synthetic outputs follow the structure `datasets/synthetic/<generative_model>/<dataset>/<task>/<file_name>`. For CGT, an additional variant subdirectory groups per-trial `.pt` files by hyperparameter config: `datasets/synthetic/cgt/<dataset>/<task>/<variant>/<variant>_t<trial_id>.pt`. The dataset and task are encoded in the directory hierarchy; filenames contain only the arguments that define the generated data.
 
 **Supported tasks:** `hidden_labels` (anomaly detection — labels withheld from the generative model), `hidden_links` (link prediction — test edges withheld from the generative model). The task level exists because the generative model has different information available during training per task, so the generated datasets are fundamentally different.
 
 | Generator | Task folder | Type | Example path |
 |-----------|-------------|------|--------------|
-| `cgt` | `hidden_labels` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/hidden_labels/reddit_e50_k512_d2_f5.pt` |
-| `cgt` | `hidden_links` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/hidden_links/reddit_e50_k512_d2_f5.pt` |
+| `cgt` | `hidden_labels` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/hidden_labels/reddit_e50_k512_c1_d2_f5_s5000/reddit_e50_k512_c1_d2_f5_s5000_t0.pt` |
+| `cgt` | `hidden_links` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/hidden_links/reddit_e50_k512_c1_d2_f5_s5000/reddit_e50_k512_c1_d2_f5_s5000_t0.pt` |
 | `bigg` | `hidden_labels` | Full DGL graph — conditional (features + labels) | `synthetic/bigg/tolokers/hidden_labels/blksize_1024_b_1_lr_0.001_epochs_50` |
 | `bigg` | `hidden_labels` | Structure-only baseline | `synthetic/bigg/tolokers/hidden_labels/structure_blksize_128_lr_0.001_epochs_100` |
 
 **Filename patterns:**
-- CGT: `{dataset}_e{epochs}_k{clusters}_d{depth}_f{fanout}.pt`
+- CGT: `{variant}/{variant}_t{trial_id}.pt` where variant = `{dataset}_e{epochs}_k{clusters}_c{cluster_size}_d{depth}_f{fanout}_s{cluster_sample_num}`. `cluster_sample_num` is the cap on nodes subsampled when fitting `KMeansConstrained` — it bounds `cluster_num × cluster_size` and affects the kmeans fit, so it's included in the variant to avoid silent collisions across runs with different sample budgets.
 - BiGG conditional: `blksize_{blksize}_b_{batch}_lr_{lr}_epochs_{epochs}_noise_{noise}_ss_{ss}_norm_{method}_{bfs}_lw_{cw}_{lw}_{hetero|det}`
 - BiGG structure-only: `structure_blksize_{blksize}_lr_{lr}_epochs_{epochs}`
 

@@ -1,34 +1,47 @@
 """
-CompGraphLinkPredictor: Link prediction using CGT computation graph trees.
+MergedCompGraphLinkPredictor — paper-style link prediction on computation graphs.
 
-Uses the same GNN architectures as GADBench but generates node embeddings
-via computation graph trees (like CompGraphDetector) and scores edges
-using dot product or MLP decoder (like BaseGNNLinkPredictor).
+For each edge (u, v), the two endpoints' computation-graph trees are
+merged by a root-root edge and scored with a single GNN forward pass.
+This preserves the joint-computation property of whole-graph LP (where
+u and v share message-passing paths) while operating on the sampled
+tree subgraphs that CGT synthesises.
+
+Exposed as `CompGraphLinkPredictor` for backward compatibility with
+existing imports.
+
+Also provides tree-model link predictors that consume the same merged
+comp graphs:
+  - `CGTXGBoostLinkPredictor`: Hadamard of the two raw root features
+    (positions 0 and T of the merged tree) → XGBoost. CGT-only (no
+    full-graph LP baseline).
+  - `CGTXGBGraphLinkPredictor`: CG counterpart of `XGBGraphLinkPredictor`.
+    Adds `GIN_noparam` over the merged tree before the Hadamard step.
+    Enforces `num_layers == step_num`.
 """
 
+import dgl
+import numpy as np
 import torch
 import torch.nn.functional as F
-import numpy as np
-import dgl
+from sklearn.metrics import roc_auc_score, average_precision_score
 from torch.utils.data import DataLoader
 
 from data.comp_graph import (
-    OriginalCompGraphDataset, make_comp_graph_collate,
-    compute_template_edges, compute_tree_adj,
-    extract_root_logits, dgl_to_adj_list,
+    MergedOriginalCompGraphDataset,
+    compute_merged_tree_adj,
+    compute_template_edges,
+    dgl_to_adj_list,
+    extract_edge_root_embeddings,
+    make_merged_comp_graph_collate,
 )
 from models.link_prediction.link_predictor import BaseDetector, MLPDecoder
 
 CG_LP_SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE']
 
 
-class CompGraphLinkPredictor(BaseDetector):
-    """Link prediction using CGT computation graph trees for node embeddings.
-
-    Instead of running GNN on the full graph, builds a computation graph
-    tree for each node (sampling neighbors at each hop), extracts the
-    root embedding, and scores edges via dot product or MLP decoder.
-    """
+class MergedCompGraphLinkPredictor(BaseDetector):
+    """Link prediction via per-edge merged endpoint computation graphs."""
 
     def __init__(self, train_config, model_config, data):
         super().__init__(train_config, model_config, data)
@@ -38,12 +51,13 @@ class CompGraphLinkPredictor(BaseDetector):
         if model_config['model'] == 'GraphSAGE':
             model_config.setdefault('agg', 'mean')
 
-        import models.gnn as gnn_module
         model_name = model_config['model']
         if model_name not in CG_LP_SUPPORTED_MODELS:
             raise ValueError(
-                f"'{model_name}' not supported for computation graph link "
-                f"prediction. Supported: {CG_LP_SUPPORTED_MODELS}")
+                f"'{model_name}' not supported for merged computation graph "
+                f"link prediction. Supported: {CG_LP_SUPPORTED_MODELS}")
+
+        import models.gnn as gnn_module
         gnn_cls = getattr(gnn_module, model_name)
         self.model = gnn_cls(**model_config).to(self.device)
 
@@ -56,50 +70,105 @@ class CompGraphLinkPredictor(BaseDetector):
         else:
             self.decoder = None
 
-        # CGT computation graph parameters
         self.step_num = train_config.get('step_num', 2)
         self.sample_num = train_config.get('sample_num', 5)
+        self.noise_num = train_config.get('noise_num', 0)
+        self.self_connection = train_config.get('self_connection', False)
         self.batch_size = train_config.get('batch_size', 256)
 
-        # Build adjacency list from train graph (no test/val edge leakage)
+        num_layers = model_config.get('num_layers', 2)
+        if num_layers != self.step_num:
+            print(
+                f"  WARNING: num_layers={num_layers} != step_num={self.step_num}. "
+                f"GNN depth should equal merged-tree depth for a fair "
+                f"comparison with full-graph LP.")
+
+        # Tree sampling uses train_graph (no test/val edge leakage)
         self.train_adj_list = dgl_to_adj_list(data.train_graph)
-        self.features = data.graph.ndata['feature'].cpu().numpy()
-        self.dummy_labels = np.zeros(self.num_nodes, dtype=np.int64)
+        self.features = data.graph.ndata['feature'].cpu().numpy().astype(
+            np.float32)
 
-        # Pre-compute template edges for comp graph collation
-        tree_adj = compute_tree_adj(self.step_num, self.sample_num)
-        self.template_src, self.template_dst, self.num_tree_nodes = \
-            compute_template_edges(tree_adj)
+        merged_adj = compute_merged_tree_adj(
+            self.step_num, self.sample_num + self.noise_num,
+            self.self_connection)
+        self.template_src, self.template_dst, self.num_merged_nodes = \
+            compute_template_edges(merged_adj)
+        self.per_tree_num_nodes = self.num_merged_nodes // 2
 
-    def _compute_all_embeddings(self):
-        """Compute embeddings for all nodes via batched computation graph trees."""
-        all_node_ids = np.arange(self.num_nodes)
-        dataset = OriginalCompGraphDataset(
-            self.train_adj_list, self.features, self.dummy_labels,
-            all_node_ids, self.step_num, self.sample_num)
-        collate_fn = make_comp_graph_collate(
-            self.template_src, self.template_dst, self.num_tree_nodes)
-        loader = DataLoader(
-            dataset, batch_size=self.batch_size, shuffle=False,
-            collate_fn=collate_fn, num_workers=0)
+        # Cache of pre-built merged-CG batches for fixed eval edge sets
+        # (val_pos/val_neg/test_pos/test_neg). Keyed by id(edges) so the
+        # immutable edge tensors created once per trial deduplicate the
+        # ~414+ batches/epoch otherwise rebuilt for evaluation.
+        self._eval_batch_cache = {}
 
-        all_embs = []
-        for batched_g, _ in loader:
-            batched_g = batched_g.to(self.device)
-            h = self.model(batched_g)
-            root_embs = extract_root_logits(batched_g, h)
-            all_embs.append(root_embs)
+    def _edge_loader(self, edges):
+        ds = MergedOriginalCompGraphDataset(
+            self.train_adj_list, self.features, edges,
+            self.step_num, self.sample_num,
+            self.noise_num, self.self_connection)
+        collate = make_merged_comp_graph_collate(
+            self.template_src, self.template_dst, self.num_merged_nodes)
+        return DataLoader(
+            ds, batch_size=self.batch_size, shuffle=False,
+            collate_fn=collate, num_workers=8)
 
-        return torch.cat(all_embs, dim=0)
-
-    def score_edges(self, h, edges):
-        """Score edges using dot product or MLP decoder."""
+    def _score_batch_on_device(self, batched):
+        h = self.model(batched)
+        h_u, h_v = extract_edge_root_embeddings(
+            batched, h, self.per_tree_num_nodes)
         if self.decoder is not None:
-            return self.decoder(h, edges)
-        return (h[edges[:, 0]] * h[edges[:, 1]]).sum(dim=-1)
+            return self.decoder.score_from_pair(h_u, h_v)
+        return (h_u * h_v).sum(dim=-1)
+
+    def _score_batch(self, batched):
+        return self._score_batch_on_device(batched.to(self.device))
+
+    def _score_edges(self, edges):
+        """Score edges by building batched merged computation graphs.
+
+        For fixed edge sets (val_pos/val_neg/test_pos/test_neg) we build
+        the batched merged-CG graphs once and cache them; subsequent
+        calls only re-run the GNN forward. Train-time edges (resampled
+        every epoch) are not cached — `id(edges)` differs per call.
+        """
+        if edges.shape[0] == 0:
+            return torch.empty(0, device=self.device)
+
+        cache_key = id(edges)
+        cached = self._eval_batch_cache.get(cache_key)
+        if cached is None:
+            cached = [b.to(self.device) for b in self._edge_loader(edges)]
+            self._eval_batch_cache[cache_key] = cached
+
+        scores = [self._score_batch_on_device(b) for b in cached]
+        return torch.cat(scores, dim=0)
+
+    def _train_step(self, edges, labels):
+        """Per-batch forward+backward with gradient accumulation.
+
+        Peak memory is O(one batch) because each batch's autograd graph
+        is freed by its own backward. Accumulated gradient equals the
+        gradient of mean-BCE over all edges: each batch contributes
+        (1/N) * sum_{i in batch} BCE_i, summing to (1/N) * sum_i BCE_i.
+        """
+        n_total = edges.shape[0]
+        if n_total == 0:
+            return 0.0
+
+        loss_sum = 0.0
+        offset = 0
+        for batched in self._edge_loader(edges):
+            s = self._score_batch(batched)
+            n_b = s.shape[0]
+            batch_labels = labels[offset:offset + n_b]
+            batch_loss = F.binary_cross_entropy_with_logits(
+                s, batch_labels, reduction='sum') / n_total
+            batch_loss.backward()
+            loss_sum += batch_loss.item()
+            offset += n_b
+        return loss_sum
 
     def _filter_collisions(self, neg_edges):
-        """Replace negative edges that collide with real edges."""
         src, dst = neg_edges[:, 0], neg_edges[:, 1]
         N = self.num_nodes
         for _ in range(10):
@@ -112,26 +181,23 @@ class CompGraphLinkPredictor(BaseDetector):
         return neg_edges
 
     def _sample_random_negatives(self, n):
-        """Sample random node pairs as guaranteed non-edges."""
-        neg_edges = torch.stack([
+        neg = torch.stack([
             torch.randint(0, self.num_nodes, (n,)),
-            torch.randint(0, self.num_nodes, (n,))
+            torch.randint(0, self.num_nodes, (n,)),
         ], dim=1)
-        return self._filter_collisions(neg_edges).to(self.device)
+        return self._filter_collisions(neg).to(self.device)
 
     def _sample_hard_negatives(self, pos_edges):
-        """Sample hard negatives via 2-hop random walks, guaranteed non-edges."""
         src = pos_edges[:, 0]
         walk_nodes, _ = dgl.sampling.random_walk(
             self.train_graph.cpu(), src.cpu(), metapath=[None, None])
         hard_dst = walk_nodes[:, 2]
-
         failed = hard_dst == -1
         if failed.any():
-            hard_dst[failed] = torch.randint(0, self.num_nodes, (failed.sum(),))
-
-        neg_edges = torch.stack([src.cpu(), hard_dst], dim=1)
-        return self._filter_collisions(neg_edges).to(self.device)
+            hard_dst[failed] = torch.randint(
+                0, self.num_nodes, (int(failed.sum()),))
+        neg = torch.stack([src.cpu(), hard_dst], dim=1)
+        return self._filter_collisions(neg).to(self.device)
 
     def train(self):
         params = list(self.model.parameters())
@@ -144,39 +210,38 @@ class CompGraphLinkPredictor(BaseDetector):
 
         for e in range(self.train_config['epochs']):
             self.model.train()
-            h = self._compute_all_embeddings()
 
             if self.neg_sampling == 'hard':
-                train_neg_edges = self._sample_hard_negatives(self.train_pos_edges)
+                train_neg_edges = self._sample_hard_negatives(
+                    self.train_pos_edges)
             else:
                 train_neg_edges = self._sample_random_negatives(n_train)
 
-            pos_scores = self.score_edges(h, self.train_pos_edges)
-            neg_scores = self.score_edges(h, train_neg_edges)
-            scores = torch.cat([pos_scores, neg_scores])
+            all_train_edges = torch.cat(
+                [self.train_pos_edges, train_neg_edges], dim=0)
             labels = torch.cat([
-                torch.ones(pos_scores.shape[0]),
-                torch.zeros(neg_scores.shape[0])
-            ]).to(self.device)
-            loss = F.binary_cross_entropy_with_logits(scores, labels)
+                torch.ones(n_train, device=self.device),
+                torch.zeros(train_neg_edges.shape[0], device=self.device),
+            ])
 
             optimizer.zero_grad()
-            loss.backward()
+            loss = self._train_step(all_train_edges, labels)
             optimizer.step()
 
+            self.model.eval()
             with torch.no_grad():
-                self.model.eval()
-                h = self._compute_all_embeddings()
-                val_pos = torch.sigmoid(self.score_edges(h, self.val_pos_edges))
-                val_neg = torch.sigmoid(self.score_edges(h, self.val_neg_edges))
+                val_pos = torch.sigmoid(self._score_edges(self.val_pos_edges))
+                val_neg = torch.sigmoid(self._score_edges(self.val_neg_edges))
             val_score = self.eval(val_pos, val_neg)
 
             if val_score[self.train_config['metric']] > self.best_score:
                 self.best_score = val_score[self.train_config['metric']]
                 self.patience_knt = 0
                 with torch.no_grad():
-                    test_pos = torch.sigmoid(self.score_edges(h, self.test_pos_edges))
-                    test_neg = torch.sigmoid(self.score_edges(h, self.test_neg_edges))
+                    test_pos = torch.sigmoid(
+                        self._score_edges(self.test_pos_edges))
+                    test_neg = torch.sigmoid(
+                        self._score_edges(self.test_neg_edges))
                 test_score = self.eval(test_pos, test_neg)
                 print('Epoch {}, Loss {:.4f}, Val AUC {:.4f}, PRC {:.4f}, '
                       'test AUC {:.4f}, PRC {:.4f}'.format(
@@ -188,3 +253,169 @@ class CompGraphLinkPredictor(BaseDetector):
                     break
 
         return test_score
+
+
+# Back-compat alias for existing imports
+CompGraphLinkPredictor = MergedCompGraphLinkPredictor
+
+
+class CGTXGBoostLinkPredictor(BaseDetector):
+    """XGBoost LP on merged comp graphs. Per edge: Hadamard of
+    (h_u, h_v) at positions 0 and T of the merged tree. Base class
+    uses raw root features (no GIN); subclass adds GIN_noparam
+    aggregation. CGT-only.
+    """
+
+    def __init__(self, train_config, model_config, data):
+        super().__init__(train_config, model_config, data)
+        import xgboost as xgb
+
+        self.device = train_config['device']
+        self.step_num = train_config.get('step_num', 2)
+        self.sample_num = train_config.get('sample_num', 5)
+        self.noise_num = train_config.get('noise_num', 0)
+        self.self_connection = train_config.get('self_connection', False)
+        self.batch_size = train_config.get('batch_size', 256)
+
+        self.train_adj_list = dgl_to_adj_list(data.train_graph)
+        self.features = data.graph.ndata['feature'].cpu().numpy().astype(
+            np.float32)
+
+        merged_adj = compute_merged_tree_adj(
+            self.step_num, self.sample_num + self.noise_num,
+            self.self_connection)
+        self.template_src, self.template_dst, self.num_merged_nodes = \
+            compute_template_edges(merged_adj)
+        self.per_tree_num_nodes = self.num_merged_nodes // 2
+
+        eval_metric = (roc_auc_score if train_config['metric'] == 'AUROC'
+                       else average_precision_score)
+        cfg = {k: v for k, v in model_config.items() if k != 'model'}
+        self.model = xgb.XGBClassifier(
+            tree_method='hist', eval_metric=eval_metric, verbose=False, **cfg)
+
+        self.gin = None
+
+    def _edge_features(self, edges):
+        if edges.shape[0] == 0:
+            feat_dim = self.features.shape[1]
+            if self.gin is not None:
+                feat_dim *= self.model_config.get('num_layers', 2) + 1
+            return np.zeros((0, feat_dim), dtype=np.float32)
+
+        edges_cpu = edges.cpu() if torch.is_tensor(edges) else edges
+        ds = MergedOriginalCompGraphDataset(
+            self.train_adj_list, self.features, edges_cpu,
+            self.step_num, self.sample_num,
+            self.noise_num, self.self_connection)
+        collate = make_merged_comp_graph_collate(
+            self.template_src, self.template_dst, self.num_merged_nodes)
+        loader = DataLoader(
+            ds, batch_size=self.batch_size, shuffle=False,
+            collate_fn=collate, num_workers=8)
+
+        feats = []
+        with torch.no_grad():
+            for batched in loader:
+                if self.gin is None:
+                    emb = batched.ndata['feature']
+                else:
+                    batched = batched.to(self.device)
+                    emb = self.gin(batched)
+                h_u, h_v = extract_edge_root_embeddings(
+                    batched, emb, self.per_tree_num_nodes)
+                feats.append((h_u * h_v).cpu().numpy())
+        return np.vstack(feats)
+
+    def _filter_collisions(self, neg_edges):
+        src, dst = neg_edges[:, 0], neg_edges[:, 1]
+        N = self.num_nodes
+        for _ in range(10):
+            hashes = src.long() * N + dst.long()
+            collision = torch.isin(hashes, self.edge_set) | (src == dst)
+            if not collision.any():
+                break
+            n_bad = collision.sum().item()
+            dst[collision] = torch.randint(0, N, (n_bad,))
+        return neg_edges
+
+    def _sample_random_negatives(self, n):
+        neg = torch.stack([
+            torch.randint(0, self.num_nodes, (n,)),
+            torch.randint(0, self.num_nodes, (n,)),
+        ], dim=1)
+        return self._filter_collisions(neg).to(self.device)
+
+    def _sample_hard_negatives(self, pos_edges):
+        src = pos_edges[:, 0]
+        walk_nodes, _ = dgl.sampling.random_walk(
+            self.train_graph.cpu(), src.cpu(), metapath=[None, None])
+        hard_dst = walk_nodes[:, 2]
+        failed = hard_dst == -1
+        if failed.any():
+            hard_dst[failed] = torch.randint(
+                0, self.num_nodes, (int(failed.sum()),))
+        neg = torch.stack([src.cpu(), hard_dst], dim=1)
+        return self._filter_collisions(neg).to(self.device)
+
+    def train(self):
+        n_train = self.train_pos_edges.shape[0]
+
+        if self.neg_sampling == 'hard':
+            train_neg = self._sample_hard_negatives(self.train_pos_edges)
+        else:
+            train_neg = self._sample_random_negatives(n_train)
+
+        train_X = np.vstack([
+            self._edge_features(self.train_pos_edges),
+            self._edge_features(train_neg),
+        ])
+        train_y = np.concatenate([
+            np.ones(n_train), np.zeros(train_neg.shape[0])])
+
+        n_val_pos = self.val_pos_edges.shape[0]
+        n_val_neg = self.val_neg_edges.shape[0]
+        val_X = np.vstack([
+            self._edge_features(self.val_pos_edges),
+            self._edge_features(self.val_neg_edges),
+        ])
+        val_y = np.concatenate([np.ones(n_val_pos), np.zeros(n_val_neg)])
+
+        self.model.fit(train_X, train_y, eval_set=[(val_X, val_y)],
+                       verbose=False)
+
+        val_probs = self.model.predict_proba(val_X)[:, 1]
+        val_pos_probs = torch.tensor(val_probs[:n_val_pos])
+        val_neg_probs = torch.tensor(val_probs[n_val_pos:])
+        val_score = self.eval(val_pos_probs, val_neg_probs)
+        self.best_score = val_score[self.train_config['metric']]
+
+        n_test_pos = self.test_pos_edges.shape[0]
+        n_test_neg = self.test_neg_edges.shape[0]
+        test_X = np.vstack([
+            self._edge_features(self.test_pos_edges),
+            self._edge_features(self.test_neg_edges),
+        ])
+        test_probs = self.model.predict_proba(test_X)[:, 1]
+        test_pos_probs = torch.tensor(test_probs[:n_test_pos])
+        test_neg_probs = torch.tensor(test_probs[n_test_pos:])
+        return self.eval(test_pos_probs, test_neg_probs)
+
+
+class CGTXGBGraphLinkPredictor(CGTXGBoostLinkPredictor):
+    """XGBoost LP on GIN_noparam-aggregated root embeddings of merged
+    comp graphs. Per-edge feature dim: feat_dim * (num_layers + 1).
+    `num_layers` must equal `step_num` (enforced).
+    """
+
+    def __init__(self, train_config, model_config, data):
+        super().__init__(train_config, model_config, data)
+        from models.gnn import GIN_noparam
+
+        num_layers = model_config.get('num_layers', 2)
+        if num_layers != self.step_num:
+            raise ValueError(
+                f"CGTXGBGraphLinkPredictor requires num_layers == step_num; "
+                f"got num_layers={num_layers}, step_num={self.step_num}.")
+
+        self.gin = GIN_noparam(**model_config).to(self.device).eval()

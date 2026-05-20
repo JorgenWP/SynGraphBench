@@ -4,6 +4,11 @@ CompGraphDetector: Train GADBench GNN models on CGT computation graph trees.
 Uses the same GNN architectures as GADBench (GCN, GIN, GraphSAGE) but feeds
 them batched DGL computation graph trees instead of a single full graph.
 Only root node predictions are used for classification.
+
+Also provides XGBoost / XGBGraph tree-model detectors that consume the same
+computation-graph datasets. XGBoost uses the root feature directly;
+XGBGraph runs GIN_noparam over the batched tree and takes the root
+embedding as the XGBoost input.
 """
 
 import torch
@@ -16,6 +21,42 @@ from data.comp_graph import make_comp_graph_collate, extract_root_logits
 
 # GNN models that support computation graph mode
 CG_SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE']
+
+
+def _score(labels, probs):
+    k = int(labels.sum())
+    return {
+        'AUROC': roc_auc_score(labels, probs),
+        'AUPRC': average_precision_score(labels, probs),
+        'RecK': sum(labels[probs.argsort()[-k:]]) / max(labels.sum(), 1),
+    }
+
+
+def _collect_root_features(dataset, device, gin=None, batch_size=256):
+    """Materialize (X, y) numpy arrays of per-sample root features.
+
+    gin=None: X is the root row of the per-sample feature tensor.
+              For synthetic datasets, this is the root's cluster center;
+              for original datasets, the raw root-node feature.
+    gin set:  X is GIN_noparam(batched_tree)[root_positions], shape
+              [N, feat_dim * (num_layers + 1)].
+    """
+    collate = make_comp_graph_collate(
+        dataset.template_src, dataset.template_dst, dataset.num_tree_nodes)
+    loader = DataLoader(dataset, batch_size=batch_size, num_workers=0,
+                        collate_fn=collate, drop_last=False, shuffle=False)
+    xs, ys = [], []
+    for batched_g, labels in loader:
+        if gin is None:
+            roots = extract_root_logits(batched_g, batched_g.ndata['feature'])
+        else:
+            batched_g = batched_g.to(device)
+            with torch.no_grad():
+                emb = gin(batched_g)
+            roots = extract_root_logits(batched_g, emb).cpu()
+        xs.append(roots)
+        ys.append(labels)
+    return torch.cat(xs).numpy(), torch.cat(ys).numpy()
 
 
 class CompGraphDetector:
@@ -125,12 +166,68 @@ class CompGraphDetector:
 
         all_labels = torch.cat(all_labels).numpy()
         all_probs = torch.cat(all_probs).numpy()
+        return _score(all_labels, all_probs)
 
-        score = {}
-        score['AUROC'] = roc_auc_score(all_labels, all_probs)
-        score['AUPRC'] = average_precision_score(all_labels, all_probs)
-        k = int(all_labels.sum())
-        score['RecK'] = (
-            sum(all_labels[all_probs.argsort()[-k:]]) / max(sum(all_labels), 1)
-        )
-        return score
+
+class CGTXGBoostDetector:
+    """XGBoost on CGT computation graphs. Feature = root row of each
+    sample's tensor (cluster center for synthetic, raw feature for
+    original)."""
+
+    def __init__(self, train_config, model_config,
+                 train_dataset, val_dataset, test_dataset):
+        self.train_config = train_config
+        self.model_config = model_config
+        self.device = train_config['device']
+        self.batch_size = train_config.get('batch_size', 256)
+        self.train_ds = train_dataset
+        self.val_ds = val_dataset
+        self.test_ds = test_dataset
+
+        labels = np.asarray(train_dataset.get_labels())
+        num_pos = labels.sum()
+        num_neg = len(labels) - num_pos
+        self.weight = num_neg / max(num_pos, 1)
+
+        import xgboost as xgb
+        eval_metric = (roc_auc_score if train_config['metric'] == 'AUROC'
+                       else average_precision_score)
+        self.model = xgb.XGBClassifier(
+            tree_method='hist', eval_metric=eval_metric, **model_config)
+
+        self.gin = None
+        self.best_score = -1
+
+    def train(self):
+        X_tr, y_tr = _collect_root_features(
+            self.train_ds, self.device, self.gin, self.batch_size)
+        X_va, y_va = _collect_root_features(
+            self.val_ds, self.device, self.gin, self.batch_size)
+        X_te, y_te = _collect_root_features(
+            self.test_ds, self.device, self.gin, self.batch_size)
+
+        print(f"  X_tr.shape={X_tr.shape}, X_va.shape={X_va.shape}, "
+              f"X_te.shape={X_te.shape}")
+
+        sw = np.where(y_tr == 0, 1.0, self.weight)
+        self.model.fit(X_tr, y_tr, sample_weight=sw,
+                       eval_set=[(X_va, y_va)])
+
+        val_probs = self.model.predict_proba(X_va)[:, 1]
+        test_probs = self.model.predict_proba(X_te)[:, 1]
+        self.best_score = _score(y_va, val_probs)[self.train_config['metric']]
+        return _score(y_te, test_probs)
+
+
+class CGTXGBGraphDetector(CGTXGBoostDetector):
+    """XGBoost on GIN_noparam-aggregated root embeddings of CGT
+    computation graphs. Root embedding = input feat concat per-layer GIN
+    aggregates, dim feat_dim * (num_layers + 1). num_layers must equal
+    cg_depth (enforced by benchmark entry point)."""
+
+    def __init__(self, train_config, model_config,
+                 train_dataset, val_dataset, test_dataset):
+        super().__init__(train_config, model_config,
+                         train_dataset, val_dataset, test_dataset)
+        from models.gnn import GIN_noparam
+        self.gin = GIN_noparam(**model_config).to(self.device).eval()

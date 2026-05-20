@@ -54,10 +54,11 @@ for dataset in datasets:
 
 results = pandas.DataFrame(columns=columns)
 file_id = None
+script_start = time.time()
 for model in models:
     model_result = {'name': model}
     for dataset_name in datasets:
-        time_cost = 0
+        time_list = []
         train_config = {
             'device': 'cuda' if torch.cuda.is_available() else 'cpu',
             'epochs': 200,
@@ -81,11 +82,22 @@ for model in models:
             st = time.time()
             print(detector.model)
             test_score = detector.train()
+            ed = time.time()
+            dt = ed - st
+            time_list.append(dt)
             auc_list.append(test_score['AUROC'])
             pre_list.append(test_score['AUPRC'])
             rec_list.append(test_score['RecK'])
-            ed = time.time()
-            time_cost += ed - st
+            print(f"  -> AUROC={test_score['AUROC']:.4f}, "
+                  f"AUPRC={test_score['AUPRC']:.4f}, "
+                  f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
+
+        if time_list:
+            total = sum(time_list)
+            print(f"  [{model} on {dataset_name}] {len(time_list)} trials — "
+                  f"total {format_duration(total)}, "
+                  f"mean {format_duration(total / len(time_list))} "
+                  f"± {format_duration(float(np.std(time_list)))}")
         del detector, data
 
         model_result[dataset_name+'-AUROC mean'] = np.mean(auc_list)
@@ -94,8 +106,10 @@ for model in models:
         model_result[dataset_name+'-AUPRC std'] = np.std(pre_list)
         model_result[dataset_name+'-RecK mean'] = np.mean(rec_list)
         model_result[dataset_name+'-RecK std'] = np.std(rec_list)
-        model_result[dataset_name+'-Time'] = time_cost/args.trials
+        model_result[dataset_name+'-Time'] = sum(time_list)/len(time_list) if time_list else 0
     model_result = pandas.DataFrame(model_result, index=[0])
     results = pandas.concat([results, model_result])
     file_id = save_results(results, file_id)
     print(results)
+
+print(f"\n[Total] {format_duration(time.time() - script_start)}")
