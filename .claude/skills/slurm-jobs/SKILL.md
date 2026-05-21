@@ -28,7 +28,7 @@ BiGG training and benchmarking:
 | Path | What it submits |
 |---|---|
 | `scripts/train/train_bigg.slurm` | BiGG conditional training (full graph) |
-| `scripts/train/train_bigg_subsample.slurm` | BiGG with forest-fire subsampling |
+| `scripts/train/train_bigg_subsample.slurm` | BiGG trained on pre-generated subgraphs (set `LOAD_SUBSAMPLES=true` + `SUBSAMPLING_CONFIG` + `SPLIT_ID`; runtime sampling path is legacy) |
 | `scripts/train/train_bigg_subsample_grid.slurm` | BiGG subsample hyperparameter sweep |
 | `scripts/train/train_bigg_structure.slurm` | BiGG structure-only baseline |
 | `scripts/benchmark/bigg_benchmark.slurm` | GADBench on BiGG synthetic |
