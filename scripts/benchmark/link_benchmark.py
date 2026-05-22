@@ -35,7 +35,8 @@ if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 
 from link_utils import LinkDataset, save_results
-from models.link_prediction.link_predictor import BaseGNNLinkPredictor, XGBGraphLinkPredictor
+from models.link_prediction.link_predictor import (
+    BaseGNNLinkPredictor, XGBoostLinkPredictor, XGBGraphLinkPredictor)
 from models.link_prediction.cgt_link_predictor import (
     CompGraphLinkPredictor, CGTXGBoostLinkPredictor, CGTXGBGraphLinkPredictor)
 from bench_utils import (
@@ -45,14 +46,14 @@ from bench_utils import (
     format_duration,
 )
 from models.cross_graph_link_predictor import (
-    CrossGraphLinkPredictor, CrossGraphXGBGraphLinkPredictor,
-    CROSS_GRAPH_LP_SUPPORTED_MODELS,
+    CrossGraphLinkPredictor, CrossGraphXGBoostLinkPredictor,
+    CrossGraphXGBGraphLinkPredictor, CROSS_GRAPH_LP_SUPPORTED_MODELS,
 )
 
 SEED_LIST = list(range(3407, 10000, 10))
 
-SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph']
-CGT_LP_SUPPORTED_MODELS = SUPPORTED_MODELS + ['XGBoost']
+SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBoost', 'XGBGraph']
+CGT_LP_SUPPORTED_MODELS = SUPPORTED_MODELS
 
 CGT_LP_TREE_MODELS = {
     'XGBoost': CGTXGBoostLinkPredictor,
@@ -79,10 +80,6 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
     results = []
 
     for model_name in models:
-        if model_name == 'XGBoost':
-            print(f"  NOTE: 'XGBoost' is CGT-only for link prediction. "
-                  f"Skipping full-graph eval.")
-            continue
         if model_name not in SUPPORTED_MODELS:
             print(f"  WARNING: '{model_name}' not supported for link prediction. Skipping.")
             continue
@@ -122,7 +119,9 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
                 'num_layers': num_layers,
             }
 
-            if model_name == 'XGBGraph':
+            if model_name == 'XGBoost':
+                detector = XGBoostLinkPredictor(train_config, model_config, data)
+            elif model_name == 'XGBGraph':
                 detector = XGBGraphLinkPredictor(train_config, model_config, data)
             else:
                 detector = BaseGNNLinkPredictor(train_config, model_config, data)
@@ -410,7 +409,9 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
                 del syn_data, orig_data
                 continue
 
-            if model_name == 'XGBGraph':
+            if model_name == 'XGBoost':
+                detector = CrossGraphXGBoostLinkPredictor(train_config, model_config, syn_data, orig_data)
+            elif model_name == 'XGBGraph':
                 detector = CrossGraphXGBGraphLinkPredictor(train_config, model_config, syn_data, orig_data)
             else:
                 detector = CrossGraphLinkPredictor(train_config, model_config, syn_data, orig_data)

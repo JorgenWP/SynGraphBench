@@ -11,7 +11,7 @@ if _gadbench not in sys.path:
 
 from models.link_prediction.link_predictor import BaseDetector, MLPDecoder
 
-CROSS_GRAPH_LP_SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph']
+CROSS_GRAPH_LP_SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBoost', 'XGBGraph']
 
 
 class CrossGraphLinkPredictor(BaseDetector):
@@ -187,6 +187,109 @@ class CrossGraphLinkPredictor(BaseDetector):
                 if self.patience_knt > patience:
                     break
 
+        return test_score
+
+
+class CrossGraphXGBoostLinkPredictor(BaseDetector):
+    """
+    Raw-feature XGBoost LP: train+val on synthetic graph edges, test on original.
+
+    Edge features = Hadamard product of endpoint raw node features on each
+    graph independently. Sister class to `CrossGraphXGBGraphLinkPredictor`,
+    which adds `GIN_noparam` aggregation before the Hadamard step.
+
+    Train:      synthetic graph train edges  (XGBoost fit)
+    Val:        synthetic graph val edges     (XGBoost eval_set)
+    Test:       original graph test edges     (final evaluation)
+    """
+
+    def __init__(self, train_config, model_config, syn_data, orig_data):
+        import xgboost as xgb
+        from sklearn.metrics import roc_auc_score, average_precision_score
+
+        device = train_config['device']
+        self.train_config = train_config
+        self.model_config = model_config
+
+        # --- Synthetic graph (train + val) ---
+        self.syn_train_graph = syn_data.train_graph.to(device)
+        self.syn_train_pos_edges = syn_data.train_pos_edges.to(device)
+        self.syn_val_pos_edges = syn_data.val_pos_edges.to(device)
+        self.syn_val_neg_edges = syn_data.val_neg_edges.to(device)
+        self.syn_num_nodes = syn_data.graph.num_nodes()
+        self.syn_edge_set = syn_data.edge_set
+
+        # --- Original graph (test only) ---
+        self.orig_train_graph = orig_data.train_graph.to(device)
+        self.test_pos_edges = orig_data.test_pos_edges.to(device)
+        self.test_neg_edges = orig_data.test_neg_edges.to(device)
+
+        self.syn_feats = self.syn_train_graph.ndata['feature'].detach()
+        self.orig_feats = self.orig_train_graph.ndata['feature'].detach()
+
+        cfg = {k: v for k, v in model_config.items() if k != 'model'}
+        eval_metric = roc_auc_score if train_config['metric'] == "AUROC" else average_precision_score
+        self.model = xgb.XGBClassifier(
+            tree_method='hist', eval_metric=eval_metric, verbose=False, **cfg)
+
+        self.best_score = -1
+        self.patience_knt = 0
+
+    def _edge_features(self, h, edges):
+        return (h[edges[:, 0]] * h[edges[:, 1]]).cpu().numpy()
+
+    def _sample_random_negatives(self, n):
+        neg_edges = torch.stack([
+            torch.randint(0, self.syn_num_nodes, (n,)),
+            torch.randint(0, self.syn_num_nodes, (n,))
+        ], dim=1)
+        src, dst = neg_edges[:, 0], neg_edges[:, 1]
+        for _ in range(10):
+            hashes = src.long() * self.syn_num_nodes + dst.long()
+            collision = torch.isin(hashes, self.syn_edge_set) | (src == dst)
+            if not collision.any():
+                break
+            n_bad = collision.sum().item()
+            dst[collision] = torch.randint(0, self.syn_num_nodes, (n_bad,))
+        return neg_edges.to(self.train_config['device'])
+
+    def train(self):
+        n_train = self.syn_train_pos_edges.shape[0]
+
+        train_neg = self._sample_random_negatives(n_train)
+        train_X = np.vstack([
+            self._edge_features(self.syn_feats, self.syn_train_pos_edges),
+            self._edge_features(self.syn_feats, train_neg),
+        ])
+        train_y = np.concatenate([np.ones(n_train), np.zeros(n_train)])
+
+        val_X = np.vstack([
+            self._edge_features(self.syn_feats, self.syn_val_pos_edges),
+            self._edge_features(self.syn_feats, self.syn_val_neg_edges),
+        ])
+        val_y = np.concatenate([
+            np.ones(self.syn_val_pos_edges.shape[0]),
+            np.zeros(self.syn_val_neg_edges.shape[0]),
+        ])
+
+        self.model.fit(train_X, train_y, eval_set=[(val_X, val_y)], verbose=False)
+
+        val_probs = self.model.predict_proba(val_X)[:, 1]
+        n_val_pos = self.syn_val_pos_edges.shape[0]
+        val_score = self.eval(
+            torch.tensor(val_probs[:n_val_pos]),
+            torch.tensor(val_probs[n_val_pos:]))
+        self.best_score = val_score[self.train_config['metric']]
+
+        test_X = np.vstack([
+            self._edge_features(self.orig_feats, self.test_pos_edges),
+            self._edge_features(self.orig_feats, self.test_neg_edges),
+        ])
+        test_probs = self.model.predict_proba(test_X)[:, 1]
+        n_test_pos = self.test_pos_edges.shape[0]
+        test_score = self.eval(
+            torch.tensor(test_probs[:n_test_pos]),
+            torch.tensor(test_probs[n_test_pos:]))
         return test_score
 
 
