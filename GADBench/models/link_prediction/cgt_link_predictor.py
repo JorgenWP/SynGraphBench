@@ -20,6 +20,8 @@ comp graphs:
     Enforces `num_layers == step_num`.
 """
 
+import time
+
 import dgl
 import numpy as np
 import torch
@@ -143,21 +145,37 @@ class MergedCompGraphLinkPredictor(BaseDetector):
         scores = [self._score_batch_on_device(b) for b in cached]
         return torch.cat(scores, dim=0)
 
-    def _train_step(self, edges, labels):
+    def _train_step(self, edges, labels, ts=None):
         """Per-batch forward+backward with gradient accumulation.
 
         Peak memory is O(one batch) because each batch's autograd graph
         is freed by its own backward. Accumulated gradient equals the
         gradient of mean-BCE over all edges: each batch contributes
         (1/N) * sum_{i in batch} BCE_i, summing to (1/N) * sum_i BCE_i.
+
+        If `ts` (dict) is provided, accumulates per-batch timings:
+          - ts['data_wait']: wall time GPU was idle waiting on DataLoader.
+          - ts['gpu_compute']: wall time spent in score+BCE+backward.
+          - ts['n_batches']: number of batches processed.
         """
         n_total = edges.shape[0]
         if n_total == 0:
             return 0.0
 
+        use_cuda = (torch.cuda.is_available()
+                    and 'cuda' in str(self.device))
+
         loss_sum = 0.0
         offset = 0
+
+        if use_cuda:
+            torch.cuda.synchronize()
+        t_prev = time.time()
         for batched in self._edge_loader(edges):
+            t_after_next = time.time()
+            if ts is not None:
+                ts['data_wait'] += t_after_next - t_prev
+
             s = self._score_batch(batched)
             n_b = s.shape[0]
             batch_labels = labels[offset:offset + n_b]
@@ -166,6 +184,14 @@ class MergedCompGraphLinkPredictor(BaseDetector):
             batch_loss.backward()
             loss_sum += batch_loss.item()
             offset += n_b
+
+            if use_cuda:
+                torch.cuda.synchronize()
+            t_after_gpu = time.time()
+            if ts is not None:
+                ts['gpu_compute'] += t_after_gpu - t_after_next
+                ts['n_batches'] += 1
+            t_prev = t_after_gpu
         return loss_sum
 
     def _filter_collisions(self, neg_edges):
@@ -205,17 +231,32 @@ class MergedCompGraphLinkPredictor(BaseDetector):
             params += list(self.decoder.parameters())
         optimizer = torch.optim.Adam(params, lr=self.model_config['lr'])
 
+        use_cuda = (torch.cuda.is_available()
+                    and 'cuda' in str(self.device))
+
+        def sync():
+            if use_cuda:
+                torch.cuda.synchronize()
+
+        metric = self.train_config['metric']
         test_score = None
         n_train = self.train_pos_edges.shape[0]
+        ts_total = {'neg': 0.0, 'data_wait': 0.0, 'gpu_compute': 0.0,
+                    'opt': 0.0, 'val': 0.0, 'test': 0.0, 'n_batches': 0}
+        n_epochs = 0
+        trial_start = time.time()
 
         for e in range(self.train_config['epochs']):
             self.model.train()
 
+            sync(); t0 = time.time()
             if self.neg_sampling == 'hard':
                 train_neg_edges = self._sample_hard_negatives(
                     self.train_pos_edges)
             else:
                 train_neg_edges = self._sample_random_negatives(n_train)
+            sync(); t1 = time.time()
+            t_neg = t1 - t0
 
             all_train_edges = torch.cat(
                 [self.train_pos_edges, train_neg_edges], dim=0)
@@ -224,18 +265,25 @@ class MergedCompGraphLinkPredictor(BaseDetector):
                 torch.zeros(train_neg_edges.shape[0], device=self.device),
             ])
 
+            epoch_step_ts = {
+                'data_wait': 0.0, 'gpu_compute': 0.0, 'n_batches': 0}
             optimizer.zero_grad()
-            loss = self._train_step(all_train_edges, labels)
+            loss = self._train_step(all_train_edges, labels, epoch_step_ts)
             optimizer.step()
+            sync(); t2 = time.time()
+            t_opt = (t2 - t1) - epoch_step_ts['data_wait'] - epoch_step_ts['gpu_compute']
 
             self.model.eval()
             with torch.no_grad():
                 val_pos = torch.sigmoid(self._score_edges(self.val_pos_edges))
                 val_neg = torch.sigmoid(self._score_edges(self.val_neg_edges))
             val_score = self.eval(val_pos, val_neg)
+            sync(); t3 = time.time()
+            t_val = t3 - t2
 
-            if val_score[self.train_config['metric']] > self.best_score:
-                self.best_score = val_score[self.train_config['metric']]
+            t_test = 0.0
+            if val_score[metric] > self.best_score:
+                self.best_score = val_score[metric]
                 self.patience_knt = 0
                 with torch.no_grad():
                     test_pos = torch.sigmoid(
@@ -243,14 +291,41 @@ class MergedCompGraphLinkPredictor(BaseDetector):
                     test_neg = torch.sigmoid(
                         self._score_edges(self.test_neg_edges))
                 test_score = self.eval(test_pos, test_neg)
+                sync(); t4 = time.time()
+                t_test = t4 - t3
                 print('Epoch {}, Loss {:.4f}, Val AUC {:.4f}, PRC {:.4f}, '
                       'test AUC {:.4f}, PRC {:.4f}'.format(
                           e, loss, val_score['AUROC'], val_score['AUPRC'],
                           test_score['AUROC'], test_score['AUPRC']))
             else:
                 self.patience_knt += 1
-                if self.patience_knt > self.train_config['patience']:
-                    break
+
+            ts_total['neg'] += t_neg
+            ts_total['data_wait'] += epoch_step_ts['data_wait']
+            ts_total['gpu_compute'] += epoch_step_ts['gpu_compute']
+            ts_total['opt'] += t_opt
+            ts_total['val'] += t_val
+            ts_total['test'] += t_test
+            ts_total['n_batches'] += epoch_step_ts['n_batches']
+            n_epochs += 1
+
+            if self.patience_knt > self.train_config['patience']:
+                break
+
+        trial_wall = time.time() - trial_start
+        sum_phases = (ts_total['neg'] + ts_total['data_wait']
+                      + ts_total['gpu_compute'] + ts_total['opt']
+                      + ts_total['val'] + ts_total['test'])
+        other = trial_wall - sum_phases
+        print(f"  [Trial summary] {n_epochs} epochs "
+              f"({ts_total['n_batches']} batches) | totals: "
+              f"neg={ts_total['neg']:.1f}s "
+              f"data={ts_total['data_wait']:.1f}s "
+              f"gpu={ts_total['gpu_compute']:.1f}s "
+              f"opt={ts_total['opt']:.1f}s "
+              f"val={ts_total['val']:.1f}s "
+              f"test={ts_total['test']:.1f}s "
+              f"other={other:.1f}s")
 
         return test_score
 
