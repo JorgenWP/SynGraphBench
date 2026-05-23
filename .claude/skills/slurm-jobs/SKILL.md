@@ -53,7 +53,12 @@ BiGG training and benchmarking:
 
 **Output log layout**: nest under `<dataset>/<task>/`. **Do not** encode the task in the filename — it lives in the directory path. So `output/cgt/train/weibo/hidden_labels/output_all_trials_k20.txt`, not `output/cgt/train/weibo/output_hidden_labels_k20.txt`.
 
-**Job name convention**: `<GENERATOR>_<task>_<train/benchmark>_<dataset>_<job-specific-description>`, e.g., `CGT_ANOMALY_TRAIN_weibo_k20_c367` or `CGT_LINK_BENCHMARK_tolokers_k512_dot_random`. The default template usually has placeholder text like `<dataset>` — replace it.
+**Job name convention**: `<GENERATOR>_<TASK>_<PHASE>_<dataset>_<job-specific-description>`. Training and benchmarking jobs share the same shape — `<PHASE>` is `TRAIN` or `BENCHMARK`, and `<TASK>` is the short uppercase form (`ANOMALY` for `hidden_labels`, `LINK` for `hidden_links`). Do **not** put the long `hidden_labels` / `hidden_links` token in the job name, and do **not` put `<dataset>` before `<TASK>`. Examples:
+
+- Training: `CGT_ANOMALY_TRAIN_weibo_k20_c367`, `CGT_LINK_TRAIN_tolokers_k1_c4096`
+- Benchmarking: `CGT_ANOMALY_BENCHMARK_tolokers_k50_c176`, `CGT_LINK_BENCHMARK_tolokers_k1_c512_dot_random`
+
+In job names, `k<N>` = CLUSTER_SIZE (k-anonymity) and `c<N>` = CLUSTER_NUM — the user's intuitive convention. This is the **opposite** of the variant filename (`..._k<CLUSTER_NUM>_c<CLUSTER_SIZE>_...`); see Dataset naming below. The default template usually has placeholder text like `<dataset>` — replace it.
 
 ## Submitting and monitoring
 
