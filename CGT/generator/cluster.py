@@ -177,7 +177,18 @@ def cluster_feats(args, feats, fit_ids=None):
           f"mean={sizes.mean():.1f}, median={int(np.median(sizes))}, std={sizes.std():.1f}; "
           f"repair_moves={repair_moves}")
 
-    # Append empty_id
+    # L2-normalize cluster centers so the synthetic feature pool lives
+    # exactly on the unit sphere — matching CGT's L2-normalized training
+    # input space and the eval framework's L2-normalized real test features.
+    # Done after assignment + size repair so cluster memberships are
+    # unaffected; only the saved/returned centers change.
+    norms = np.linalg.norm(cluster_centers, axis=1, keepdims=True)
+    norms = np.where(norms == 0, 1.0, norms)
+    cluster_centers = cluster_centers / norms
+    print("[Clustering] L2-normalized cluster centers")
+
+    # Append empty_id (zero row — produces no message-passing signal for
+    # missing neighbours, intentionally outside the unit-sphere invariant)
     cluster_ids = torch.LongTensor(np.append(cluster_ids, args.cluster_num))
     cluster_centers = torch.FloatTensor(np.concatenate((cluster_centers, np.zeros((1, cluster_centers.shape[1]))), axis=0))
 
