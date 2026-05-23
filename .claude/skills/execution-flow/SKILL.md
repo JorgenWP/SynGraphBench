@@ -20,8 +20,10 @@ description: End-to-end pipeline steps, key shell scripts with their CLI argumen
 
 ### Benchmark
 
-**`bash scripts/benchmark/run_anomaly_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [task]`**
-Anomaly detection benchmark. Defaults: `reddit`, `GCN,GIN,GraphSAGE,XGBGraph,XGBoost`, `1`, `cgt`, `""` (uses dataset name), `hidden_labels`. Calls `scripts/benchmark/anomaly_benchmark.py`.
+**`bash scripts/benchmark/run_anomaly_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [task] [cdf_invert] [seeds_per_split] [dump_per_trial] [tune_test_ratio] [tune_test_seed] [tune_portion]`**
+Anomaly detection benchmark. Defaults: `reddit`, `GCN,GIN,GraphSAGE,XGBGraph,XGBoost`, `1`, `cgt`, `""` (uses dataset name), `hidden_labels`, `linear`, `3`, `false`, `""`, `0`, `tune`. Calls `scripts/benchmark/anomaly_benchmark.py`. Trailing four positionals are BO-tuning hooks (see *Per-trial AUPRC dump + tune-mask split* in the evaluation-framework skill).
+
+`seeds_per_split` only applies in BiGG split-bundle mode: each of the bundle's splits is repeated with the same `SEED_LIST[:seeds_per_split]` seeds, so the per-trial variance reflects both seed and split rather than confounding them. Total runs in bundle mode = `#splits × seeds_per_split`. In single-variant mode and CGT mode the flag is ignored and the legacy one-seed-per-trial rotation is used.
 
 `XGBoost` is the feature-only diagnostic row: trains on synthetic raw features and tests on original raw features, no graph structure either side. A synthetic >> original AUROC gap means the generator over-encoded the label into features, so downstream GNN wins aren't measuring topology use.
 
@@ -39,6 +41,11 @@ bash scripts/benchmark/run_anomaly_benchmark.sh tolokers GCN,GIN 1 bigg blksize_
 
 # BiGG subsampled run (standard: load_subsamples) — benchmark auto-combines subgraph_* files into a block-diagonal graph
 bash scripts/benchmark/run_anomaly_benchmark.sh tolokers GCN,GIN 1 bigg blksize_-1_b_1_lr_0.001_epochs_50_..._loadsub_ff_b0.5_M1_split0 hidden_labels
+
+# BiGG split bundle: my_5_splits/ is a directory containing exactly 5 per-split BiGG variant subdirs
+# (each tagged *_split{0..4}_n5). Trials is forced to the bundle size; each trial loads its own
+# variant + matching original-data split. Use when splits were tuned to different hparams.
+bash scripts/benchmark/run_anomaly_benchmark.sh tolokers GCN,GIN,GraphSAGE,XGBGraph,XGBoost 5 bigg my_5_splits hidden_labels
 ```
 
 **`bash scripts/benchmark/run_link_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [neg_sampling] [decoder] [task]`**
@@ -122,6 +129,20 @@ Train CGT on `num_trials` GADBench splits (trials 0 to num_trials-1). Defaults: 
 `trial_id` (per-trial, from the loop) selects the mask column (for `hidden_labels`) or seeds the edge split (for `hidden_links`). `task=hidden_links` additionally reads `--val_ratio` (default 0.05) and `--test_ratio` (default 0.10) from `CGT/args.py`; these must match the downstream `LinkDataset.split` ratios or alignment assertions fail.
 `cluster_sample_num` caps how many nodes are subsampled to fit `KMeansConstrained`; the library requires `cluster_num × cluster_size ≤ cluster_sample_num`, so raise this to use a higher `cluster_size` (k-anonymity) without giving up cluster resolution. Set ≥ graph size to fit on all nodes.
 Output saved to `datasets/synthetic/cgt/<dataset>/<task>/<variant>/<variant>_t{trial_id}.pt` where variant = `{dataset}_e{epochs}_k{clusters}_c{cluster_size}_d{depth}_f{fanout}_s{cluster_sample_num}`. `.pt` contains: generated sequences, cluster centers, `ids`, `task`, `trial_id`, and (for `hidden_links`) `hidden_test_edges` + `val_ratio` + `test_ratio` for provenance-checking.
+
+### BO Hyperparameter Tuning
+
+**`python -m experiments.bo_tuning.coordinator --dataset {tolokers|questions|weibo} --mode {shared|per_split} [--split_id N] [--n_trials N] [--max_trials N] [--max_wall_seconds S] [--study_version v1]`**
+Bayesian-optimization tuner over BiGG's `lr`, `kl_weight`, `lw_cont`, `lw_label` at privacy=0. Runs in the `bigg` conda env; spawns the benchmark in the GADBench env (absolute path in `configs/{dataset}.yaml`). Resumable: re-launching against the same study DB picks up where it left off; `cleanup_stale.py` (auto-called on start) re-enqueues trials killed by walltime.
+
+* `shared` mode → one Optuna study per dataset; each trial trains all 5 splits and the BO objective is `CVaR_60%(split_gap) − 0.2·n_collapsed_splits`.
+* `per_split` mode → 5 independent studies per dataset (one per split); each trial trains 1 split; objective degenerates to `mean_m(gap[m,s]) − 0.2·collapse_indicator`.
+* `--max_trials N` caps trials per process (set to 1 for array workers under topology C).
+* `--max_wall_seconds S` stops accepting new trials past this wall-clock — pair with SLURM walltime minus a 10 min grace.
+* BO selection runs against 50% of test nodes (anomaly-stratified, fixed seed). The other 50% is held out for `experiments.bo_tuning.final_report`.
+* SLURM templates: `experiments/bo_tuning/slurm/bo_coordinator.slurm` (Topology A, persistent), `bo_worker.slurm` (Topology C, array). Per-dataset config in `experiments/bo_tuning/configs/{dataset}.yaml`.
+* After the study finishes: `python -m experiments.bo_tuning.aggregate ...` rebuilds `summary.csv` + `best_params.json`; `python -m experiments.bo_tuning.final_report --dataset X --mode shared` re-evaluates best HPs on the held-out test portion with real-data baseline rotated through the same splits.
+* Metadata for the thesis: per-trial `metadata.json` (trial dir) + a flat `trial_log.jsonl` carry per-(split, model, seed) AUROC/AUPRC/RecK, gap ratios, base rate, BO source, wall-clock, git commit, SLURM job id.
 
 ### Environment Setup
 

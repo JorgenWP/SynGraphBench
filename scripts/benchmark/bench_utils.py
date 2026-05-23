@@ -1,6 +1,7 @@
 import argparse
 import math
 import os
+import re
 import numpy as np
 import torch
 import dgl
@@ -15,6 +16,108 @@ from models.anomaly_detection.cgt_detector import CG_SUPPORTED_MODELS
 
 SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph', 'XGBoost']
 LP_SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE']
+
+_BIGG_SPLIT_RE = re.compile(r'_loadsub_[^/\\]+?_split(\d+)_n\d+')
+_BIGG_BUNDLE_SUBDIR_SPLIT_RE = re.compile(r'split(\d+)')
+
+
+def infer_bigg_trial_id(synthetic_name):
+    """Extract GADBench split id from a BiGG stem, or None."""
+    if not synthetic_name:
+        return None
+    m = _BIGG_SPLIT_RE.search(synthetic_name)
+    return int(m.group(1)) if m else None
+
+
+def discover_bigg_split_bundle(syn_path):
+    """Detect a BiGG multi-split bundle directory.
+
+    A bundle is a directory whose **immediate sub-directories** are each
+    per-split BiGG variants (contain ``subgraph_*`` files and have
+    ``split{N}`` somewhere in their name). Cache files written by the
+    benchmark (``_combined_v2``, ``_norm_stats.pt`` …) are tolerated as
+    plain-file siblings.
+
+    Returns a list ``[(split_id, subdir_name), …]`` sorted by split id, or
+    ``None`` when the path is not a directory or contains its own
+    ``subgraph_*`` files (i.e. is a single-variant directory).
+
+    Raises ``ValueError`` when the directory looks like a bundle but a
+    sub-dir is missing the ``split{N}`` tag or two sub-dirs claim the same
+    split id.
+    """
+    if not os.path.isdir(syn_path):
+        return None
+    entries = os.listdir(syn_path)
+    # Single-variant directory: contains subgraph_* files directly.
+    if any(f.startswith('subgraph_') for f in entries):
+        return None
+    bundle = {}
+    bad_dirs = []
+    for name in sorted(entries):
+        full = os.path.join(syn_path, name)
+        if not os.path.isdir(full):
+            continue
+        try:
+            child_entries = os.listdir(full)
+        except OSError:
+            continue
+        # Only treat dirs that actually look like BiGG variants
+        # (contain subgraph_* files) as candidates.
+        if not any(f.startswith('subgraph_') for f in child_entries):
+            continue
+        m = _BIGG_BUNDLE_SUBDIR_SPLIT_RE.search(name)
+        if m is None:
+            bad_dirs.append(name)
+            continue
+        split_id = int(m.group(1))
+        if split_id in bundle:
+            raise ValueError(
+                f"BiGG bundle '{syn_path}' has two sub-dirs claiming "
+                f"split{split_id}: '{bundle[split_id]}' and '{name}'.")
+        bundle[split_id] = name
+    if bad_dirs:
+        # Some sub-dirs look like BiGG variants (have subgraph_* files) but
+        # lack a split{N} tag — that's almost certainly a user mistake in
+        # what they meant to use as a bundle, so fail loudly rather than
+        # silently dropping them.
+        raise ValueError(
+            f"BiGG bundle '{syn_path}' contains variant sub-dir(s) without a "
+            f"split{{N}} tag: {bad_dirs}. Rename them or move them out — "
+            f"bundle mode requires every variant to be tagged with its split.")
+    if not bundle:
+        return None
+    return sorted(bundle.items())
+
+
+def apply_inferred_trial_id(args):
+    """For BiGG runs, set ``args.trial_id`` from the stem's ``_split{N}_n`` tag.
+
+    No-op when ``args.synthetic_type != 'graph'`` (CGT untouched) or when the
+    stem has no split tag. Raises on conflict with an explicit ``--trial_id``:
+    BiGG's training subsample for split N excludes only split N's test nodes,
+    so any other split would leak.
+    """
+    if getattr(args, 'synthetic_type', None) != 'graph':
+        return
+    parsed = infer_bigg_trial_id(getattr(args, 'synthetic_name', None))
+    if parsed is None:
+        return
+    if args.trial_id != 0 and args.trial_id != parsed:
+        raise ValueError(
+            f"--trial_id={args.trial_id} conflicts with split id parsed from "
+            f"synthetic_name ('_split{parsed}_'). BiGG was trained on a "
+            f"subsample that excludes only split {parsed}'s test nodes; using "
+            f"a different split would leak training data into evaluation. "
+            f"Pass --trial_id {parsed} or omit the flag.")
+    if args.trial_id != parsed:
+        print(f"  Auto-inferred --trial_id={parsed} from synthetic_name "
+              f"('_split{parsed}_n...').")
+    args.trial_id = parsed
+    if getattr(args, 'trials', 1) > 1:
+        print(f"  WARNING: trials={args.trials} with auto-inferred trial_id "
+              f"will use splits {parsed}..{parsed + args.trials - 1}. Only "
+              f"split {parsed} is guaranteed leak-free under this BiGG stem.")
 
 
 def parse_link_args():
@@ -55,6 +158,10 @@ def parse_link_args():
                                  'datasets/kanon/<dataset>/<stem>.dgl. '
                                  'Only valid with --synthetic_type graph and a '
                                  'single dataset in --datasets.')
+    data_group.add_argument('--trial_id', type=int, default=0,
+                            help='GADBench split id used as the per-trial '
+                                 'offset. Auto-inferred from _split{N}_n in '
+                                 'synthetic_name for BiGG runs.')
 
     lp_group = parser.add_argument_group('Link prediction')
     lp_group.add_argument('--val_ratio', type=float, default=0.05,
@@ -150,11 +257,46 @@ def parse_args():
                                  'reflected in the inverted-graph cache name so '
                                  'switching modes does not silently reuse stale '
                                  'caches.')
+    data_group.add_argument('--dump_per_trial', action='store_true',
+                            default=False,
+                            help='Also write raw per-(split, classifier, seed) '
+                                 'AUROC/AUPRC/RecK rows to per_trial_results.csv '
+                                 'in addition to the aggregated evaluation_results.csv. '
+                                 'Used by the BO tuning framework to compute '
+                                 'CVaR / collapse-aware objectives.')
+    data_group.add_argument('--tune_test_ratio', type=float, default=None,
+                            help='If set in (0,1), restrict the per-split test '
+                                 'mask to an anomaly-stratified subsample of '
+                                 'this fraction (paired with --tune_test_seed '
+                                 'and --tune_portion). Held-out portion is '
+                                 'reserved for the final report so BO does not '
+                                 'select on the same nodes it reports on.')
+    data_group.add_argument('--tune_test_seed', type=int, default=0,
+                            help='Seed for the stratified tune/heldout split of '
+                                 'the test mask. Must be held constant across '
+                                 'every trial of a study so the same nodes are '
+                                 'used for selection.')
+    data_group.add_argument('--tune_portion', type=str, default='tune',
+                            choices=['tune', 'heldout'],
+                            help='Which half of the stratified split to evaluate '
+                                 'on. BO selection uses "tune"; the final '
+                                 'report uses "heldout". Ignored when '
+                                 '--tune_test_ratio is unset.')
 
     # --- Training ---
     train_group = parser.add_argument_group('Training')
     train_group.add_argument('--trials', type=int, default=1,
-                             help='Number of evaluation trials per model/dataset')
+                             help='Number of evaluation trials per model/dataset. '
+                                  'In BiGG split-bundle mode this is overridden to '
+                                  'the number of variants (one trial per split).')
+    train_group.add_argument('--seeds_per_split', type=int, default=3,
+                             help='Number of seeds to repeat for each split in '
+                                  'BiGG split-bundle mode. With N splits and K '
+                                  'seeds_per_split, K seeds (3407, 3417, ...) are '
+                                  'reused across every split, giving N*K runs. '
+                                  'Reusing seeds across splits decouples seed and '
+                                  'split variance. Ignored in single-variant '
+                                  'mode and CGT mode (seed varies per trial there).')
     train_group.add_argument('--epochs', type=int, default=200,
                              help='Max training epochs')
     train_group.add_argument('--patience', type=int, default=50,

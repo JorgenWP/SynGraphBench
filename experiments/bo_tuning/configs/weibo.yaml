@@ -1,0 +1,65 @@
+# BO tuning config — weibo
+#
+# Weibo is the heavy-tail dataset: per-split AUPRC stds are 30-44% of means
+# and the worst-split AUPRC can fall below the base rate. The collapse
+# penalty in objective.py is what makes BO actively avoid those regions.
+#
+# Per the plan: per_split mode is recommended on weibo for natural
+# parallelism (5 splits × 90 min/trial each instead of 1 × 7.5 h).
+
+dataset: weibo
+
+fixed_hp:
+  dataset:            weibo
+  n_splits:           5
+  n_subgraphs:        15        # weibo uses metis_K15 (smaller partitions, more of them)
+  blksize:            -1
+  batch_size:         1
+  epochs:             300
+  embed_dim:          256
+  noise_std:          0.3
+  ss_max_prob:        0.3
+  ss_start_epoch:     0
+  bfs_preprocess:     True
+  normalize:          cdf
+  hetero_feat:        False
+  mask_test_labels:   True
+  logvar_floor:       -10.0
+  binary_feat:        True
+  vae_feat:           True
+  vae_dim:            16
+  mdn_feat:           True
+  mdn_components:     8
+  mdn_logsigma_floor: -10.0
+  mdn_base:           logit_normal
+  kl_schedule:        none
+  kl_anneal_epochs:   0
+  kl_cycle_epochs:    0
+  kl_ramp_ratio:      0.5
+  load_subsamples:    True
+  subsampling_config: metis_K15
+  recal_momentum:     1.0
+  subsample_size:     2000
+  burn_prob:          0.3
+  num_subgraphs:      ''
+  cat_feat:           False
+  n_bins:             32
+  bin_sigma:          ''
+
+search_space: {}
+
+seeds_per_split:  3
+tune_test_ratio:  0.5
+tune_test_seed:   20260523
+tune_portion:     tune
+
+models: [GCN, GIN, GraphSAGE, XGBGraph, XGBoost]
+
+benchmark:
+  conda_env:  GADBench
+  epochs:     200
+  patience:   50
+  lr:         0.01
+  drop_rate:  0.0
+  h_feats:    32
+  num_layers: 2

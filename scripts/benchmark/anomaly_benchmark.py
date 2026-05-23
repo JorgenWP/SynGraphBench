@@ -47,6 +47,8 @@ from bench_utils import (
     build_original_cg_datasets, print_comparison,
     load_bigg_synthetic_graph, load_bigg_real_subsampled_graph,
     apply_normalization,
+    apply_inferred_trial_id,
+    discover_bigg_split_bundle,
     resolve_cgt_trial_paths, make_cgt_rebuild_fn,
     _assert_pt_alignment, format_duration,
 )
@@ -72,12 +74,74 @@ def set_seed(seed=3407):
         torch.backends.cudnn.deterministic = True
 
 
+def _restrict_test_mask(data, ratio, seed, portion):
+    """Replace ``data.graph.ndata['test_mask']`` with an anomaly-stratified subset.
+
+    Used by the BO tuning framework so selection (``portion='tune'``) and
+    final reporting (``portion='heldout'``) operate on disjoint test nodes.
+    The stratification on the binary anomaly label keeps the positive rate
+    stable across the two halves on imbalanced datasets like weibo.
+    """
+    if ratio is None:
+        return
+    if not (0.0 < ratio < 1.0):
+        raise ValueError(
+            f"--tune_test_ratio must be in (0, 1) when set, got {ratio}")
+    from sklearn.model_selection import train_test_split as _tts
+    mask = data.graph.ndata['test_mask'].bool()
+    test_idx = mask.nonzero(as_tuple=True)[0].cpu().numpy()
+    if test_idx.size == 0:
+        return
+    labels = data.graph.ndata['label'][test_idx].cpu().numpy()
+    pos = int((labels > 0).sum())
+    neg = int((labels == 0).sum())
+    if pos < 2 or neg < 2:
+        # Stratification needs >=2 of each class; fall back to unstratified.
+        tune_idx, heldout_idx = _tts(
+            test_idx, train_size=ratio, random_state=seed, shuffle=True)
+    else:
+        tune_idx, heldout_idx = _tts(
+            test_idx, train_size=ratio, random_state=seed,
+            stratify=labels, shuffle=True)
+    keep = tune_idx if portion == 'tune' else heldout_idx
+    new_mask = torch.zeros_like(data.graph.ndata['test_mask'])
+    new_mask[keep] = 1
+    data.graph.ndata['test_mask'] = new_mask.bool()
+
+
 def evaluate_models(dataset_name, models, data_dir,
                     trials, semi_supervised, trial_id,
                     epochs, patience, lr, drop_rate, h_feats, num_layers,
-                    curve_records=None):
-    """Train and evaluate all specified models on the original dataset."""
+                    curve_records=None, split_ids=None, seeds_per_split=1,
+                    per_trial_records=None,
+                    tune_test_ratio=None, tune_test_seed=0,
+                    tune_portion='tune'):
+    """Train and evaluate all specified models on the original dataset.
+
+    ``split_ids`` overrides the per-trial GADBench split. When ``None``, the
+    legacy ``trial_id + t`` rotation is used (single-variant runs). When a
+    list is passed, trial ``t`` uses ``split_ids[t]`` — this lets BiGG
+    split-bundle runs rotate the baseline through the same splits the
+    bundle's per-variant synthetic graphs were trained on.
+
+    ``seeds_per_split`` only applies in bundle mode (``split_ids`` provided).
+    Each split is repeated ``seeds_per_split`` times with the *same* seeds
+    (``SEED_LIST[:seeds_per_split]``) so trial-to-trial variance does not
+    conflate seed and split. Total runs = ``len(split_ids) * seeds_per_split``.
+    In single-variant mode, ``seeds_per_split`` is ignored and the legacy
+    one-seed-per-trial rotation is used.
+    """
     results = []
+    if split_ids is not None and len(split_ids) != trials:
+        raise ValueError(
+            f"split_ids has {len(split_ids)} entries but trials={trials}")
+
+    if split_ids is not None:
+        runs = [(split_ids[s], SEED_LIST[k])
+                for s in range(trials)
+                for k in range(seeds_per_split)]
+    else:
+        runs = [(trial_id + t, SEED_LIST[t]) for t in range(trials)]
 
     for model_name in models:
         if model_name not in model_detector_dict:
@@ -92,9 +156,8 @@ def evaluate_models(dataset_name, models, data_dir,
         val_curves, test_curves = [], []
         time_list = []
 
-        for t in range(trials):
+        for t, (split_col, seed) in enumerate(runs):
             torch.cuda.empty_cache()
-            seed = SEED_LIST[t]
             set_seed(seed)
 
             train_config = {
@@ -107,10 +170,8 @@ def evaluate_models(dataset_name, models, data_dir,
             }
 
             data = GADBenchDataset(dataset_name, prefix=data_dir + '/')
-
-            # Apply train/val/test split masks — advance by t so each trial
-            # uses a different pre-stored mask column (trial_id is the starting offset)
-            data.split(semi_supervised, trial_id + t)
+            data.split(semi_supervised, split_col)
+            _restrict_test_mask(data, tune_test_ratio, tune_test_seed, tune_portion)
 
             model_config = {
                 'model': model_name,
@@ -122,7 +183,7 @@ def evaluate_models(dataset_name, models, data_dir,
             if dataset_name == 'tsocial':
                 model_config['h_feats'] = 16
 
-            print(f"  Trial {t}, seed={seed}")
+            print(f"  Trial {t}, split={split_col}, seed={seed}")
             detector = model_detector_dict[model_name](
                 train_config, model_config, data)
 
@@ -135,6 +196,19 @@ def evaluate_models(dataset_name, models, data_dir,
             auc_list.append(test_score['AUROC'])
             pre_list.append(test_score['AUPRC'])
             rec_list.append(test_score['RecK'])
+
+            if per_trial_records is not None:
+                per_trial_records.append({
+                    'source': 'original',
+                    'dataset': dataset_name,
+                    'model': model_name,
+                    'split_id': int(split_col),
+                    'seed': int(seed),
+                    'AUROC': float(test_score['AUROC']),
+                    'AUPRC': float(test_score['AUPRC']),
+                    'RecK':  float(test_score['RecK']),
+                    'time_sec': float(dt),
+                })
 
             if 'val_auprc_curve' in test_score:
                 val_curves.append(test_score['val_auprc_curve'])
@@ -385,11 +459,15 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
     return results
 
 
-def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn_file_name,
-                                trials, semi_supervised, trial_id,
+def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn_file_names,
+                                trials, semi_supervised, split_ids,
                                 epochs, patience, lr, drop_rate, h_feats, num_layers,
-                                norm_stats_path=None, curve_records=None,
-                                source_label='synthetic-graph'):
+                                norm_stats_paths=None, curve_records=None,
+                                source_label='synthetic-graph',
+                                seeds_per_split=1,
+                                per_trial_records=None,
+                                tune_test_ratio=None, tune_test_seed=0,
+                                tune_portion='tune'):
     """Train GNNs on a train-source graph, validate on its val mask, test on original test nodes.
 
     *source_label* identifies the training-source in printed banners and result
@@ -397,19 +475,44 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
     ``'real-subsampled-graph'`` (the real forest-fire subsamples used to train
     the generative model). The rest of the pipeline is identical.
 
+    *syn_file_names*, *norm_stats_paths*, and *split_ids* are per-split lists
+    of length ``trials``. In single-variant mode all entries are identical
+    (same synthetic graph reused across trials, only the split column varies).
+    In split-bundle mode each entry corresponds to one BiGG variant +
+    matching GADBench split column.
+
+    ``seeds_per_split`` repeats each (synthetic graph, split) combination with
+    the same ``SEED_LIST[:seeds_per_split]`` seeds so seed and split variance
+    are not conflated. Total runs = ``trials * seeds_per_split``.
+
     Per-epoch val/test AUPRC curves are appended to curve_records (if provided),
-    averaged across trials, for val/test divergence analysis.
+    averaged across all runs, for val/test divergence analysis.
     """
     from models.cross_graph_detector import (CrossGraphGNNDetector,
                                                 CrossGraphXGBGraphDetector,
                                                 CrossGraphXGBDetector,
                                                 CROSS_GRAPH_SUPPORTED_MODELS)
+    if len(syn_file_names) != trials or len(split_ids) != trials:
+        raise ValueError(
+            f"per-trial lists length mismatch: trials={trials}, "
+            f"syn_file_names={len(syn_file_names)}, "
+            f"split_ids={len(split_ids)}")
+    if norm_stats_paths is None:
+        norm_stats_paths = [None] * trials
+    elif len(norm_stats_paths) != trials:
+        raise ValueError(
+            f"norm_stats_paths length {len(norm_stats_paths)} != trials={trials}")
 
-    # Load normalization stats if available
-    norm_stats = None
-    if norm_stats_path and os.path.exists(norm_stats_path):
-        norm_stats = torch.load(norm_stats_path, weights_only=False)
-        print(f"  Loaded normalization stats ({norm_stats['method']}) from {norm_stats_path}")
+    # Cache parsed norm_stats by path so we don't reload the same file each trial
+    norm_stats_cache = {}
+    def _load_norm_stats(path):
+        if not path or not os.path.exists(path):
+            return None
+        if path not in norm_stats_cache:
+            norm_stats_cache[path] = torch.load(path, weights_only=False)
+            print(f"  Loaded normalization stats "
+                  f"({norm_stats_cache[path]['method']}) from {path}")
+        return norm_stats_cache[path]
 
     results = []
 
@@ -426,18 +529,25 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
         val_curves, test_curves = [], []
         time_list = []
 
-        for t in range(trials):
+        runs = [(s, k) for s in range(trials) for k in range(seeds_per_split)]
+
+        for t, (s, k) in enumerate(runs):
             torch.cuda.empty_cache()
-            seed = SEED_LIST[t]
+            seed = SEED_LIST[k]
             set_seed(seed)
+
+            split_col = split_ids[s]
+            syn_file_name = syn_file_names[s]
+            norm_stats = _load_norm_stats(norm_stats_paths[s])
 
             # Synthetic graph: train + val from synthetic masks
             syn_data = GADBenchDataset(syn_file_name, prefix=dataset_dir + '/')
-            syn_data.split(semi_supervised, trial_id + t)
+            syn_data.split(semi_supervised, split_col)
 
             # Original graph: test nodes only
             orig_data = GADBenchDataset(dataset_name, prefix=data_dir + '/')
-            orig_data.split(semi_supervised, trial_id + t)
+            orig_data.split(semi_supervised, split_col)
+            _restrict_test_mask(orig_data, tune_test_ratio, tune_test_seed, tune_portion)
 
             # Apply same normalization as was used during synthetic generation
             if norm_stats is not None:
@@ -455,7 +565,7 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
                 'num_layers': num_layers,
             }
 
-            print(f"  Trial {t}, seed={seed}")
+            print(f"  Trial {t}, split={split_col}, seed={seed}")
             if model_name == 'XGBGraph':
                 detector = CrossGraphXGBGraphDetector(train_config, model_config, syn_data, orig_data)
             elif model_name == 'XGBoost':
@@ -472,6 +582,20 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
             auc_list.append(test_score['AUROC'])
             pre_list.append(test_score['AUPRC'])
             rec_list.append(test_score['RecK'])
+
+            if per_trial_records is not None:
+                per_trial_records.append({
+                    'source': source_label,
+                    'dataset': dataset_name,
+                    'model': model_name,
+                    'split_id': int(split_col),
+                    'seed': int(seed),
+                    'AUROC': float(test_score['AUROC']),
+                    'AUPRC': float(test_score['AUPRC']),
+                    'RecK':  float(test_score['RecK']),
+                    'time_sec': float(dt),
+                })
+
             print(f"  -> AUROC={test_score['AUROC']:.4f}, AUPRC={test_score['AUPRC']:.4f}, "
                   f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
 
@@ -516,9 +640,83 @@ def evaluate_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn
     return results
 
 
+def _build_bigg_variant_caches(variant_syn_path, cache_dir, stem,
+                               cdf_invert, data_dir, dataset_name):
+    """Build (or reuse) combined-graph + real-subsampled caches for one BiGG variant.
+
+    Caches live at ``cache_dir/{stem}_combined_v2[_cdf_invert]`` and
+    ``cache_dir/{stem}_real_sub_combined_v3[_cdf_invert]`` so single-variant
+    runs and split-bundle runs can share or isolate caches naturally.
+
+    Returns dict with keys: ``eval_stem``, ``norm_stats_path``,
+    ``real_sub_stem``, ``real_sub_norm_path`` (the latter two are ``None``
+    when no real subsamples are available).
+    """
+    cdf_tag = '' if cdf_invert == 'linear' else f'_{cdf_invert}'
+    out = {'eval_stem': stem, 'norm_stats_path': None,
+           'real_sub_stem': None, 'real_sub_norm_path': None}
+
+    if os.path.isdir(variant_syn_path):
+        combined_stem = stem + '_combined_v2' + cdf_tag
+        combined_path = os.path.join(cache_dir, combined_stem)
+        if not os.path.exists(combined_path):
+            print(f'  Combining subgraphs → {combined_path}')
+            combined_graph, norm_stats = load_bigg_synthetic_graph(
+                variant_syn_path, cdf_mode=cdf_invert)
+            dgl.save_graphs(combined_path, [combined_graph])
+            if norm_stats is not None:
+                torch.save(norm_stats, combined_path + '_norm_stats.pt')
+        else:
+            print(f'  Using cached combined graph: {combined_path}')
+        out['eval_stem'] = combined_stem
+        out['norm_stats_path'] = combined_path + '_norm_stats.pt'
+
+        real_sub_stem = stem + '_real_sub_combined_v3' + cdf_tag
+        real_sub_path = os.path.join(cache_dir, real_sub_stem)
+        real_sub_norm_path = real_sub_path + '_norm_stats.pt'
+        if os.path.exists(real_sub_path):
+            print(f'  Using cached real-subsampled combined graph: {real_sub_path}')
+            out['real_sub_stem'] = real_sub_stem
+            out['real_sub_norm_path'] = (real_sub_norm_path
+                                         if os.path.exists(real_sub_norm_path) else None)
+        else:
+            orig_for_masks = GADBenchDataset(
+                dataset_name, prefix=data_dir + '/').graph
+            real_combined, real_norm = load_bigg_real_subsampled_graph(
+                variant_syn_path, orig_for_masks, cdf_mode=cdf_invert)
+            if real_combined is not None:
+                print(f'  Combining real subsamples → {real_sub_path}')
+                dgl.save_graphs(real_sub_path, [real_combined])
+                if real_norm is not None:
+                    torch.save(real_norm, real_sub_norm_path)
+                out['real_sub_stem'] = real_sub_stem
+                out['real_sub_norm_path'] = (real_sub_norm_path
+                                             if os.path.exists(real_sub_norm_path) else None)
+            else:
+                print(f'  No training_subsamples/ found in {variant_syn_path}; '
+                      f'skipping real-subsampled source.')
+    else:
+        inverted_stem = stem + '_inverted_v2' + cdf_tag
+        inverted_path = os.path.join(cache_dir, inverted_stem)
+        if not os.path.exists(inverted_path):
+            print(f'  Inverting synthetic features → {inverted_path}')
+            syn_graph, norm_stats = load_bigg_synthetic_graph(
+                variant_syn_path, cdf_mode=cdf_invert)
+            dgl.save_graphs(inverted_path, [syn_graph])
+            if norm_stats is not None:
+                torch.save(norm_stats, inverted_path + '_norm_stats.pt')
+        else:
+            print(f'  Using cached inverted synthetic graph: {inverted_path}')
+        out['eval_stem'] = inverted_stem
+        out['norm_stats_path'] = inverted_path + '_norm_stats.pt'
+
+    return out
+
+
 def main():
     t_start = time.time()
     args = parse_args()
+    apply_inferred_trial_id(args)
 
     # Resolve default paths relative to project root
     if args.data_dir is None:
@@ -565,6 +763,7 @@ def main():
 
     print("\nTraining:")
     print(f"  Trials:         {args.trials}")
+    print(f"  Seeds/split:    {args.seeds_per_split}  (BiGG bundle mode only)")
     print(f"  Epochs:         {args.epochs}")
     print(f"  Patience:       {args.patience}")
     print(f"  Batch size:     {args.batch_size}  (CGT only)")
@@ -577,35 +776,17 @@ def main():
 
     all_results = []
     all_curve_records = []
+    all_per_trial_records = [] if args.dump_per_trial else None
+    if args.tune_test_ratio is not None:
+        print(f"  Tune-mask:      ratio={args.tune_test_ratio} "
+              f"seed={args.tune_test_seed} portion={args.tune_portion}")
 
-    # --- Phase 1: Evaluate on original data ---
-    print("\n" + "#" * 80)
-    print("# PHASE 1: EVALUATING ON ORIGINAL DATA")
-    print("#" * 80)
-    t_phase1 = time.time()
-
+    # --- Pre-resolve per-dataset state (syn path, bundle vs single variant) ---
+    # Bundle detection happens up front so Phase 1 can rotate the baseline
+    # through the bundle's split ids and so we error out on misconfiguration
+    # before any training starts.
+    per_dataset_state = {}
     for dataset_name in datasets:
-        results = evaluate_models(
-            dataset_name, models, args.data_dir,
-            args.trials, args.semi_supervised, args.trial_id,
-            args.epochs, args.patience,
-            args.lr, args.drop_rate, args.h_feats, args.num_layers,
-            curve_records=all_curve_records)
-        all_results.extend(results)
-
-    phase1_elapsed = time.time() - t_phase1
-    print(f"\n[Phase 1: original-data] {format_duration(phase1_elapsed)}")
-
-    # --- Phase 2: Evaluate on synthetic data ---
-    print("\n" + "#" * 80)
-    print("# PHASE 2: EVALUATING ON SYNTHETIC DATA")
-    print("#" * 80)
-    t_phase2 = time.time()
-
-    for dataset_name in datasets:
-        # Resolve path: synthetic_dir/<generator>/<dataset>/<task>/<stem>[.pt]
-        # If --graph_path is set, override path resolution entirely (used for
-        # task-agnostic artifacts like datasets/kanon/<dataset>/<stem>.dgl).
         if args.graph_path is not None:
             if args.synthetic_type != 'graph':
                 raise ValueError('--graph_path is only supported with '
@@ -618,23 +799,96 @@ def main():
             dataset_dir = os.path.join(gen_dir, dataset_name)
             task_dir = os.path.join(dataset_dir, args.task)
             stem = args.synthetic_name
-            if args.synthetic_type == 'comp-graph':
+            if stem is None:
+                syn_path = None
+            elif args.synthetic_type == 'comp-graph':
                 variant_dir = os.path.join(task_dir, stem)
                 syn_path = os.path.join(variant_dir, f'{stem}.pt')
             else:
                 syn_path = os.path.join(task_dir, stem)
+
+        bundle = None
+        if args.synthetic_type == 'graph' and syn_path:
+            bundle = discover_bigg_split_bundle(syn_path)
+            if bundle is not None:
+                ids = [sid for sid, _ in bundle]
+                if args.trial_id != 0:
+                    raise ValueError(
+                        f"--trial_id={args.trial_id} cannot be used with the "
+                        f"BiGG split bundle '{stem}'. Bundle mode iterates "
+                        f"through splits {ids} automatically.")
+                if args.trials != 1 and args.trials != len(bundle):
+                    raise ValueError(
+                        f"--trials={args.trials} but bundle '{stem}' contains "
+                        f"{len(bundle)} per-split variants (splits {ids}). "
+                        f"Pass --trials {len(bundle)} or omit it (defaults to "
+                        f"bundle size).")
+                if args.trials != len(bundle):
+                    print(f"  Bundle '{stem}' overrides --trials to {len(bundle)} "
+                          f"(was {args.trials}).")
+                    args.trials = len(bundle)
+                print(f"  BiGG split bundle '{stem}': {len(bundle)} variants — "
+                      f"splits {ids}")
+
+        per_dataset_state[dataset_name] = {
+            'syn_path': syn_path,
+            'task_dir': task_dir,
+            'stem': stem,
+            'bundle': bundle,
+        }
+
+    # --- Phase 1: Evaluate on original data ---
+    print("\n" + "#" * 80)
+    print("# PHASE 1: EVALUATING ON ORIGINAL DATA")
+    print("#" * 80)
+    t_phase1 = time.time()
+
+    for dataset_name in datasets:
+        bundle = per_dataset_state[dataset_name]['bundle']
+        split_ids_for_phase1 = (
+            [sid for sid, _ in bundle] if bundle is not None else None)
+        seeds_for_phase1 = args.seeds_per_split if bundle is not None else 1
+        results = evaluate_models(
+            dataset_name, models, args.data_dir,
+            args.trials, args.semi_supervised, args.trial_id,
+            args.epochs, args.patience,
+            args.lr, args.drop_rate, args.h_feats, args.num_layers,
+            curve_records=all_curve_records,
+            split_ids=split_ids_for_phase1,
+            seeds_per_split=seeds_for_phase1,
+            per_trial_records=all_per_trial_records,
+            tune_test_ratio=args.tune_test_ratio,
+            tune_test_seed=args.tune_test_seed,
+            tune_portion=args.tune_portion)
+        all_results.extend(results)
+
+    phase1_elapsed = time.time() - t_phase1
+    print(f"\n[Phase 1: original-data] {format_duration(phase1_elapsed)}")
+
+    # --- Phase 2: Evaluate on synthetic data ---
+    print("\n" + "#" * 80)
+    print("# PHASE 2: EVALUATING ON SYNTHETIC DATA")
+    print("#" * 80)
+    t_phase2 = time.time()
+
+    for dataset_name in datasets:
+        state = per_dataset_state[dataset_name]
+        syn_path = state['syn_path']
+        task_dir = state['task_dir']
+        stem = state['stem']
+        bundle = state['bundle']
 
         # Prefer per-trial files; fall back to single file.
         if args.synthetic_type == 'comp-graph':
             trial_paths = resolve_cgt_trial_paths(syn_path, args.trials)
             if trial_paths is not None:
                 print(f"\n  Found {len(trial_paths)} per-trial .pt files for {dataset_name}")
-            elif os.path.exists(syn_path):
+            elif syn_path and os.path.exists(syn_path):
                 print(f"\n  Found {args.synthetic_type} synthetic data: {syn_path}")
             else:
                 print(f"\n  Skipping {dataset_name}: {syn_path} not found")
                 continue
-        elif not os.path.exists(syn_path):
+        elif not syn_path or not os.path.exists(syn_path):
             print(f"\n  Skipping {dataset_name}: {syn_path} not found")
             continue
         else:
@@ -649,99 +903,85 @@ def main():
                 args.h_feats, args.num_layers,
                 trial_id=args.trial_id,
                 semi_supervised=bool(args.semi_supervised))
-        else:
-            # Full graph (BiGG, etc.): train+val on synthetic, test on original.
-            # For subsampled runs (directory), combine subgraphs into one file.
-            # Synthetic features are inverted back to raw space at load time
-            # (when a lossless normalization was used during training), so all
-            # benchmark rows live in the dataset's native feature space and
-            # the original-vs-synthetic delta isn't conflated with normalization.
-            # The ``_v2`` suffix invalidates caches that pre-date that change.
-            # The ``cdf_invert`` mode is appended to the cache stem when not
-            # the default ``linear`` so switching modes doesn't reuse stale
-            # caches that were inverted with a different strategy.
-            cdf_tag = '' if args.cdf_invert == 'linear' else f'_{args.cdf_invert}'
-            eval_stem = stem
-            norm_stats_path = os.path.join(task_dir, stem + '_norm_stats.pt')
-            if os.path.isdir(syn_path):
-                combined_stem = stem + '_combined_v2' + cdf_tag
-                combined_path = os.path.join(task_dir, combined_stem)
-                if not os.path.exists(combined_path):
-                    print(f'  Combining subgraphs → {combined_path}')
-                    combined_graph, norm_stats = load_bigg_synthetic_graph(
-                        syn_path, cdf_mode=args.cdf_invert)
-                    dgl.save_graphs(combined_path, [combined_graph])
-                    if norm_stats is not None:
-                        torch.save(norm_stats, combined_path + '_norm_stats.pt')
-                else:
-                    print(f'  Using cached combined graph: {combined_path}')
-                eval_stem = combined_stem
-                norm_stats_path = combined_path + '_norm_stats.pt'
-            else:
-                inverted_stem = stem + '_inverted_v2' + cdf_tag
-                inverted_path = os.path.join(task_dir, inverted_stem)
-                if not os.path.exists(inverted_path):
-                    print(f'  Inverting synthetic features → {inverted_path}')
-                    syn_graph, norm_stats = load_bigg_synthetic_graph(
-                        syn_path, cdf_mode=args.cdf_invert)
-                    dgl.save_graphs(inverted_path, [syn_graph])
-                    if norm_stats is not None:
-                        torch.save(norm_stats, inverted_path + '_norm_stats.pt')
-                else:
-                    print(f'  Using cached inverted synthetic graph: {inverted_path}')
-                eval_stem = inverted_stem
-                norm_stats_path = inverted_path + '_norm_stats.pt'
+            all_results.extend(results)
+            continue
 
+        # --- BiGG full-graph path ---
+        # Build per-trial config. In single-variant mode every trial reuses
+        # the same synthetic graph; only the split column rotates. In
+        # split-bundle mode each trial loads its own variant + split. Caches
+        # for bundle variants live inside the bundle dir so re-bundling
+        # doesn't invalidate them.
+        #
+        # Synthetic features are inverted back to raw space at cache-build
+        # time (when a lossless normalization was used during training), so
+        # all benchmark rows live in the dataset's native feature space and
+        # the original-vs-synthetic delta isn't conflated with normalization.
+        # The ``_v2`` suffix invalidates caches that pre-date that change.
+        # ``cdf_invert`` is appended to the cache stem when not the default
+        # ``linear`` so switching modes doesn't reuse stale caches.
+        if bundle is not None:
+            cache_parent = syn_path
+            variant_paths = [(sid, os.path.join(syn_path, sub), sub)
+                             for sid, sub in bundle]
+        else:
+            cache_parent = task_dir
+            variant_paths = [(args.trial_id + t, syn_path, stem)
+                             for t in range(args.trials)]
+
+        syn_file_names, norm_stats_paths = [], []
+        real_sub_file_names, real_sub_norm_paths = [], []
+        split_ids = []
+        real_sub_available = True
+        for sid, variant_path, variant_stem in variant_paths:
+            cache = _build_bigg_variant_caches(
+                variant_path, cache_parent, variant_stem,
+                args.cdf_invert, args.data_dir, dataset_name)
+            syn_file_names.append(cache['eval_stem'])
+            norm_stats_paths.append(cache['norm_stats_path'])
+            split_ids.append(sid)
+            if cache['real_sub_stem'] is None:
+                real_sub_available = False
+            else:
+                real_sub_file_names.append(cache['real_sub_stem'])
+                real_sub_norm_paths.append(cache['real_sub_norm_path'])
+
+        seeds_for_phase2 = args.seeds_per_split if bundle is not None else 1
+        results = evaluate_models_cross_graph(
+            dataset_name, models, args.data_dir, cache_parent,
+            syn_file_names,
+            args.trials, args.semi_supervised, split_ids,
+            args.epochs, args.patience,
+            args.lr, args.drop_rate, args.h_feats, args.num_layers,
+            norm_stats_paths=norm_stats_paths,
+            curve_records=all_curve_records,
+            seeds_per_split=seeds_for_phase2,
+            per_trial_records=all_per_trial_records,
+            tune_test_ratio=args.tune_test_ratio,
+            tune_test_seed=args.tune_test_seed,
+            tune_portion=args.tune_portion)
+        all_results.extend(results)
+
+        # Train on the REAL forest-fire subsamples, test on full original.
+        # Shares subsampling + cross-graph testing with the synthetic path,
+        # so the delta between the two isolates generative-model fidelity
+        # from the subsampling effect.
+        if real_sub_available and real_sub_file_names:
             results = evaluate_models_cross_graph(
-                dataset_name, models, args.data_dir, task_dir, eval_stem,
-                args.trials, args.semi_supervised, args.trial_id,
+                dataset_name, models, args.data_dir, cache_parent,
+                real_sub_file_names,
+                args.trials, args.semi_supervised, split_ids,
                 args.epochs, args.patience,
                 args.lr, args.drop_rate, args.h_feats, args.num_layers,
-                norm_stats_path=norm_stats_path,
-                curve_records=all_curve_records)
+                norm_stats_paths=real_sub_norm_paths,
+                curve_records=all_curve_records,
+                source_label='real-subsampled-graph',
+                seeds_per_split=seeds_for_phase2,
+                per_trial_records=all_per_trial_records,
+                tune_test_ratio=args.tune_test_ratio,
+                tune_test_seed=args.tune_test_seed,
+                tune_portion=args.tune_portion)
             all_results.extend(results)
-
-            # Train on the REAL forest-fire subsamples, test on full original.
-            # Shares subsampling + cross-graph testing with the synthetic path,
-            # so the delta between the two isolates generative-model fidelity
-            # from the subsampling effect.
-            if os.path.isdir(syn_path):
-                real_sub_stem = stem + '_real_sub_combined_v3' + cdf_tag
-                real_sub_path = os.path.join(task_dir, real_sub_stem)
-                real_sub_norm_path = real_sub_path + '_norm_stats.pt'
-                real_sub_ready = os.path.exists(real_sub_path)
-
-                if not real_sub_ready:
-                    orig_for_masks = GADBenchDataset(
-                        dataset_name, prefix=args.data_dir + '/').graph
-                    real_combined, real_norm = load_bigg_real_subsampled_graph(
-                        syn_path, orig_for_masks, cdf_mode=args.cdf_invert)
-                    if real_combined is not None:
-                        print(f'  Combining real subsamples → {real_sub_path}')
-                        dgl.save_graphs(real_sub_path, [real_combined])
-                        if real_norm is not None:
-                            torch.save(real_norm, real_sub_norm_path)
-                        real_sub_ready = True
-                    else:
-                        print(f'  No training_subsamples/ found in {syn_path}; '
-                              f'skipping real-subsampled source.')
-                else:
-                    print(f'  Using cached real-subsampled combined graph: {real_sub_path}')
-
-                if real_sub_ready:
-                    real_norm_arg = (real_sub_norm_path
-                                     if os.path.exists(real_sub_norm_path) else None)
-                    results = evaluate_models_cross_graph(
-                        dataset_name, models, args.data_dir, task_dir, real_sub_stem,
-                        args.trials, args.semi_supervised, args.trial_id,
-                        args.epochs, args.patience,
-                        args.lr, args.drop_rate, args.h_feats, args.num_layers,
-                        norm_stats_path=real_norm_arg,
-                        curve_records=all_curve_records,
-                        source_label='real-subsampled-graph')
-                    all_results.extend(results)
-            continue
-        all_results.extend(results)
 
     phase2_elapsed = time.time() - t_phase2
     print(f"\n[Phase 2: synthetic-data] {format_duration(phase2_elapsed)}")
@@ -766,6 +1006,12 @@ def main():
         curves_path = os.path.join(args.output_dir, 'divergence_curves.csv')
         curves_df.to_csv(curves_path, index=False)
         print(f"  Divergence curves saved to: {curves_path}")
+
+    if all_per_trial_records is not None and all_per_trial_records:
+        per_trial_df = pd.DataFrame(all_per_trial_records)
+        per_trial_path = os.path.join(args.output_dir, 'per_trial_results.csv')
+        per_trial_df.to_csv(per_trial_path, index=False)
+        print(f"  Per-trial results saved to: {per_trial_path}")
 
     print(f"\n[Total] {format_duration(time.time() - t_start)}")
 
