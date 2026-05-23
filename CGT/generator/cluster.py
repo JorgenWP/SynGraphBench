@@ -11,16 +11,16 @@ from k_means_constrained import KMeansConstrained
 #from .clustering import clustering_algorithm
 #from .clustering import clustering_params
 
+# Above this node count, KMeansConstrained.predict (min-cost flow over N*K edges)
+# becomes infeasible on RAM/time; fall back to argmin + greedy repair instead.
+# Empirical — validate on Elliptic (~204K nodes) and lower if needed.
+_CONSTRAINED_MAX_N = 500_000
+
+
 def kmeans(feats, cluster_num, cluster_size, cluster_sample_num):
     """
-    k-means clustering
-    Args:
-        feats: feature vectors
-        cluster_num: number of clusters
-        cluster_size: minimum size of clusters
-        cluster_sample_num: number of samples for clustering
-    Return:
-        centers: cluster centers
+    k-means clustering. Returns the fitted PCA and KMeansConstrained objects so
+    callers can re-run the constrained assignment over a larger node set.
     """
     if cluster_sample_num < feats.shape[0]:
         px_ids = random.sample(list(range(feats.shape[0])), cluster_sample_num)
@@ -35,7 +35,7 @@ def kmeans(feats, cluster_num, cluster_size, cluster_sample_num):
     clf.fit(x_pca)
     centers = pca.inverse_transform(clf.cluster_centers_)
 
-    return centers
+    return centers, pca, clf
 
 
 def DP_kmeans(feats, cluster_num, cluster_sample_num, epsilon=10, delta=1e-6):
@@ -68,45 +68,114 @@ def DP_kmeans(feats, cluster_num, cluster_sample_num, epsilon=10, delta=1e-6):
     centers = pca.inverse_transform(clustering_result.centers)
     return centers, centers.shape[0]
 
+def _repair_min_size(cluster_ids, feats, centers, size_min):
+    """
+    Greedy repair: while any cluster has fewer than `size_min` members, move the
+    cheapest node out of an over-filled cluster into the most-deficient one.
+    "Cheapest" = smallest squared-distance increase. Donors must have surplus
+    (size > size_min) so the move never creates a new violation.
+
+    Args:
+        cluster_ids: (N,) int array — modified in place and returned.
+        feats: (N, d) array in the same space as `centers`.
+        centers: (K, d) cluster centers.
+        size_min: required minimum cluster size.
+    Returns:
+        (cluster_ids, moves) — moves is the number of reassignments performed.
+    """
+    n_clusters = centers.shape[0]
+    n = feats.shape[0]
+    if size_min * n_clusters > n:
+        raise ValueError(
+            f"size_min ({size_min}) * n_clusters ({n_clusters}) > n_samples ({n}); "
+            "cannot satisfy minimum cluster size."
+        )
+
+    sizes = np.bincount(cluster_ids, minlength=n_clusters)
+    if sizes.min() >= size_min:
+        return cluster_ids, 0
+
+    # Squared distance from each node to its currently-assigned center.
+    current_d2 = ((feats - centers[cluster_ids]) ** 2).sum(axis=1)
+    moves = 0
+    while sizes.min() < size_min:
+        u = int(np.argmin(sizes))
+        d_to_u = ((feats - centers[u]) ** 2).sum(axis=1)
+        cost_inc = d_to_u - current_d2
+        eligible = (sizes[cluster_ids] > size_min) & (cluster_ids != u)
+        if not eligible.any():
+            raise RuntimeError(
+                "Greedy repair stalled: no donor cluster has surplus members. "
+                f"sizes.min()={sizes.min()}, target size_min={size_min}."
+            )
+        masked_cost = np.where(eligible, cost_inc, np.inf)
+        n_idx = int(np.argmin(masked_cost))
+        c_old = int(cluster_ids[n_idx])
+        cluster_ids[n_idx] = u
+        sizes[c_old] -= 1
+        sizes[u] += 1
+        current_d2[n_idx] = d_to_u[n_idx]
+        moves += 1
+    return cluster_ids, moves
+
+
 def cluster_feats(args, feats, fit_ids=None):
     """
-    Cluster feature vectors
+    Cluster feature vectors. Final assignment is k-anonymity-preserving:
+    constrained min-cost flow over all nodes for N <= _CONSTRAINED_MAX_N,
+    or argmin + greedy repair otherwise (and on the DP path, which has no
+    fitted KMeansConstrained object).
 
     Input:
-        org_feats: original feature matrices
-        fit_ids: optional node id subset used to fit k-means (e.g. train+val); assignment still covers all nodes
+        feats: original feature matrix (N, d).
+        fit_ids: optional node id subset used to fit k-means (e.g. train+val);
+            assignment still covers all nodes.
     Return:
-        cluster_ids: list of cluster ids where each feature belongs to
-        cluster_centers: centers of clusters
-
+        cluster_ids: (N+1,) LongTensor of cluster ids (with trailing empty_id).
+        cluster_centers: (K+1, d) FloatTensor of centers (with trailing zero row).
     """
-    # Define cluster centers
     start_time = perf_counter()
     fit_feats = feats if fit_ids is None else feats[fit_ids]
-    method = 'DP' if args.dp_feature else 'constrained'
+    fit_method = 'DP' if args.dp_feature else 'kmeans_constrained'
     print(f"[Clustering] fitting k-means on {len(fit_feats)}/{feats.shape[0]} nodes, "
-          f"feat_dim={feats.shape[1]}, target k={args.cluster_num}, method={method}")
+          f"feat_dim={feats.shape[1]}, target k={args.cluster_num}, fit_method={fit_method}")
     if args.dp_feature:
         cluster_centers, cluster_num = DP_kmeans(fit_feats, args.cluster_num, args.cluster_sample_num)
         args.cluster_num = cluster_num
+        pca = None
+        clf = None
     else:
-        cluster_centers = kmeans(fit_feats, args.cluster_num, args.cluster_size, args.cluster_sample_num)
+        cluster_centers, pca, clf = kmeans(fit_feats, args.cluster_num, args.cluster_size, args.cluster_sample_num)
 
-    # Cluster the original dataset
-    batch_size = 1000
-    cluster_ids = np.zeros(feats.shape[0])
-    for batch in range(feats.shape[0] // batch_size + 1):
-        if batch < feats.shape[0] // batch_size:
-            idx = list(range(batch * batch_size, (batch + 1) * batch_size))
-        else:
-            idx = list(range(batch * batch_size, feats.shape[0]))
-        cluster_ids[idx] = ((feats[idx, None, :] - cluster_centers[None, :, :]) ** 2).sum(-1).argmin(1)
+    use_constrained = (clf is not None) and (feats.shape[0] <= _CONSTRAINED_MAX_N)
+    if use_constrained:
+        print(f"[Clustering] assigning {feats.shape[0]} nodes via constrained MCF "
+              f"(size_min={args.cluster_size})")
+        cluster_ids = clf.predict(pca.transform(feats), size_min=args.cluster_size).astype(np.int64)
+        repair_moves = 0
+    else:
+        print(f"[Clustering] assigning {feats.shape[0]} nodes via argmin + greedy repair "
+              f"(size_min={args.cluster_size}, N>{_CONSTRAINED_MAX_N} or DP)")
+        batch_size = 1000
+        cluster_ids = np.zeros(feats.shape[0], dtype=np.int64)
+        for batch in range(feats.shape[0] // batch_size + 1):
+            if batch < feats.shape[0] // batch_size:
+                idx = list(range(batch * batch_size, (batch + 1) * batch_size))
+            else:
+                idx = list(range(batch * batch_size, feats.shape[0]))
+            if not idx:
+                continue
+            cluster_ids[idx] = ((feats[idx, None, :] - cluster_centers[None, :, :]) ** 2).sum(-1).argmin(1)
+        cluster_ids, repair_moves = _repair_min_size(cluster_ids, feats, cluster_centers, args.cluster_size)
 
-    sizes = np.bincount(cluster_ids.astype(int), minlength=cluster_centers.shape[0])
+    sizes = np.bincount(cluster_ids, minlength=cluster_centers.shape[0])
     empty = int((sizes == 0).sum())
+    nonzero = sizes[sizes > 0]
+    min_nonzero = int(nonzero.min()) if nonzero.size > 0 else 0
     print(f"[Clustering] produced {cluster_centers.shape[0]} clusters (empty={empty}); "
-          f"member counts: min={sizes.min()}, max={sizes.max()}, "
-          f"mean={sizes.mean():.1f}, median={int(np.median(sizes))}, std={sizes.std():.1f}")
+          f"member counts: min_nonzero={min_nonzero}, max={sizes.max()}, "
+          f"mean={sizes.mean():.1f}, median={int(np.median(sizes))}, std={sizes.std():.1f}; "
+          f"repair_moves={repair_moves}")
 
     # Append empty_id
     cluster_ids = torch.LongTensor(np.append(cluster_ids, args.cluster_num))
