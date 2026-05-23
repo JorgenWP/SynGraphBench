@@ -2,7 +2,7 @@
 # Evaluate GNN models on link prediction: original vs synthetic graph data.
 #
 # Usage:
-#   bash scripts/benchmark/run_link_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [neg_sampling] [decoder] [task]
+#   bash scripts/benchmark/run_link_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [neg_sampling] [decoder] [task] [eval_mode] [skip_phase1] [batch_size]
 #
 # Arguments:
 #   datasets        Comma-separated dataset names (default: reddit)
@@ -15,12 +15,17 @@
 #   decoder         Edge decoder: dot or mlp (default: dot)
 #   task            Task subfolder under <dataset>/ (default: hidden_links)
 #                   Supported: hidden_labels, hidden_links, structure
+#   eval_mode       CGT comp-graph paths to run in Phase 2 (default: both)
+#                   Supported: original_cg, synthetic_cgt, both
+#   skip_phase1     Set to 1 to skip Phase 1 full-graph baseline (default: 0)
+#   batch_size      Batch size for CGT comp-graph training (default: 256)
 #
 # Examples:
 #   bash scripts/benchmark/run_link_benchmark.sh reddit GCN,GIN 3 cgt
 #   bash scripts/benchmark/run_link_benchmark.sh reddit GCN,GIN 3 cgt "" random dot hidden_links
 #   bash scripts/benchmark/run_link_benchmark.sh tolokers GCN,GIN 1 bigg blksize_1024_b_1_lr_0.001_epochs_50
 #   bash scripts/benchmark/run_link_benchmark.sh tolokers GCN,GIN 1 bigg structure_blksize_128_lr_0.001_epochs_100 random dot structure
+#   bash scripts/benchmark/run_link_benchmark.sh tolokers GCN,GIN,GraphSAGE 5 cgt tolokers_e50_k512_c1_d2_f5_s8818 random dot hidden_links original_cg 1 4096
 
 set -e
 
@@ -33,6 +38,9 @@ SYNTHETIC_NAME="${5:-}"
 NEG_SAMPLING="${6:-random}"
 DECODER="${7:-dot}"
 TASK="${8:-hidden_links}"
+EVAL_MODE="${9:-both}"
+SKIP_PHASE1="${10:-0}"
+BATCH_SIZE="${11:-256}"
 
 # Map generator to its synthetic type (evaluation mode)
 case "$GENERATOR" in
@@ -54,11 +62,17 @@ echo "Synthetic name:   ${SYNTHETIC_NAME:-'(use dataset name)'}"
 echo "Task:             $TASK"
 echo "Neg sampling:     $NEG_SAMPLING"
 echo "Decoder:          $DECODER"
+echo "Eval mode:        $EVAL_MODE"
+echo "Skip phase 1:     $SKIP_PHASE1"
+echo "Batch size:       $BATCH_SIZE"
 echo ""
 
 EXTRA_ARGS=""
 if [ -n "$SYNTHETIC_NAME" ]; then
     EXTRA_ARGS="--synthetic_name $SYNTHETIC_NAME"
+fi
+if [ "$SKIP_PHASE1" = "1" ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --skip_phase1"
 fi
 
 python -u scripts/benchmark/link_benchmark.py \
@@ -70,4 +84,6 @@ python -u scripts/benchmark/link_benchmark.py \
     --task "$TASK" \
     --neg_sampling "$NEG_SAMPLING" \
     --decoder "$DECODER" \
+    --eval_mode "$EVAL_MODE" \
+    --batch_size "$BATCH_SIZE" \
     $EXTRA_ARGS

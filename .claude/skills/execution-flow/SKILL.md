@@ -41,21 +41,27 @@ bash scripts/benchmark/run_anomaly_benchmark.sh tolokers GCN,GIN 1 bigg blksize_
 bash scripts/benchmark/run_anomaly_benchmark.sh tolokers GCN,GIN 1 bigg blksize_-1_b_1_lr_0.001_epochs_50_..._loadsub_ff_b0.5_M1_split0 hidden_labels
 ```
 
-**`bash scripts/benchmark/run_link_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [neg_sampling] [decoder] [task]`**
-Link prediction benchmark. Defaults: `reddit`, `GCN,GIN,GraphSAGE`, `1`, `cgt`, `""`, `random`, `dot`, `hidden_links`. Calls `scripts/benchmark/link_benchmark.py`.
+**`bash scripts/benchmark/run_link_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [neg_sampling] [decoder] [task] [eval_mode] [skip_phase1] [batch_size]`**
+Link prediction benchmark. Defaults: `reddit`, `GCN,GIN,GraphSAGE`, `1`, `cgt`, `""`, `random`, `dot`, `hidden_links`, `both`, `0`, `256`. Calls `scripts/benchmark/link_benchmark.py`.
 
 * `neg_sampling`: `random` (uniform) or `hard` (2-hop random walks).
 * `decoder`: `dot` (dot product, no params) or `mlp` (learnable Hadamard-product scorer).
+* `eval_mode`: `original_cg`, `synthetic_cgt`, or `both` — selects which CGT comp-graph paths run in Phase 2. Each non-`both` mode writes its results to a uniquely suffixed `link_prediction_results__*.xlsx/csv` so parallel SLURM array tasks don't clobber each other.
+* `skip_phase1`: `1` to skip Phase 1 (the full-graph GNN baseline on the original graph). Phase 1 is orthogonal to the CGT L2-norm path, so skipping ~halves wall-time when only Phase 2 is needed.
+* `batch_size`: CGT comp-graph training batch size (Python default 256). The `cgt_link_benchmark.slurm` template uses `4096`.
 
-For `generator=cgt`: the benchmark resolves per-trial `.pt` files `{stem}/{stem}_t{t}.pt` for `t in 0..trials-1` (via `resolve_cgt_trial_paths`). If all files exist, each trial loads its own synthetic data; otherwise it falls back to a single `{stem}/{stem}.pt` with a warning. Three comparison rows are emitted per model: `original` (full-graph LP), `original-cg` (merged-CG LP on original graph), `synthetic-cgt` (merged-CG LP on per-trial CGT-generated hybrid graph). Alignment between the .pt's `hidden_test_edges` and the trial's `LinkDataset.split(trial_id)` is asserted before each synthetic-cgt trial.
+For `generator=cgt`: the benchmark resolves per-trial `.pt` files `{stem}/{stem}_t{t}.pt` for `t in 0..trials-1` (via `resolve_cgt_trial_paths`). If all files exist, each trial loads its own synthetic data; otherwise it falls back to a single `{stem}/{stem}.pt` with a warning. Comparison rows emitted per model depend on flags: `original` (Phase 1, unless `skip_phase1=1`), `original-cg` and/or `synthetic-cgt` (Phase 2, gated by `eval_mode`). Alignment between the .pt's `hidden_test_edges` and the trial's `LinkDataset.split(trial_id)` is asserted before each synthetic-cgt trial.
 
 Examples:
 ```bash
-# CGT on reddit, random negatives, dot decoder
-bash scripts/benchmark/run_link_benchmark.sh reddit GCN,GIN 3 cgt random dot
+# CGT on reddit, random negatives, dot decoder, both eval modes
+bash scripts/benchmark/run_link_benchmark.sh reddit GCN,GIN 3 cgt "" random dot hidden_links both 0 256
 
-# BiGG on tolokers, MLP decoder
-bash scripts/benchmark/run_link_benchmark.sh tolokers GCN,GIN 1 bigg random mlp tolokers_blksize_1024_b_1
+# BiGG on tolokers, MLP decoder (eval_mode/skip_phase1/batch_size only affect CGT path; safe to omit)
+bash scripts/benchmark/run_link_benchmark.sh tolokers GCN,GIN 1 bigg tolokers_blksize_1024_b_1 random mlp
+
+# CGT on tolokers, Phase 2 only, original_cg only, batch_size 4096 (for SLURM array task)
+bash scripts/benchmark/run_link_benchmark.sh tolokers GCN,GIN,GraphSAGE 5 cgt tolokers_e50_k512_c1_d2_f5_s8818 random dot hidden_links original_cg 1 4096
 ```
 
 ### Training

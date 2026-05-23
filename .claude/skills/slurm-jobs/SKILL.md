@@ -197,11 +197,15 @@ Edit **`scripts/benchmark/cgt_anomaly_benchmark.slurm`**. No extra arguments bey
 
 ### Link prediction benchmark
 
-Edit **`scripts/benchmark/cgt_link_benchmark.slurm`**. Two extra arguments:
+Edit **`scripts/benchmark/cgt_link_benchmark.slurm`**. Extra arguments beyond the shared set:
 
 ```bash
 NEG_SAMPLING="hard"     # random | hard  (defaults to random in run_link_benchmark.sh)
 DECODER="mlp"           # dot | mlp      (defaults to dot)
+BATCH_SIZE="4096"       # CGT comp-graph batch size (Python default 256; template uses 4096)
+SKIP_PHASE1="1"         # 1 to skip the full-graph GNN baseline (orthogonal to CGT L2-norm path)
 ```
 
-Typical `--time`: `12:00:00` (link prediction is heavier — more train-time computation and `hard` neg sampling further increases cost).
+This template is a **2-task job array** (`#SBATCH --array=1-2`). One task runs `eval_mode=original_cg`, the other `eval_mode=synthetic_cgt`, with the per-task config inline in a bash `CONFIGS=(...)` array near the bottom of the template. Adding more datasets means adding `<dataset> <synthetic_name> <eval_mode>` rows and bumping `--array=1-N`. Each task writes a uniquely suffixed `link_prediction_results__*.xlsx/csv` to `results/evaluate/` so they don't clobber each other. Slurm logs are tagged with `_t%a_` for the array task ID.
+
+Typical `--time`: `35:00:00` per array task (link prediction is heavier than anomaly detection; each task does roughly half of what the old serial job did but still runs all trials × models for its eval_mode).

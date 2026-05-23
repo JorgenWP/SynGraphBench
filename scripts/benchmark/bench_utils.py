@@ -67,6 +67,11 @@ def parse_link_args():
     lp_group.add_argument('--decoder', type=str, default='dot',
                           choices=['dot', 'mlp'],
                           help='Edge decoder: dot product or MLP')
+    lp_group.add_argument('--eval_mode', type=str, default='both',
+                          choices=['original_cg', 'synthetic_cgt', 'both'],
+                          help='Which CGT comp-graph paths to run in Phase 2.')
+    lp_group.add_argument('--skip_phase1', action='store_true',
+                          help='Skip Phase 1 (full-graph GNN baseline on original data).')
 
     train_group = parser.add_argument_group('Training')
     train_group.add_argument('--trials', type=int, default=1)

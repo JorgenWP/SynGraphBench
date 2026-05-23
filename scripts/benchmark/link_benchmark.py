@@ -278,7 +278,7 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
                              trials, val_ratio, test_ratio,
                              neg_sampling, decoder, epochs, patience,
                              trial_paths, batch_size, lr, drop_rate,
-                             h_feats, num_layers):
+                             h_feats, num_layers, eval_mode='both'):
     """Evaluate link prediction on CGT merged computation graphs.
 
     Runs two comparisons:
@@ -328,28 +328,30 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
             f"(from {trial_paths[0]}).")
 
     # --- Original-CG baseline: same graph for every trial ---
-    results.extend(_run_cg_link_trials(
-        dataset_name, cg_models, data, 'original-cg',
-        trials, val_ratio, test_ratio, neg_sampling, decoder,
-        epochs, patience, batch_size, lr, drop_rate,
-        h_feats, num_layers, step_num, sample_num))
+    if eval_mode in ('original_cg', 'both'):
+        results.extend(_run_cg_link_trials(
+            dataset_name, cg_models, data, 'original-cg',
+            trials, val_ratio, test_ratio, neg_sampling, decoder,
+            epochs, patience, batch_size, lr, drop_rate,
+            h_feats, num_layers, step_num, sample_num))
 
     # --- Synthetic-CGT: per-trial hybrid graph built from per-trial .pt ---
-    def make_syn_graph(t, expected_test_edges):
-        syn_data = load_cgt_synthetic_data(trial_paths[t])
-        _assert_link_pt_alignment(
-            syn_data, expected_trial_id=t,
-            expected_test_edges=expected_test_edges,
-            source_label=f'synthetic-cgt[t={t}]')
-        return build_synthetic_dgl_graph(
-            data.graph, syn_data, trial_id=t)
+    if eval_mode in ('synthetic_cgt', 'both'):
+        def make_syn_graph(t, expected_test_edges):
+            syn_data = load_cgt_synthetic_data(trial_paths[t])
+            _assert_link_pt_alignment(
+                syn_data, expected_trial_id=t,
+                expected_test_edges=expected_test_edges,
+                source_label=f'synthetic-cgt[t={t}]')
+            return build_synthetic_dgl_graph(
+                data.graph, syn_data, trial_id=t)
 
-    results.extend(_run_cg_link_trials(
-        dataset_name, cg_models, data, 'synthetic-cgt',
-        trials, val_ratio, test_ratio, neg_sampling, decoder,
-        epochs, patience, batch_size, lr, drop_rate,
-        h_feats, num_layers, step_num, sample_num,
-        syn_graph_factory=make_syn_graph))
+        results.extend(_run_cg_link_trials(
+            dataset_name, cg_models, data, 'synthetic-cgt',
+            trials, val_ratio, test_ratio, neg_sampling, decoder,
+            epochs, patience, batch_size, lr, drop_rate,
+            h_feats, num_layers, step_num, sample_num,
+            syn_graph_factory=make_syn_graph))
 
     del data
     return results
@@ -523,19 +525,24 @@ def main():
     all_results = []
 
     # --- Phase 1: Evaluate on original data ---
-    print("\n" + "#" * 80)
-    print("# PHASE 1: LINK PREDICTION ON ORIGINAL DATA")
-    print("#" * 80)
+    if args.skip_phase1:
+        print("\n" + "#" * 80)
+        print("# PHASE 1: SKIPPED (--skip_phase1)")
+        print("#" * 80)
+    else:
+        print("\n" + "#" * 80)
+        print("# PHASE 1: LINK PREDICTION ON ORIGINAL DATA")
+        print("#" * 80)
 
-    for dataset_name in datasets:
-        results = evaluate_link_models(
-            dataset_name, models, args.data_dir,
-            'original', args.trials,
-            args.val_ratio, args.test_ratio,
-            args.neg_sampling, args.decoder,
-            args.epochs, args.patience,
-            args.lr, args.drop_rate, args.h_feats, args.num_layers)
-        all_results.extend(results)
+        for dataset_name in datasets:
+            results = evaluate_link_models(
+                dataset_name, models, args.data_dir,
+                'original', args.trials,
+                args.val_ratio, args.test_ratio,
+                args.neg_sampling, args.decoder,
+                args.epochs, args.patience,
+                args.lr, args.drop_rate, args.h_feats, args.num_layers)
+            all_results.extend(results)
 
     # --- Phase 2: Evaluate on synthetic data ---
     print("\n" + "#" * 80)
@@ -589,7 +596,8 @@ def main():
                 args.neg_sampling, args.decoder,
                 args.epochs, args.patience, trial_paths,
                 args.batch_size, args.lr, args.drop_rate,
-                args.h_feats, args.num_layers)
+                args.h_feats, args.num_layers,
+                eval_mode=args.eval_mode)
         else:
             # Full graph (BiGG, etc.): train+val on synthetic, test on original.
             norm_stats_path = os.path.join(task_dir, stem + '_norm_stats.pt')
@@ -606,10 +614,18 @@ def main():
     if all_results:
         results_df = pd.DataFrame(all_results)
 
-        xlsx_path = os.path.join(args.output_dir, 'link_prediction_results.xlsx')
+        # Suffix results filename when running a non-default subset so parallel
+        # SLURM array tasks (one per eval_mode) don't clobber each other's files.
+        if args.skip_phase1 or args.eval_mode != 'both':
+            phase_tag = 'phase2only' if args.skip_phase1 else 'allphases'
+            results_stem = f'link_prediction_results__{phase_tag}_{args.eval_mode}'
+        else:
+            results_stem = 'link_prediction_results'
+
+        xlsx_path = os.path.join(args.output_dir, f'{results_stem}.xlsx')
         results_df.to_excel(xlsx_path, index=False)
 
-        csv_path = os.path.join(args.output_dir, 'link_prediction_results.csv')
+        csv_path = os.path.join(args.output_dir, f'{results_stem}.csv')
         results_df.to_csv(csv_path, index=False)
 
         print(f"\nResults saved to:\n  {xlsx_path}\n  {csv_path}")
