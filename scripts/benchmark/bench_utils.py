@@ -497,9 +497,12 @@ def build_synthetic_dgl_graph(original_graph, synthetic_data,
     Replaces train/val node features with CGT-generated features derived from
     cluster centers corresponding to the generated computation graph root nodes.
 
-    CGT L2-normalizes features before clustering, so synthetic features are in
-    L2-normalized space. If original features are unnormalized there may be a
-    distribution shift between synthetic train/val and original test features.
+    Assumes the caller passes an ``original_graph`` whose ``ndata['feature']``
+    has already been L2-normalized (``evaluate_link_models_cgt`` does this once
+    per dataset). Combined with the L2-normalized cluster centers from
+    ``CGT/generator/cluster.py``, every row of the returned graph's feature
+    matrix is unit-norm — no scale clash between synthetic train/val rows and
+    real test/other rows inside a merged computation graph.
     """
     mask_col = trial_id + (10 if semi_supervised else 0)
     train_mask = original_graph.ndata['train_masks'][:, mask_col].bool()

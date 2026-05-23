@@ -73,4 +73,4 @@ When BiGG trains with feature normalization (e.g., `-normalize zscore`), the syn
 * `scripts/benchmark/bench_utils.py`: `apply_normalization()` duplicated here for benchmark imports. When stats contain `binary_idx`, only non-binary columns are normalized.
 * Both anomaly and link prediction benchmarks: load stats if the `_norm_stats.pt` file exists, apply to original graph features before cross-graph evaluation. If no stats file exists (non-normalized runs), features are used as-is.
 
-This only affects the BiGG full-graph path. CGT handles its own L2 normalization internally (`build_cgt_datasets` in `bench_utils.py`).
+This only affects the BiGG full-graph path. CGT handles its own L2 normalization on the eval side: anomaly detection normalizes inside `build_cgt_datasets` / `build_original_cg_datasets`, and link prediction normalizes once at the top of `evaluate_link_models_cgt` (in `scripts/benchmark/link_benchmark.py`) — both the original-CG baseline and the synthetic-CGT hybrid graph built by `build_synthetic_dgl_graph` then see unit-norm features, matching the L2-normalized cluster centers from `CGT/generator/cluster.py`.

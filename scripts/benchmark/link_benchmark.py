@@ -289,10 +289,27 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
          whose train/val root features are replaced by CGT cluster-center
          features (via build_synthetic_dgl_graph). Each trial loads its
          own .pt with alignment-checked test edges.
+
+    Features are L2-normalized once here so both downstream paths feed
+    unit-norm features to MergedCompGraphLinkPredictor — matching CGT's
+    training space (CGT/task/utils/utils.py L2-normalizes before clustering)
+    and the L2-normalized cluster centers (CGT/generator/cluster.py). This
+    mirrors the AD pipeline (build_cgt_datasets / build_original_cg_datasets)
+    and removes the scale clash where train/val cluster centers met raw
+    test/other features inside a single merged comp graph.
     """
     results = []
 
     data = LinkDataset(dataset_name, prefix=data_dir + '/original/')
+
+    # L2-normalize features in place. data.train_graph (built later by
+    # data.split() via dgl.remove_edges) inherits ndata, so a single
+    # normalization here covers both original-CG and synthetic-CGT paths.
+    feats = data.graph.ndata['feature'].float()
+    norms = feats.norm(p=2, dim=1, keepdim=True).clamp(min=1.0)
+    data.graph.ndata['feature'] = feats / norms
+    print(f"  L2-normalized features for {dataset_name}: "
+          f"mean row-norm={data.graph.ndata['feature'].norm(dim=1).mean():.4f}")
 
     # CG params come from the first trial's .pt (all trials share these)
     first_syn = load_cgt_synthetic_data(trial_paths[0])
