@@ -720,7 +720,12 @@ def main():
     else:
         sub_tag = ''
     save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{vae_tag}{kl_sched_tag}{cat_tag}{mdn_tag}{recal_tag}{sub_tag}'
-    save_dir = f'../datasets/synthetic/bigg/{DATASET}/hidden_labels'
+    # BIGG_SYNTHETIC_SAVE_ROOT lets callers (e.g. the BO coordinator) redirect
+    # synthetic outputs out of datasets/synthetic so BO scaffolding doesn't
+    # clutter the canonical pipeline location. Unset → legacy behavior.
+    _save_root_override = os.environ.get('BIGG_SYNTHETIC_SAVE_ROOT')
+    save_dir = (_save_root_override if _save_root_override
+                else f'../datasets/synthetic/bigg/{DATASET}/hidden_labels')
     use_subdir = pipeline_args.subsample or pipeline_args.load_subsamples
     os.makedirs(save_dir, exist_ok=True)
     if use_subdir:

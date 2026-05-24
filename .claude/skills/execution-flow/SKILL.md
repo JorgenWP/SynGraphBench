@@ -133,16 +133,47 @@ Output saved to `datasets/synthetic/cgt/<dataset>/<task>/<variant>/<variant>_t{t
 ### BO Hyperparameter Tuning
 
 **`python -m experiments.bo_tuning.coordinator --dataset {tolokers|questions|weibo} --mode {shared|per_split} [--split_id N] [--n_trials N] [--max_trials N] [--max_wall_seconds S] [--study_version v1]`**
-Bayesian-optimization tuner over BiGG's `lr`, `kl_weight`, `lw_cont`, `lw_label` at privacy=0. Runs in the `bigg` conda env; spawns the benchmark in the GADBench env (absolute path in `configs/{dataset}.yaml`). Resumable: re-launching against the same study DB picks up where it left off; `cleanup_stale.py` (auto-called on start) re-enqueues trials killed by walltime.
+Bayesian-optimization tuner over BiGG's `lr`, `kl_weight`, `lw_cont`, `lw_label` at privacy=0. Runs in the `bigg` conda env; spawns the benchmark in the `GADBench` env (env name in `configs/{dataset}.yaml::benchmark.conda_env`, resolved at runtime via `conda info --json` so the same config works on any host). Resumable: re-launching against the same study DB picks up where it left off; `cleanup_stale.py` (auto-called on start) re-enqueues trials killed by walltime.
 
 * `shared` mode → one Optuna study per dataset; each trial trains all 5 splits and the BO objective is `CVaR_60%(split_gap) − 0.2·n_collapsed_splits`.
 * `per_split` mode → 5 independent studies per dataset (one per split); each trial trains 1 split; objective degenerates to `mean_m(gap[m,s]) − 0.2·collapse_indicator`.
 * `--max_trials N` caps trials per process (set to 1 for array workers under topology C).
 * `--max_wall_seconds S` stops accepting new trials past this wall-clock — pair with SLURM walltime minus a 10 min grace.
 * BO selection runs against 50% of test nodes (anomaly-stratified, fixed seed). The other 50% is held out for `experiments.bo_tuning.final_report`.
-* SLURM templates: `experiments/bo_tuning/slurm/bo_coordinator.slurm` (Topology A, persistent), `bo_worker.slurm` (Topology C, array). Per-dataset config in `experiments/bo_tuning/configs/{dataset}.yaml`.
+* Phase 1 (original-data baseline) is identical across every trial in a study, so the coordinator builds it once at startup and caches `experiments/bo_tuning/{dataset}/baselines/{study_version}.csv` + `.json` (config it was built with). Each trial's benchmark runs with `--skip_original`; `run_trial.py` merges the cached rows back in before `compute_objective`. Config mismatch with the cache raises — bump `--study_version` to rebuild. Concurrent jobs (shared + per_split) serialize the build on an `fcntl.LOCK_EX` flock on `<csv>.lock`, write to per-process tmp paths, then `os.replace` atomically.
+* BO BiGG outputs land under `experiments/bo_tuning/{dataset}/bigg_cache/{save_name}/`, **not** in the canonical `datasets/synthetic/bigg/{dataset}/hidden_labels/`. The pipeline reads `BIGG_SYNTHETIC_SAVE_ROOT` and writes there when set; the BO coordinator sets it via subprocess env. Cache is shared across shared+per_split studies for a dataset, so warm-start is trained once and reused. Same-(HP, split) collisions serialize on `fcntl.LOCK_EX` flock on `<out_dir>.lock` in `train_one_split`; loser returns `skipped_after_wait`. Canonical pipeline location stays untouched until you manually re-train BiGG with the best HPs post-BO.
+* SLURM templates: `experiments/bo_tuning/slurm/bo_coordinator.slurm` (Topology A, persistent — the default), `bo_worker.slurm` (Topology C, array — opt-in for intra-trial parallelism on weibo shared mode if ever needed). The file split is by topology, **not** by mode; both templates accept `MODE=shared|per_split` via env var.
 * After the study finishes: `python -m experiments.bo_tuning.aggregate ...` rebuilds `summary.csv` + `best_params.json`; `python -m experiments.bo_tuning.final_report --dataset X --mode shared` re-evaluates best HPs on the held-out test portion with real-data baseline rotated through the same splits.
 * Metadata for the thesis: per-trial `metadata.json` (trial dir) + a flat `trial_log.jsonl` carry per-(split, model, seed) AUROC/AUPRC/RecK, gap ratios, base rate, BO source, wall-clock, git commit, SLURM job id.
+
+**Concrete submission cheat sheet (IDUN).** Always submit from project root. After walltime kill, just resubmit the same command — the coordinator resumes from the SQLite study and skips already-trained splits via cached BiGG outputs.
+
+```bash
+# Smoke test first — 1 trial, short walltime
+sbatch --export=ALL,DATASET=tolokers,MODE=shared,N_TRIALS=1 \
+       --time=02:00:00 experiments/bo_tuning/slurm/bo_coordinator.slurm
+
+# Real studies
+# tolokers shared (40 trials; ~5 walltime cycles at 12h)
+sbatch --export=ALL,DATASET=tolokers,MODE=shared,N_TRIALS=40 \
+       experiments/bo_tuning/slurm/bo_coordinator.slurm
+
+# questions shared (40 trials; ~8 walltime cycles)
+sbatch --export=ALL,DATASET=questions,MODE=shared,N_TRIALS=40 \
+       experiments/bo_tuning/slurm/bo_coordinator.slurm
+
+# weibo per_split — one array submission, 5 tasks (recommended over weibo shared:
+# 5×90 min trials instead of 1×7.5h trials, fits in normal walltime). SPLIT_ID
+# is auto-derived from SLURM_ARRAY_TASK_ID by the template. %5 caps concurrent tasks.
+sbatch --array=0-4%5 \
+       --export=ALL,DATASET=weibo,MODE=per_split,N_TRIALS=20 \
+       experiments/bo_tuning/slurm/bo_coordinator.slurm
+
+# Held-out final report after a study is done
+sbatch --wrap="python -m experiments.bo_tuning.final_report --dataset tolokers --mode shared"
+```
+
+Recommendation per dataset: **tolokers, questions → shared**; **weibo → per_split×5** (natural parallelism, sidesteps the 7.5h-per-shared-trial walltime problem).
 
 ### Environment Setup
 

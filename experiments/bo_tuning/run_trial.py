@@ -42,17 +42,18 @@ def _git_commit():
         return None
 
 
-def _ensure_bundle(trial_dir, dataset, save_names_by_split):
+def _ensure_bundle(trial_dir, dataset, save_names_by_split, cache_root=None):
     """Materialise the trial's bundle dir with one symlink per split.
 
-    Symlink targets are the canonical BiGG output dirs. The link names are
-    the BiGG save_names themselves, so ``discover_bigg_split_bundle`` picks
-    up the ``_split{N}_n{K}`` tag without any rewriting.
+    Symlink targets are the BiGG output dirs (under ``cache_root`` when
+    set, otherwise the canonical pipeline location). The link names are
+    the BiGG save_names themselves, so ``discover_bigg_split_bundle``
+    picks up the ``_split{N}_n{K}`` tag without any rewriting.
     """
     bundle_dir = os.path.join(trial_dir, 'bundle')
     os.makedirs(bundle_dir, exist_ok=True)
     for split_id, save_name in save_names_by_split.items():
-        target = expected_output_dir(dataset, save_name)
+        target = expected_output_dir(dataset, save_name, cache_root=cache_root)
         link = os.path.join(bundle_dir, save_name)
         if os.path.islink(link) or os.path.exists(link):
             os.unlink(link)
@@ -63,6 +64,7 @@ def _ensure_bundle(trial_dir, dataset, save_names_by_split):
 def run_trial(*, dataset, fixed_hp, params, split_ids, trial_dir,
               n_subgraphs, models, seeds_per_split, tune_test_ratio,
               tune_test_seed, tune_portion, mode, benchmark_env,
+              baseline_csv_path=None, cache_root=None,
               data_dir=None, semi_supervised=0):
     """Execute one BO trial end-to-end.
 
@@ -90,7 +92,7 @@ def run_trial(*, dataset, fixed_hp, params, split_ids, trial_dir,
         log_dir = os.path.join(logs_dir, f'split{sid}')
         res = train_one_split(
             fixed_hp, params, split_id=sid, n_subgraphs=n_subgraphs,
-            log_dir=log_dir,
+            log_dir=log_dir, cache_root=cache_root,
             stdout_fname='train.out', stderr_fname='train.err')
         split_train_sec[sid] = res['wall_sec']
         save_names_by_split[sid] = res['save_name']
@@ -123,7 +125,8 @@ def run_trial(*, dataset, fixed_hp, params, split_ids, trial_dir,
         _flush_metadata(trial_dir, metrics)
         return metrics
 
-    bundle_dir = _ensure_bundle(trial_dir, dataset, save_names_by_split)
+    bundle_dir = _ensure_bundle(trial_dir, dataset, save_names_by_split,
+                                cache_root=cache_root)
 
     # Benchmark with the new flags. Output goes inside the trial dir.
     bench_out = os.path.join(trial_dir, 'benchmark')
@@ -154,6 +157,11 @@ def run_trial(*, dataset, fixed_hp, params, split_ids, trial_dir,
     ]
     if semi_supervised:
         cmd += ['--semi_supervised', str(semi_supervised)]
+    if baseline_csv_path is not None:
+        # Coordinator has the baseline cached; per-trial benchmark only
+        # needs Phase 2. We merge the cached baseline back in below before
+        # computing the objective.
+        cmd += ['--skip_original']
 
     t_bench = time.time()
     with open(bench_log, 'w') as outf, open(bench_err, 'w') as errf:
@@ -187,6 +195,11 @@ def run_trial(*, dataset, fixed_hp, params, split_ids, trial_dir,
         return metrics
 
     per_trial_df = pd.read_csv(per_trial_csv)
+
+    # Merge cached baseline rows in (Phase 1 was skipped per --skip_original).
+    if baseline_csv_path is not None:
+        baseline_df = pd.read_csv(baseline_csv_path)
+        per_trial_df = pd.concat([per_trial_df, baseline_df], ignore_index=True)
 
     # Base rate is fixed across trials (same dataset, mask, portion).
     # Compute on the first split we actually evaluated.

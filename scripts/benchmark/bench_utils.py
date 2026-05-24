@@ -282,6 +282,19 @@ def parse_args():
                                  'on. BO selection uses "tune"; the final '
                                  'report uses "heldout". Ignored when '
                                  '--tune_test_ratio is unset.')
+    data_group.add_argument('--skip_original', action='store_true',
+                            default=False,
+                            help='Skip Phase 1 (train-real/test-real baselines). '
+                                 'Used by the BO tuning framework, which computes '
+                                 'the baseline once per study and caches it; '
+                                 'per-trial benchmarks then only need Phase 2.')
+    data_group.add_argument('--baseline_split_ids', type=str, default=None,
+                            help='Comma-separated split ids to use for Phase 1 '
+                                 'when no synthetic bundle is provided '
+                                 '(e.g. "0,1,2,3,4" for a baseline-only build). '
+                                 'When set, --trials is auto-set to len(split_ids). '
+                                 'Has no effect once a bundle is discovered from '
+                                 '--graph_path / --synthetic_name.')
 
     # --- Training ---
     train_group = parser.add_argument_group('Training')

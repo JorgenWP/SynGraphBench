@@ -30,6 +30,7 @@ The original GADBench capability. Trains GNN-based classifiers to identify anoma
   * `--tune_test_seed INT` — seed for the stratified split (fixed across all trials of a study so BO and final report use disjoint nodes).
   * `--tune_portion {tune,heldout}` — selects which half. BO selection uses `tune`; the final report on best HPs uses `heldout`.
   Implemented via `_restrict_test_mask` (calls `sklearn.model_selection.train_test_split(..., stratify=label)` and overwrites `data.graph.ndata['test_mask']` in-place) at the two `data.split(...)` sites in `evaluate_models` (`:135`) and `evaluate_models_cross_graph` (`:494`). `GADBench/utils.py` is **not** modified; the override is local to the benchmark to keep upstream intact. Stratification falls back to unstratified when a class has <2 samples in the test set.
+* **Phase 1 caching (BO):** Two flags let the BO coordinator skip the deterministic original-data baseline on every trial. `--skip_original` gates Phase 1 entirely. `--baseline_split_ids "0,1,2,3,4"` makes Phase 1 iterate the given split ids when no bundle is supplied (used by the coordinator's one-shot baseline build at study startup); auto-sets `--trials` to `len(split_ids)`. The coordinator caches the resulting baseline CSV under `experiments/bo_tuning/{dataset}/baselines/{study_version}.csv` and merges it back in before scoring each trial. Without these flags the benchmark behaves exactly as before.
 
 ---
 

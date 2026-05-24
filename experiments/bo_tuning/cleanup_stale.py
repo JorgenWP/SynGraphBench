@@ -43,7 +43,12 @@ def cleanup_stale_running(study, stale_after_sec):
                   f'failed: {e}')
             continue
         if params:
-            study.enqueue_trial(params, skip_if_exists=True)
+            # skip_if_exists=False: we *just* marked this trial FAIL, and
+            # optuna's duplicate check considers prior-enqueued trials in
+            # FAIL/RUNNING/WAITING. With skip_if_exists=True the just-failed
+            # trial would match itself and the re-enqueue would silently
+            # no-op — losing the params for warm-start/manually-enqueued trials.
+            study.enqueue_trial(params, skip_if_exists=False)
             print(f'[cleanup_stale] marked trial {trial.number} FAILED '
                   f'(stale for {elapsed/3600:.1f}h) and re-enqueued params.')
         else:

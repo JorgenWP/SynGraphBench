@@ -838,32 +838,50 @@ def main():
         }
 
     # --- Phase 1: Evaluate on original data ---
-    print("\n" + "#" * 80)
-    print("# PHASE 1: EVALUATING ON ORIGINAL DATA")
-    print("#" * 80)
-    t_phase1 = time.time()
+    if args.skip_original:
+        print("\n" + "#" * 80)
+        print("# PHASE 1 SKIPPED (per --skip_original)")
+        print("#" * 80)
+    else:
+        print("\n" + "#" * 80)
+        print("# PHASE 1: EVALUATING ON ORIGINAL DATA")
+        print("#" * 80)
+        t_phase1 = time.time()
 
-    for dataset_name in datasets:
-        bundle = per_dataset_state[dataset_name]['bundle']
-        split_ids_for_phase1 = (
-            [sid for sid, _ in bundle] if bundle is not None else None)
-        seeds_for_phase1 = args.seeds_per_split if bundle is not None else 1
-        results = evaluate_models(
-            dataset_name, models, args.data_dir,
-            args.trials, args.semi_supervised, args.trial_id,
-            args.epochs, args.patience,
-            args.lr, args.drop_rate, args.h_feats, args.num_layers,
-            curve_records=all_curve_records,
-            split_ids=split_ids_for_phase1,
-            seeds_per_split=seeds_for_phase1,
-            per_trial_records=all_per_trial_records,
-            tune_test_ratio=args.tune_test_ratio,
-            tune_test_seed=args.tune_test_seed,
-            tune_portion=args.tune_portion)
-        all_results.extend(results)
+        baseline_override = None
+        if args.baseline_split_ids:
+            baseline_override = [int(x) for x in args.baseline_split_ids.split(',')]
+            args.trials = len(baseline_override)
+            print(f"  Baseline-only mode: split_ids={baseline_override} "
+                  f"seeds_per_split={args.seeds_per_split} trials={args.trials}")
 
-    phase1_elapsed = time.time() - t_phase1
-    print(f"\n[Phase 1: original-data] {format_duration(phase1_elapsed)}")
+        for dataset_name in datasets:
+            bundle = per_dataset_state[dataset_name]['bundle']
+            if baseline_override is not None:
+                split_ids_for_phase1 = baseline_override
+                seeds_for_phase1 = args.seeds_per_split
+            elif bundle is not None:
+                split_ids_for_phase1 = [sid for sid, _ in bundle]
+                seeds_for_phase1 = args.seeds_per_split
+            else:
+                split_ids_for_phase1 = None
+                seeds_for_phase1 = 1
+            results = evaluate_models(
+                dataset_name, models, args.data_dir,
+                args.trials, args.semi_supervised, args.trial_id,
+                args.epochs, args.patience,
+                args.lr, args.drop_rate, args.h_feats, args.num_layers,
+                curve_records=all_curve_records,
+                split_ids=split_ids_for_phase1,
+                seeds_per_split=seeds_for_phase1,
+                per_trial_records=all_per_trial_records,
+                tune_test_ratio=args.tune_test_ratio,
+                tune_test_seed=args.tune_test_seed,
+                tune_portion=args.tune_portion)
+            all_results.extend(results)
+
+        phase1_elapsed = time.time() - t_phase1
+        print(f"\n[Phase 1: original-data] {format_duration(phase1_elapsed)}")
 
     # --- Phase 2: Evaluate on synthetic data ---
     print("\n" + "#" * 80)
