@@ -6,13 +6,16 @@ rollups to ``experiments/results/BO_Tuning/{dataset}/per_split/``.
 
 Per-split artifacts copied: ``summary.csv``, ``best_params.json``,
 ``held_out_final_report.csv``, ``held_out_aggregated.csv``,
-``divergence_curves.csv``, ``divergence_curves.png``.
+``divergence_curves.csv``, ``divergence_curves.png``,
+``tune_portion_report.csv`` (best trial's tune-portion benchmark CSV).
 
 Rollup artifacts derived from the per-split copies:
 ``rollup/best_params.csv`` (one row per split),
 ``rollup/trial_summary.csv`` (concat with ``split_id`` column),
 ``rollup/held_out.csv``,
 ``rollup/held_out_aggregated.csv`` (mean/std across splits),
+``rollup/tune_vs_heldout.csv`` (per-(source, model) AUPRC gap between BO
+tune portion and held-out portion — positive gap = BO overfit),
 ``rollup/figures/objective_trajectory.png``.
 """
 
@@ -48,6 +51,28 @@ def _copy_split(src_split: Path, dst_split: Path) -> None:
             print(f'  missing {src_rel} under {src_split.name}, skipping')
             continue
         shutil.copy2(src_file, dst_split / dst_name)
+
+
+def _copy_tune_portion(src_split: Path, dst_split: Path) -> None:
+    """Copy the best trial's per_trial_results.csv as tune_portion_report.csv.
+
+    The best trial number is read from the already-copied best_params.json.
+    BO trials run the benchmark on ``--tune_portion tune`` so this CSV is the
+    tune-portion counterpart to held_out_final_report.csv.
+    """
+    bp_path = dst_split / 'best_params.json'
+    if not bp_path.exists():
+        return
+    trial_number = json.loads(bp_path.read_text()).get('trial_number')
+    if trial_number is None:
+        print(f'  no trial_number in best_params under {dst_split.name}')
+        return
+    src = (src_split / 'trials' / f'trial_{trial_number:04d}'
+           / 'benchmark' / 'per_trial_results.csv')
+    if not src.exists():
+        print(f'  missing best-trial CSV under {src_split.name}: {src}')
+        return
+    shutil.copy2(src, dst_split / 'tune_portion_report.csv')
 
 
 def _best_params_row(bp_path: Path, split_id: int) -> dict | None:
@@ -109,6 +134,25 @@ def _build_rollup(dst_root: Path, splits: list[int]) -> None:
         agg.columns = ['_'.join(c).rstrip('_') for c in agg.columns]
         agg.to_csv(rollup / 'held_out_aggregated.csv', index=False)
 
+    # tune_vs_heldout.csv — best-trial tune-portion AUPRC vs held-out AUPRC,
+    # aggregated per (source, model) over (split × seed). Positive ``gap``
+    # = BO overfit the tune portion.
+    tune_frames = []
+    for s in splits:
+        p = dst_root / f'split{s}' / 'tune_portion_report.csv'
+        if not p.exists():
+            continue
+        tune_frames.append(pd.read_csv(p))
+    if tune_frames and not held_out.empty:
+        tune = pd.concat(tune_frames, ignore_index=True)
+        tune_agg = (tune.groupby(['source', 'model'])['AUPRC']
+                    .agg(tune_AUPRC_mean='mean', tune_AUPRC_std='std'))
+        held_agg = (held_out.groupby(['source', 'model'])['AUPRC']
+                    .agg(heldout_AUPRC_mean='mean', heldout_AUPRC_std='std'))
+        out = tune_agg.join(held_agg, how='outer').reset_index()
+        out['gap'] = out['tune_AUPRC_mean'] - out['heldout_AUPRC_mean']
+        out.to_csv(rollup / 'tune_vs_heldout.csv', index=False)
+
     # objective_trajectory.png — best-so-far per split vs trial number
     if not trial_summary.empty and 'objective' in trial_summary.columns:
         fig, ax = plt.subplots(figsize=(8, 5))
@@ -157,6 +201,7 @@ def main() -> None:
     for s in splits:
         print(f'copying split{s} ...')
         _copy_split(src_root / f'split{s}', dst_root / f'split{s}')
+        _copy_tune_portion(src_root / f'split{s}', dst_root / f'split{s}')
 
     print('building rollup ...')
     _build_rollup(dst_root, splits)
