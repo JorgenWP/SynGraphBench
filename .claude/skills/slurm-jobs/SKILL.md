@@ -208,9 +208,24 @@ Edit **`scripts/benchmark/cgt_link_benchmark.slurm`**. Extra arguments beyond th
 NEG_SAMPLING="hard"     # random | hard  (defaults to random in run_link_benchmark.sh)
 DECODER="mlp"           # dot | mlp      (defaults to dot)
 BATCH_SIZE="4096"       # CGT comp-graph batch size (Python default 256; template uses 4096)
-SKIP_PHASE1="1"         # 1 to skip the full-graph GNN baseline (orthogonal to CGT L2-norm path)
 ```
 
-This template is a **2-task job array** (`#SBATCH --array=1-2`). One task runs `eval_mode=original_cg`, the other `eval_mode=synthetic_cgt`, with the per-task config inline in a bash `CONFIGS=(...)` array near the bottom of the template. Adding more datasets means adding `<dataset> <synthetic_name> <eval_mode>` rows and bumping `--array=1-N`. Each task writes a uniquely suffixed `link_prediction_results__*.xlsx/csv` to `results/evaluate/` so they don't clobber each other. Slurm logs are tagged with `_t%a_` for the array task ID.
+This template is a **job array** (`#SBATCH --array=1-N`). Each task is one `(synthetic_name, eval_mode, output_dir, skip_phase1)` row in the `CONFIGS=(...)` bash array near the bottom of the template. Bump `--array=1-N` to match the row count. `SKIP_PHASE1` is **per-task** (no longer a shared default) so Phase 1 can be attached to exactly one task instead of running on every array task.
 
-Typical `--time`: `35:00:00` per array task (link prediction is heavier than anomaly detection; each task does roughly half of what the old serial job did but still runs all trials × models for its eval_mode).
+**`original_cg` is identical across variants that share `cg_depth`/`cg_fanout`** (link_benchmark.py:314-317 reads CG params from trial 0 of the named variant, and the comp-graph itself is built from the original adjacency). So when benchmarking K variants with the same training shape, schedule **one shared `original_cg` task** plus **K `synthetic_cgt` tasks** — don't run `original_cg` per variant. The full-graph Phase 1 baseline is also dataset-level (not variant-level), so attach it to that same shared task by setting `skip_phase1=0` on the `original_cg` row and `skip_phase1=1` on every `synthetic_cgt` row.
+
+**Output layout** (matches anomaly benchmark): `results/evaluate/{generator}/{dataset}/{task}/{synthetic_name}/link_prediction_results__phase2only_{eval_mode}.{xlsx,csv}` (phase tag becomes `allphases` when `skip_phase1=0`). The `{task}` segment (e.g., `hidden_links`) mirrors `datasets/synthetic/{generator}/{dataset}/{task}/{variant}/` and prevents results from different tasks on the same variant stem from sharing a directory. Auto-derived by `link_benchmark.py` when `--output_dir` is omitted. For the shared `original_cg` task, override with an explicit `output_dir` (e.g., `results/evaluate/cgt/<dataset>/hidden_links/_original_cg_shared/`) so it doesn't get attributed to one specific variant. Slurm logs are tagged with `_t%a_` for the array task ID.
+
+Each `CONFIGS` row is `"<dataset> <synthetic_name> <eval_mode> <output_dir|-> <skip_phase1>"` (use `-` as a sentinel to use auto-derive). Example for 4 variants + shared baseline, with Phase 1 attached to the shared task:
+
+```bash
+CONFIGS=(
+    "weibo weibo_e50_k512_c1_d2_f5_s8405  original_cg    results/evaluate/cgt/weibo/hidden_links/_original_cg_shared 0"
+    "weibo weibo_e50_k512_c1_d2_f5_s8405  synthetic_cgt  -                                              1"
+    "weibo weibo_e50_k4096_c1_d2_f5_s8405 synthetic_cgt  -                                              1"
+    "weibo weibo_e50_k420_c20_d2_f5_s8405 synthetic_cgt  -                                              1"
+    "weibo weibo_e50_k168_c50_d2_f5_s8405 synthetic_cgt  -                                              1"
+)
+```
+
+Typical `--time`: `20:00:00–24:00:00` per array task (each task is one eval_mode for one variant; the shared task that includes Phase 1 takes longer than a pure synthetic_cgt task but still fits comfortably).

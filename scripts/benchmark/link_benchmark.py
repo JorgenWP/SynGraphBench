@@ -483,7 +483,21 @@ def main():
     if args.synthetic_dir is None:
         args.synthetic_dir = os.path.join(_project_root, 'datasets', 'synthetic')
     if args.output_dir is None:
-        args.output_dir = os.path.join(_project_root, 'results', 'evaluate')
+        # Auto-derive: results/evaluate/{generator}/{dataset}/{task}/{synthetic_name}
+        # Mirrors anomaly_benchmark.py and datasets/synthetic/{generator}/
+        # {dataset}/{task}/{variant}/ so results from different tasks on the
+        # same variant stem don't share a directory.
+        # For multi-dataset runs, the dataset level is omitted.
+        datasets_tmp = [d.strip() for d in args.datasets.split(',')]
+        stem = args.synthetic_name or 'original'
+        if len(datasets_tmp) == 1:
+            args.output_dir = os.path.join(
+                _project_root, 'results', 'evaluate',
+                args.generator, datasets_tmp[0], args.task, stem)
+        else:
+            args.output_dir = os.path.join(
+                _project_root, 'results', 'evaluate',
+                args.generator, args.task, stem)
 
     args.data_dir = os.path.abspath(args.data_dir)
     args.synthetic_dir = os.path.abspath(args.synthetic_dir)

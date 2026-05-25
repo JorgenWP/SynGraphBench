@@ -526,18 +526,21 @@ def main():
     if args.synthetic_dir is None:
         args.synthetic_dir = os.path.join(_project_root, 'datasets', 'synthetic')
     if args.output_dir is None:
-        # Auto-derive: results/evaluate/{generator}/{dataset}/{synthetic_name}
-        # For multi-dataset runs, dataset level is omitted.
+        # Auto-derive: results/evaluate/{generator}/{dataset}/{task}/{synthetic_name}
+        # Mirrors datasets/synthetic/{generator}/{dataset}/{task}/{variant}/ so
+        # results from different tasks (hidden_labels/hidden_links/structure)
+        # on the same variant stem don't share a directory.
+        # For multi-dataset runs, the dataset level is omitted.
         datasets_tmp = [d.strip() for d in args.datasets.split(',')]
         stem = args.synthetic_name or 'original'
         if len(datasets_tmp) == 1:
             args.output_dir = os.path.join(
                 _project_root, 'results', 'evaluate',
-                args.generator, datasets_tmp[0], stem)
+                args.generator, datasets_tmp[0], args.task, stem)
         else:
             args.output_dir = os.path.join(
                 _project_root, 'results', 'evaluate',
-                args.generator, stem)
+                args.generator, args.task, stem)
 
     args.data_dir = os.path.abspath(args.data_dir)
     args.synthetic_dir = os.path.abspath(args.synthetic_dir)
