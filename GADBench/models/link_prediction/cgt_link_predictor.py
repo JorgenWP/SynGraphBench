@@ -240,6 +240,8 @@ class MergedCompGraphLinkPredictor(BaseDetector):
 
         metric = self.train_config['metric']
         test_score = None
+        val_auprc_curve  = []
+        test_auprc_curve = []
         n_train = self.train_pos_edges.shape[0]
         ts_total = {'neg': 0.0, 'data_wait': 0.0, 'gpu_compute': 0.0,
                     'opt': 0.0, 'val': 0.0, 'test': 0.0, 'n_batches': 0}
@@ -281,18 +283,21 @@ class MergedCompGraphLinkPredictor(BaseDetector):
             sync(); t3 = time.time()
             t_val = t3 - t2
 
-            t_test = 0.0
+            with torch.no_grad():
+                test_pos = torch.sigmoid(
+                    self._score_edges(self.test_pos_edges))
+                test_neg = torch.sigmoid(
+                    self._score_edges(self.test_neg_edges))
+            epoch_test = self.eval(test_pos, test_neg)
+            sync(); t4 = time.time()
+            t_test = t4 - t3
+            val_auprc_curve.append(val_score['AUPRC'])
+            test_auprc_curve.append(epoch_test['AUPRC'])
+
             if val_score[metric] > self.best_score:
                 self.best_score = val_score[metric]
                 self.patience_knt = 0
-                with torch.no_grad():
-                    test_pos = torch.sigmoid(
-                        self._score_edges(self.test_pos_edges))
-                    test_neg = torch.sigmoid(
-                        self._score_edges(self.test_neg_edges))
-                test_score = self.eval(test_pos, test_neg)
-                sync(); t4 = time.time()
-                t_test = t4 - t3
+                test_score = epoch_test
                 print('Epoch {}, Loss {:.4f}, Val AUC {:.4f}, PRC {:.4f}, '
                       'test AUC {:.4f}, PRC {:.4f}'.format(
                           e, loss, val_score['AUROC'], val_score['AUPRC'],
@@ -327,6 +332,9 @@ class MergedCompGraphLinkPredictor(BaseDetector):
               f"test={ts_total['test']:.1f}s "
               f"other={other:.1f}s")
 
+        if test_score is not None:
+            test_score['val_auprc_curve']  = val_auprc_curve
+            test_score['test_auprc_curve'] = test_auprc_curve
         return test_score
 
 

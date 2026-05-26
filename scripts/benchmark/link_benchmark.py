@@ -75,7 +75,8 @@ def set_seed(seed=3407):
 def evaluate_link_models(dataset_name, models, data_dir, data_source,
                          trials, val_ratio, test_ratio, neg_sampling,
                          decoder, epochs, patience, lr, drop_rate,
-                         h_feats, num_layers, synthetic_dir=None):
+                         h_feats, num_layers, synthetic_dir=None,
+                         curve_records=None):
     """Train and evaluate link prediction models on full graphs."""
     results = []
 
@@ -89,6 +90,7 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
+        val_curves, test_curves = [], []
         time_list = []
 
         prefix = (synthetic_dir + '/') if data_source != 'original' else (data_dir + '/original/')
@@ -135,6 +137,10 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
             pre_list.append(test_score['AUPRC'])
             rec_list.append(test_score['RecK'])
 
+            if 'val_auprc_curve' in test_score:
+                val_curves.append(test_score['val_auprc_curve'])
+                test_curves.append(test_score['test_auprc_curve'])
+
             print(f"  -> AUROC={test_score['AUROC']:.4f}, "
                   f"AUPRC={test_score['AUPRC']:.4f}, "
                   f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
@@ -164,6 +170,22 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
                 'time_per_trial': sum(time_list) / len(time_list),
             })
 
+        if val_curves and curve_records is not None:
+            max_len = max(len(c) for c in val_curves)
+            def pad(curve):
+                return curve + [curve[-1]] * (max_len - len(curve))
+            val_arr  = np.array([pad(c) for c in val_curves])
+            test_arr = np.array([pad(c) for c in test_curves])
+            for epoch in range(max_len):
+                curve_records.append({
+                    'source': data_source,
+                    'dataset': dataset_name, 'model': model_name, 'epoch': epoch,
+                    'val_auprc_mean':  float(val_arr[:, epoch].mean()),
+                    'val_auprc_std':   float(val_arr[:, epoch].std()),
+                    'test_auprc_mean': float(test_arr[:, epoch].mean()),
+                    'test_auprc_std':  float(test_arr[:, epoch].std()),
+                })
+
     return results
 
 
@@ -171,7 +193,7 @@ def _run_cg_link_trials(dataset_name, cg_models, base_data, source_label,
                         trials, val_ratio, test_ratio, neg_sampling, decoder,
                         epochs, patience, batch_size, lr, drop_rate,
                         h_feats, num_layers, step_num, sample_num,
-                        syn_graph_factory=None):
+                        syn_graph_factory=None, curve_records=None):
     """Run MergedCompGraphLinkPredictor trials across models and trials.
 
     For each trial:
@@ -189,6 +211,7 @@ def _run_cg_link_trials(dataset_name, cg_models, base_data, source_label,
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
+        val_curves, test_curves = [], []
         time_list = []
 
         for t in range(trials):
@@ -242,6 +265,10 @@ def _run_cg_link_trials(dataset_name, cg_models, base_data, source_label,
             pre_list.append(test_score['AUPRC'])
             rec_list.append(test_score['RecK'])
 
+            if 'val_auprc_curve' in test_score:
+                val_curves.append(test_score['val_auprc_curve'])
+                test_curves.append(test_score['test_auprc_curve'])
+
             print(f"  -> AUROC={test_score['AUROC']:.4f}, "
                   f"AUPRC={test_score['AUPRC']:.4f}, "
                   f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
@@ -271,6 +298,22 @@ def _run_cg_link_trials(dataset_name, cg_models, base_data, source_label,
                 'time_per_trial': sum(time_list) / len(time_list),
             })
 
+        if val_curves and curve_records is not None:
+            max_len = max(len(c) for c in val_curves)
+            def pad(curve):
+                return curve + [curve[-1]] * (max_len - len(curve))
+            val_arr  = np.array([pad(c) for c in val_curves])
+            test_arr = np.array([pad(c) for c in test_curves])
+            for epoch in range(max_len):
+                curve_records.append({
+                    'source': source_label,
+                    'dataset': dataset_name, 'model': model_name, 'epoch': epoch,
+                    'val_auprc_mean':  float(val_arr[:, epoch].mean()),
+                    'val_auprc_std':   float(val_arr[:, epoch].std()),
+                    'test_auprc_mean': float(test_arr[:, epoch].mean()),
+                    'test_auprc_std':  float(test_arr[:, epoch].std()),
+                })
+
     return results
 
 
@@ -278,7 +321,8 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
                              trials, val_ratio, test_ratio,
                              neg_sampling, decoder, epochs, patience,
                              trial_paths, batch_size, lr, drop_rate,
-                             h_feats, num_layers, eval_mode='both'):
+                             h_feats, num_layers, eval_mode='both',
+                             curve_records=None):
     """Evaluate link prediction on CGT merged computation graphs.
 
     Runs two comparisons:
@@ -333,7 +377,8 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
             dataset_name, cg_models, data, 'original-cg',
             trials, val_ratio, test_ratio, neg_sampling, decoder,
             epochs, patience, batch_size, lr, drop_rate,
-            h_feats, num_layers, step_num, sample_num))
+            h_feats, num_layers, step_num, sample_num,
+            curve_records=curve_records))
 
     # --- Synthetic-CGT: per-trial hybrid graph built from per-trial .pt ---
     if eval_mode in ('synthetic_cgt', 'both'):
@@ -351,7 +396,8 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
             trials, val_ratio, test_ratio, neg_sampling, decoder,
             epochs, patience, batch_size, lr, drop_rate,
             h_feats, num_layers, step_num, sample_num,
-            syn_graph_factory=make_syn_graph))
+            syn_graph_factory=make_syn_graph,
+            curve_records=curve_records))
 
     del data
     return results
@@ -360,7 +406,8 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
 def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn_file_name,
                                      trials, val_ratio, test_ratio, neg_sampling,
                                      decoder, epochs, patience, lr, drop_rate,
-                                     h_feats, num_layers, norm_stats_path=None):
+                                     h_feats, num_layers, norm_stats_path=None,
+                                     curve_records=None):
     """Train GNNs on synthetic graph edges, validate on synthetic val, test on original test edges."""
 
     # Load normalization stats if available
@@ -381,6 +428,7 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
+        val_curves, test_curves = [], []
         time_list = []
 
         for t in range(trials):
@@ -444,6 +492,11 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
             auc_list.append(test_score['AUROC'])
             pre_list.append(test_score['AUPRC'])
             rec_list.append(test_score['RecK'])
+
+            if 'val_auprc_curve' in test_score:
+                val_curves.append(test_score['val_auprc_curve'])
+                test_curves.append(test_score['test_auprc_curve'])
+
             print(f"  -> AUROC={test_score['AUROC']:.4f}, "
                   f"AUPRC={test_score['AUPRC']:.4f}, "
                   f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
@@ -469,6 +522,22 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
                 'RecK_std': np.std(rec_list),
                 'time_per_trial': sum(time_list) / len(time_list) if time_list else 0,
             })
+
+        if val_curves and curve_records is not None:
+            max_len = max(len(c) for c in val_curves)
+            def pad(curve):
+                return curve + [curve[-1]] * (max_len - len(curve))
+            val_arr  = np.array([pad(c) for c in val_curves])
+            test_arr = np.array([pad(c) for c in test_curves])
+            for epoch in range(max_len):
+                curve_records.append({
+                    'source': 'synthetic-graph',
+                    'dataset': dataset_name, 'model': model_name, 'epoch': epoch,
+                    'val_auprc_mean':  float(val_arr[:, epoch].mean()),
+                    'val_auprc_std':   float(val_arr[:, epoch].std()),
+                    'test_auprc_mean': float(test_arr[:, epoch].mean()),
+                    'test_auprc_std':  float(test_arr[:, epoch].std()),
+                })
 
     return results
 
@@ -537,6 +606,7 @@ def main():
     print(f"  Num layers:     {args.num_layers}")
 
     all_results = []
+    all_curve_records = []
 
     # --- Phase 1: Evaluate on original data ---
     if args.skip_phase1:
@@ -555,7 +625,8 @@ def main():
                 args.val_ratio, args.test_ratio,
                 args.neg_sampling, args.decoder,
                 args.epochs, args.patience,
-                args.lr, args.drop_rate, args.h_feats, args.num_layers)
+                args.lr, args.drop_rate, args.h_feats, args.num_layers,
+                curve_records=all_curve_records)
             all_results.extend(results)
 
     # --- Phase 2: Evaluate on synthetic data ---
@@ -611,7 +682,8 @@ def main():
                 args.epochs, args.patience, trial_paths,
                 args.batch_size, args.lr, args.drop_rate,
                 args.h_feats, args.num_layers,
-                eval_mode=args.eval_mode)
+                eval_mode=args.eval_mode,
+                curve_records=all_curve_records)
         else:
             # Full graph (BiGG, etc.): train+val on synthetic, test on original.
             norm_stats_path = os.path.join(task_dir, stem + '_norm_stats.pt')
@@ -621,7 +693,8 @@ def main():
                 args.neg_sampling, args.decoder,
                 args.epochs, args.patience,
                 args.lr, args.drop_rate, args.h_feats, args.num_layers,
-                norm_stats_path=norm_stats_path)
+                norm_stats_path=norm_stats_path,
+                curve_records=all_curve_records)
         all_results.extend(results)
 
     # --- Save and display results ---
@@ -646,6 +719,19 @@ def main():
         print_comparison(all_results, datasets, models)
     else:
         print("\nNo results to save.")
+
+    if all_curve_records:
+        # Suffix curves CSV the same way as results, so parallel SLURM array
+        # tasks (one per eval_mode) don't clobber each other's curve files.
+        if args.skip_phase1 or args.eval_mode != 'both':
+            phase_tag = 'phase2only' if args.skip_phase1 else 'allphases'
+            curves_stem = f'link_divergence_curves__{phase_tag}_{args.eval_mode}'
+        else:
+            curves_stem = 'link_divergence_curves'
+        curves_df = pd.DataFrame(all_curve_records)
+        curves_path = os.path.join(args.output_dir, f'{curves_stem}.csv')
+        curves_df.to_csv(curves_path, index=False)
+        print(f"  Divergence curves saved to: {curves_path}")
 
     print(f"\n[Total] {format_duration(time.time() - script_start)}")
 

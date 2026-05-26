@@ -141,6 +141,8 @@ class BaseGNNLinkPredictor(BaseDetector):
         optimizer = torch.optim.Adam(params, lr=self.model_config['lr'])
 
         test_score = None
+        val_auprc_curve  = []
+        test_auprc_curve = []
         n_train = self.train_pos_edges.shape[0]
         for e in range(self.train_config['epochs']):
             self.model.train()
@@ -170,15 +172,17 @@ class BaseGNNLinkPredictor(BaseDetector):
                 h = self.model(self.train_graph)
                 val_pos = torch.sigmoid(self.score_edges(h, self.val_pos_edges))
                 val_neg = torch.sigmoid(self.score_edges(h, self.val_neg_edges))
-            val_score = self.eval(val_pos, val_neg)
+                test_pos = torch.sigmoid(self.score_edges(h, self.test_pos_edges))
+                test_neg = torch.sigmoid(self.score_edges(h, self.test_neg_edges))
+            val_score  = self.eval(val_pos, val_neg)
+            epoch_test = self.eval(test_pos, test_neg)
+            val_auprc_curve.append(val_score['AUPRC'])
+            test_auprc_curve.append(epoch_test['AUPRC'])
 
             if val_score[self.train_config['metric']] > self.best_score:
                 self.best_score = val_score[self.train_config['metric']]
                 self.patience_knt = 0
-                with torch.no_grad():
-                    test_pos = torch.sigmoid(self.score_edges(h, self.test_pos_edges))
-                    test_neg = torch.sigmoid(self.score_edges(h, self.test_neg_edges))
-                test_score = self.eval(test_pos, test_neg)
+                test_score = epoch_test
                 print('Epoch {}, Loss {:.4f}, Val AUC {:.4f}, PRC {:.4f}, '
                       'test AUC {:.4f}, PRC {:.4f}'.format(
                           e, loss, val_score['AUROC'], val_score['AUPRC'],
@@ -187,6 +191,10 @@ class BaseGNNLinkPredictor(BaseDetector):
                 self.patience_knt += 1
                 if self.patience_knt > self.train_config['patience']:
                     break
+
+        if test_score is not None:
+            test_score['val_auprc_curve']  = val_auprc_curve
+            test_score['test_auprc_curve'] = test_auprc_curve
         return test_score
 
 

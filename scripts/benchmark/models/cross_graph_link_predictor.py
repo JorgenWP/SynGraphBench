@@ -134,6 +134,8 @@ class CrossGraphLinkPredictor(BaseDetector):
         device = self.train_config['device']
 
         test_score = None
+        val_auprc_curve  = []
+        test_auprc_curve = []
         n_train = self.syn_train_pos_edges.shape[0]
 
         for e in range(self.train_config['epochs']):
@@ -162,23 +164,24 @@ class CrossGraphLinkPredictor(BaseDetector):
             loss.backward()
             optimizer.step()
 
-            # Validate on synthetic val edges
+            # Validate on synthetic val edges and test on original test edges
             self.model.eval()
             with torch.no_grad():
                 h_syn = self.model(self.syn_train_graph)
                 val_pos = torch.sigmoid(self.score_edges(h_syn, self.syn_val_pos_edges))
                 val_neg = torch.sigmoid(self.score_edges(h_syn, self.syn_val_neg_edges))
-            val_score = self.eval(val_pos, val_neg)
+                h_orig = self.model(self.orig_train_graph)
+                test_pos = torch.sigmoid(self.score_edges(h_orig, self.test_pos_edges))
+                test_neg = torch.sigmoid(self.score_edges(h_orig, self.test_neg_edges))
+            val_score  = self.eval(val_pos, val_neg)
+            epoch_test = self.eval(test_pos, test_neg)
+            val_auprc_curve.append(val_score['AUPRC'])
+            test_auprc_curve.append(epoch_test['AUPRC'])
 
             if val_score[metric] > self.best_score:
                 self.best_score = val_score[metric]
                 self.patience_knt = 0
-                # Test on original graph
-                with torch.no_grad():
-                    h_orig = self.model(self.orig_train_graph)
-                    test_pos = torch.sigmoid(self.score_edges(h_orig, self.test_pos_edges))
-                    test_neg = torch.sigmoid(self.score_edges(h_orig, self.test_neg_edges))
-                test_score = self.eval(test_pos, test_neg)
+                test_score = epoch_test
                 print(f'  Epoch {e}, Loss {loss:.4f}, '
                       f'Val AUC {val_score["AUROC"]:.4f} PRC {val_score["AUPRC"]:.4f} | '
                       f'Test AUC {test_score["AUROC"]:.4f} PRC {test_score["AUPRC"]:.4f}')
@@ -187,6 +190,9 @@ class CrossGraphLinkPredictor(BaseDetector):
                 if self.patience_knt > patience:
                     break
 
+        if test_score is not None:
+            test_score['val_auprc_curve']  = val_auprc_curve
+            test_score['test_auprc_curve'] = test_auprc_curve
         return test_score
 
 

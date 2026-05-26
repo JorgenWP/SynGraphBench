@@ -113,6 +113,8 @@ class CompGraphDetector:
                          device=self.device)
 
         best_test_score = None
+        val_auprc_curve  = []
+        test_auprc_curve = []
 
         for epoch in range(self.train_config['epochs']):
             self.model.train()
@@ -130,12 +132,15 @@ class CompGraphDetector:
                 optimizer.step()
                 total_loss += loss.item()
 
-            val_score = self._evaluate_loader(self.val_loader)
+            val_score  = self._evaluate_loader(self.val_loader)
+            epoch_test = self._evaluate_loader(self.test_loader)
+            val_auprc_curve.append(val_score['AUPRC'])
+            test_auprc_curve.append(epoch_test['AUPRC'])
 
             if val_score[self.train_config['metric']] > self.best_score:
                 self.patience_knt = 0
                 self.best_score = val_score[self.train_config['metric']]
-                best_test_score = self._evaluate_loader(self.test_loader)
+                best_test_score = epoch_test
                 avg_loss = total_loss / max(len(self.train_loader), 1)
                 print(
                     f'Epoch {epoch}, Loss {avg_loss:.4f}, '
@@ -150,6 +155,9 @@ class CompGraphDetector:
                 if self.patience_knt > self.train_config['patience']:
                     break
 
+        if best_test_score is not None:
+            best_test_score['val_auprc_curve']  = val_auprc_curve
+            best_test_score['test_auprc_curve'] = test_auprc_curve
         return best_test_score
 
     def _evaluate_loader(self, loader):

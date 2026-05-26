@@ -191,7 +191,7 @@ def evaluate_models(dataset_name, models, data_dir,
 def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
                    feat_dim, source_label, trials, epochs, patience,
                    batch_size, lr, drop_rate, h_feats, num_layers,
-                   rebuild_datasets_fn=None):
+                   rebuild_datasets_fn=None, curve_records=None):
     """Run CompGraphDetector trials for a set of models on given CG datasets.
 
     Args:
@@ -199,6 +199,9 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
             When provided, datasets are rebuilt each trial so that different
             train/val/test splits are used. When None, the passed-in datasets
             are reused across all trials (only the seed varies).
+        curve_records: optional list. When provided, per-epoch val/test AUPRC
+            curves (mean/std across trials) are appended for GNN models, one
+            row per epoch with ``source=source_label``.
     """
     results = []
 
@@ -208,6 +211,7 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
         print(f"{'='*60}")
 
         auc_list, pre_list, rec_list = [], [], []
+        val_curves, test_curves = [], []
         time_list = []
 
         for t in range(trials):
@@ -253,6 +257,10 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
             pre_list.append(test_score['AUPRC'])
             rec_list.append(test_score['RecK'])
 
+            if 'val_auprc_curve' in test_score:
+                val_curves.append(test_score['val_auprc_curve'])
+                test_curves.append(test_score['test_auprc_curve'])
+
             print(f"  -> AUROC={test_score['AUROC']:.4f}, "
                   f"AUPRC={test_score['AUPRC']:.4f}, "
                   f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
@@ -280,13 +288,30 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
                 'time_per_trial': sum(time_list) / len(time_list),
             })
 
+        if val_curves and curve_records is not None:
+            max_len = max(len(c) for c in val_curves)
+            def pad(curve):
+                return curve + [curve[-1]] * (max_len - len(curve))
+            val_arr  = np.array([pad(c) for c in val_curves])
+            test_arr = np.array([pad(c) for c in test_curves])
+            for epoch in range(max_len):
+                curve_records.append({
+                    'source': source_label,
+                    'dataset': dataset_name, 'model': model_name, 'epoch': epoch,
+                    'val_auprc_mean':  float(val_arr[:, epoch].mean()),
+                    'val_auprc_std':   float(val_arr[:, epoch].std()),
+                    'test_auprc_mean': float(test_arr[:, epoch].mean()),
+                    'test_auprc_std':  float(test_arr[:, epoch].std()),
+                })
+
     return results
 
 
 def evaluate_models_cgt(dataset_name, models, data_dir,
                         trials, epochs, patience, syn_path,
                         batch_size, lr, drop_rate, h_feats, num_layers,
-                        trial_id=0, semi_supervised=False):
+                        trial_id=0, semi_supervised=False,
+                        curve_records=None):
     """Evaluate GNN models on CGT computation graphs.
 
     Runs two comparisons:
@@ -342,7 +367,8 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
         batch_size, lr, drop_rate, h_feats, num_layers,
         rebuild_datasets_fn=lambda t: build_original_cg_datasets(
             data.graph, syn_data,
-            trial_id=trial_id + t, semi_supervised=semi_supervised)))
+            trial_id=trial_id + t, semi_supervised=semi_supervised),
+        curve_records=curve_records))
 
     # --- CGT synthetic computation graphs ---
     # When per-trial .pt files exist (one per split), load a different file
@@ -361,7 +387,8 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
             dataset_name, cg_models, syn_train0, syn_val0, test_ds0,
             feat_dim, 'synthetic-cgt', trials, epochs, patience,
             batch_size, lr, drop_rate, h_feats, num_layers,
-            rebuild_datasets_fn=rebuild_fn))
+            rebuild_datasets_fn=rebuild_fn,
+            curve_records=curve_records))
     else:
         # Single-file mode: verify the .pt was trained under the same
         # trial_id / semi_supervised the benchmark is running with.
@@ -379,7 +406,8 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
         results.extend(_run_cg_trials(
             dataset_name, cg_models, syn_train, syn_val, test_ds,
             feat_dim, 'synthetic-cgt', trials, epochs, patience,
-            batch_size, lr, drop_rate, h_feats, num_layers))
+            batch_size, lr, drop_rate, h_feats, num_layers,
+            curve_records=curve_records))
 
     del data
     return results
@@ -651,7 +679,8 @@ def main():
                 args.batch_size, args.lr, args.drop_rate,
                 args.h_feats, args.num_layers,
                 trial_id=args.trial_id,
-                semi_supervised=bool(args.semi_supervised))
+                semi_supervised=bool(args.semi_supervised),
+                curve_records=all_curve_records)
         else:
             # Full graph (BiGG, etc.): train+val on synthetic, test on original.
             # For subsampled runs (directory), combine subgraphs into one file.

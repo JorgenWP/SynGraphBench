@@ -61,6 +61,8 @@ An extension added to this project that reuses existing GNN architectures for ed
 
 **Per-trial CGT .pt resolution**: `scripts/benchmark/link_benchmark.py` now resolves `{stem}/{stem}_t{t}.pt` for `t in 0..trials-1` (via `resolve_cgt_trial_paths`). If all files exist, each trial loads its own .pt and builds its own synthetic graph. Missing files trigger single-file fallback with a warning. The original-cg baseline does not depend on .pt contents and reuses the same graph across trials.
 
+**Val/test divergence curves**: every per-epoch GNN detector emits `val_auprc_curve` / `test_auprc_curve` on its returned `test_score`; both benchmark mains aggregate them into a per-(source, model, epoch) CSV alongside the scalar results — `divergence_curves.csv` for anomaly, `link_divergence_curves.csv` for link prediction (suffixed `__{phase_tag}_{eval_mode}` when array-sharded). Sources include `original`, `synthetic-graph`, `real-subsampled-graph` (anomaly only), `original-cg`, and `synthetic-cgt`. XGB detectors stay no-curve (single-fit). Plotted via `scripts/benchmark/divergence_curves.ipynb` — set `TASK = 'link_prediction'` to point it at the link output layout.
+
 ---
 
 ## Feature Normalization in Cross-Graph Evaluation
