@@ -30,7 +30,24 @@ SynGraphBench/
 │   │   └── models/
 │   │       ├── cross_graph_detector.py         # Cross-graph anomaly (GNN + XGBGraph)
 │   │       └── cross_graph_link_predictor.py   # Cross-graph link prediction (GNN + XGBGraph)
+│   ├── cluster/            # One-time clustering precompute (shared k-anonymity artifact)
+│   │   ├── precompute_clusters.py    # Fits k-means on train+val per (dataset, task, trial, k_size, k_num)
+│   │   └── precompute_clusters.slurm # Array SLURM (one task per dataset); CPUQ; uses CGT env
 │   └── test/               # Quick test/example scripts
+├── cache/
+│   └── clustering/         # Shared k-anonymity clustering precomputed by scripts/cluster/
+│       └── <dataset>/
+│           ├── hidden_labels/
+│           │   └── t<trial>/
+│           │       └── k<cluster_size>_c<cluster_num>/
+│           │           ├── cluster_ids.pt   # (N,) node -> cluster id
+│           │           ├── raw_centers.pt   # (K, D) mean of pre-L2-norm features (BiGG input)
+│           │           ├── l2_centers.pt    # (K, D) L2-normed centers (CGT input)
+│           │           ├── meta.json        # dataset/task/trial/k/c + stats + git commit
+│           │           └── DONE             # touchfile written last; resume marker
+│           └── hidden_links/                # NOTE: no t<trial> segment — clustering is trial-invariant
+│               └── k<cluster_size>_c<cluster_num>/
+│                   └── (same five files)
 ├── datasets/
 │   ├── original/           # Original DGL datasets (reddit, tolokers, amazon, …)
 │   └── synthetic/

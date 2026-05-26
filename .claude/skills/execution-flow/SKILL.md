@@ -18,6 +18,23 @@ description: End-to-end pipeline steps, key shell scripts with their CLI argumen
 
 ## Key Scripts
 
+### Clustering Precompute (one-time, shared by CGT and BiGG)
+
+**`python scripts/cluster/precompute_clusters.py --datasets <names> --cluster-sizes <s1 s2 ...> --cluster-nums <n1 n2 ...> [--tasks hidden_labels hidden_links] [--trials 0 1 ... 9] [--cache-root cache/clustering] [--seed 42] [--force]`**
+Fits k-means clustering once per `(dataset, task, trial, cluster_size, cluster_num)` and writes a shared artifact for both generative models. Uses the same fit/assignment logic as CGT (`generator.cluster.cluster_fit_and_assign`) on `train+val` features. `--cluster-sizes` and `--cluster-nums` are zipped index-wise (must be equal length).
+
+Cache layout (asymmetric by task — `hidden_links` clustering is trial-invariant):
+* `cache/clustering/<dataset>/hidden_labels/t<trial>/k<cluster_size>_c<cluster_num>/`
+* `cache/clustering/<dataset>/hidden_links/k<cluster_size>_c<cluster_num>/`  ← no `t<trial>` segment.
+
+Each cache dir contains: `cluster_ids.pt` (N-vector of cluster ids), `raw_centers.pt` (K×D pre-L2-norm means — BiGG's input, so BiGG's CDF/quantile normalization can be applied on top), `l2_centers.pt` (K×D L2-normed centers — CGT's input, matching its unit-sphere convention), `meta.json`, and `DONE`. `DONE` is written last; presence ⇒ skip on re-run unless `--force`.
+
+**`sbatch scripts/cluster/precompute_clusters.slurm`** — CPU-only array job (one task per dataset). Edit the `DATASETS`, `SIZES`/`NUMS`, `TASKS`, `TRIALS` bash arrays and `#SBATCH --array=1-N` at the top before submitting. Re-submitting is idempotent (per-entry resume via DONE). Logs land in `output/cluster/<dataset>/precompute.{out,err}`.
+
+Why this exists: CGT and BiGG must share the same k-anonymity partition for a fair comparison. Today CGT does its clustering internally (`cluster_feats`) and BiGG has none. The precompute externalizes the partition so both pipelines consume the same `cluster_ids` (and each model picks its own feature representation: `l2_centers` for CGT, `raw_centers` for BiGG). The script is a *one-way* cache producer — CGT and BiGG are not yet wired to consume it; that wiring is a separate change.
+
+**Adapting train/benchmark scripts to read the cache:** see the `clustering-cache` skill — cache layout, path resolver, file-to-consumer mapping, CGT/BiGG/benchmark adaptation snippets, CLI conventions, and methodology guard-rails for fairness.
+
 ### Benchmark
 
 **`bash scripts/benchmark/run_anomaly_benchmark.sh [datasets] [models] [trials] [generator] [synthetic_name] [task]`**

@@ -120,6 +120,39 @@ def load_dgl_graph(args):
     return adj_list, features, labels, feat_size, label_size
 
 
+def load_dgl_raw_features(args):
+    """Load node features and split masks from a DGL GADBench graph without
+    applying L2 normalization or building an adjacency list.
+
+    Used by the offline clustering precompute (`scripts/cluster/precompute_clusters.py`):
+    the cache needs truly-raw (pre-L2-norm) features so BiGG's CDF/quantile
+    normalization can be applied on top later, and only needs masks for
+    deriving per-trial fit sets — adjacency and labels are unused.
+
+    Returns:
+        feats_raw: (N, d) float32 ndarray, NOT L2-normalized.
+        train_masks: (N, T) bool ndarray with one column per trial (or None
+            if the graph stores no masks — link-prediction-only datasets).
+        val_masks: (N, T) bool ndarray (or None).
+        test_masks: (N, T) bool ndarray (or None).
+    """
+    from dgl.data.utils import load_graphs
+
+    graph_path = osp.join(args.data_dir, args.dataset)
+    graph = load_graphs(graph_path)[0][0]
+
+    feats_raw = graph.ndata['feature'].numpy().astype(np.float32)
+
+    train_masks = (graph.ndata['train_masks'].numpy().astype(bool)
+                   if 'train_masks' in graph.ndata else None)
+    val_masks = (graph.ndata['val_masks'].numpy().astype(bool)
+                 if 'val_masks' in graph.ndata else None)
+    test_masks = (graph.ndata['test_masks'].numpy().astype(bool)
+                  if 'test_masks' in graph.ndata else None)
+
+    return feats_raw, train_masks, val_masks, test_masks
+
+
 def load_dgl_graph_with_hidden_links(args, trial_id,
                                      val_ratio=0.05, test_ratio=0.10):
     """Load a DGL graph with the trial's test edges stripped from adjacency.

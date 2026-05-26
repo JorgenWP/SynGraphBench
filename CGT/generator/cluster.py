@@ -119,20 +119,27 @@ def _repair_min_size(cluster_ids, feats, centers, size_min):
     return cluster_ids, moves
 
 
-def cluster_feats(args, feats, fit_ids=None):
+def cluster_fit_and_assign(args, feats, fit_ids=None):
     """
-    Cluster feature vectors. Final assignment is k-anonymity-preserving:
-    constrained min-cost flow over all nodes for N <= _CONSTRAINED_MAX_N,
-    or argmin + greedy repair otherwise (and on the DP path, which has no
-    fitted KMeansConstrained object).
+    Fit k-means and assign every node to a cluster. Shared core used by both
+    CGT's runtime path (`cluster_feats`) and the offline precompute cache
+    (`scripts/cluster/precompute_clusters.py`).
+
+    Returns centers in the original feature space (PCA-inverse-transformed)
+    *before* any L2 normalization, and cluster_ids without the trailing
+    empty_id row. Callers that need CGT's runtime conventions (unit-sphere
+    centers + empty_id row) should use `cluster_feats` instead.
 
     Input:
         feats: original feature matrix (N, d).
         fit_ids: optional node id subset used to fit k-means (e.g. train+val);
             assignment still covers all nodes.
     Return:
-        cluster_ids: (N+1,) LongTensor of cluster ids (with trailing empty_id).
-        cluster_centers: (K+1, d) FloatTensor of centers (with trailing zero row).
+        cluster_ids: (N,) int64 ndarray.
+        cluster_centers: (K, d) float ndarray in original feature space
+            (pre-L2-norm).
+        stats: dict with member-count stats and repair_moves for downstream
+            logging / meta.json.
     """
     start_time = perf_counter()
     fit_feats = feats if fit_ids is None else feats[fit_ids]
@@ -177,6 +184,43 @@ def cluster_feats(args, feats, fit_ids=None):
           f"mean={sizes.mean():.1f}, median={int(np.median(sizes))}, std={sizes.std():.1f}; "
           f"repair_moves={repair_moves}")
 
+    elapsed = perf_counter() - start_time
+    print("Clustering time: {:.3f}".format(elapsed))
+
+    stats = {
+        'k': int(cluster_centers.shape[0]),
+        'empty': empty,
+        'min_nonzero': min_nonzero,
+        'max': int(sizes.max()),
+        'mean': float(sizes.mean()),
+        'median': int(np.median(sizes)),
+        'std': float(sizes.std()),
+        'repair_moves': int(repair_moves),
+        'elapsed_seconds': float(elapsed),
+        'fit_method': fit_method,
+        'fit_set_size': int(len(fit_feats)),
+        'total_nodes': int(feats.shape[0]),
+    }
+    return cluster_ids, cluster_centers, stats
+
+
+def cluster_feats(args, feats, fit_ids=None):
+    """
+    Cluster feature vectors. Final assignment is k-anonymity-preserving:
+    constrained min-cost flow over all nodes for N <= _CONSTRAINED_MAX_N,
+    or argmin + greedy repair otherwise (and on the DP path, which has no
+    fitted KMeansConstrained object).
+
+    Input:
+        feats: original feature matrix (N, d).
+        fit_ids: optional node id subset used to fit k-means (e.g. train+val);
+            assignment still covers all nodes.
+    Return:
+        cluster_ids: (N+1,) LongTensor of cluster ids (with trailing empty_id).
+        cluster_centers: (K+1, d) FloatTensor of centers (with trailing zero row).
+    """
+    cluster_ids, cluster_centers, _ = cluster_fit_and_assign(args, feats, fit_ids=fit_ids)
+
     # L2-normalize cluster centers so the synthetic feature pool lives
     # exactly on the unit sphere — matching CGT's L2-normalized training
     # input space and the eval framework's L2-normalized real test features.
@@ -191,8 +235,6 @@ def cluster_feats(args, feats, fit_ids=None):
     # missing neighbours, intentionally outside the unit-sphere invariant)
     cluster_ids = torch.LongTensor(np.append(cluster_ids, args.cluster_num))
     cluster_centers = torch.FloatTensor(np.concatenate((cluster_centers, np.zeros((1, cluster_centers.shape[1]))), axis=0))
-
-    print("Clustering time: {:.3f}".format(perf_counter() - start_time))
 
     return cluster_ids, cluster_centers
 
