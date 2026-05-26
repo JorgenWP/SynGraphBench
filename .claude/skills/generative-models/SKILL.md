@@ -49,7 +49,7 @@ CGT operates at a different level. Rather than generating a new graph, it **gene
 Concretely, CGT uses **DP-k-means** to cluster the real node features into `k` cluster centers. K-means is **fit only on train+val node features** (test features never influence the centers); cluster-id assignment then covers all nodes since computation graphs span the full graph. These centers — not the raw features — are what is "synthesized" and shared. During evaluation, the original graph's training and validation node features are replaced by the nearest cluster center, and a GNN is trained on this feature-masked graph and tested on the unmasked original test nodes.
 
 * **Key Mechanisms:** Operates on minibatches of computation graph sequences (not the full graph). DP-k-means provides differential privacy. A Transformer learns to generate realistic sequences of cluster assignments.
-* **Output format:** A `.pt` file containing cluster centers, generated sequence indices, and train/val/test node ID mappings. Stored under `datasets/synthetic/cgt/<dataset>/<task>/`.
+* **Output format:** A `.pt` file containing cluster centers (`cluster_centers`), per-node cluster assignments (`cluster_ids`, shape `(N+1,)` with a trailing `empty_id` slot, aligned with original graph node order), generated sequence indices, and train/val/test node ID mappings. Stored under `datasets/synthetic/cgt/<dataset>/<task>/`. `cluster_ids` is consumed by the `original-cg-quantized` benchmark baseline (see `evaluation-framework` skill); artifacts produced before this field was added must be retrained.
 * **Important Files:**
   * `CGT/train.py`: Training script.
   * `CGT/test.py`: Generation and evaluation script.

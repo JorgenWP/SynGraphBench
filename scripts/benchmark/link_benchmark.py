@@ -43,6 +43,7 @@ from bench_utils import (
     parse_link_args, load_cgt_synthetic_data,
     print_comparison, resolve_cgt_trial_paths,
     _assert_link_pt_alignment, build_synthetic_dgl_graph,
+    build_quantized_dgl_graph,
     format_duration,
 )
 from models.cross_graph_link_predictor import (
@@ -325,14 +326,20 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
                              curve_records=None):
     """Evaluate link prediction on CGT merged computation graphs.
 
-    Runs two comparisons:
+    Runs three comparisons:
       1. Original-CG: merged endpoint trees built from the original graph
          (with the trial's test edges withheld), baseline for the CG
          format.
-      2. Synthetic-CGT: merged endpoint trees built from a hybrid graph
-         whose train/val root features are replaced by CGT cluster-center
-         features (via build_synthetic_dgl_graph). Each trial loads its
-         own .pt with alignment-checked test edges.
+      2. Original-CG-quantized: same as (1) but train/val root features are
+         replaced by their *assigned* cluster centers
+         (cluster_centers[cluster_ids[node]] via build_quantized_dgl_graph).
+         Isolates the K-quantization confound from CGT's sequence-model
+         contribution: (2)-(1) is the pure quantization effect; (3)-(2) is
+         the pure CGT generation effect.
+      3. Synthetic-CGT: merged endpoint trees built from a hybrid graph
+         whose train/val root features are replaced by CGT-generated
+         cluster-center features (via build_synthetic_dgl_graph). Each
+         trial loads its own .pt with alignment-checked test edges.
 
     Features are L2-normalized once here so both downstream paths feed
     unit-norm features to MergedCompGraphLinkPredictor — matching CGT's
@@ -378,6 +385,31 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
             trials, val_ratio, test_ratio, neg_sampling, decoder,
             epochs, patience, batch_size, lr, drop_rate,
             h_feats, num_layers, step_num, sample_num,
+            curve_records=curve_records))
+
+    # --- Quantized-CG: per-trial hybrid graph whose train/val root features
+    #     are the *assigned* cluster centers (cluster_centers[cluster_ids[node]]),
+    #     not CGT-generated. Shares the cluster-center vocabulary with
+    #     synthetic-cgt below, so the synthetic-cgt minus quantized delta
+    #     isolates CGT's sequence-model contribution from the K-quantization
+    #     confound. Train/val features are quantized; neighbour/test features
+    #     remain real and continuous (same as synthetic-cgt). ---
+    if eval_mode in ('original_cg_quantized', 'both'):
+        def make_quant_graph(t, expected_test_edges):
+            syn_data = load_cgt_synthetic_data(trial_paths[t])
+            _assert_link_pt_alignment(
+                syn_data, expected_trial_id=t,
+                expected_test_edges=expected_test_edges,
+                source_label=f'original-cg-quantized[t={t}]')
+            return build_quantized_dgl_graph(
+                data.graph, syn_data, trial_id=t)
+
+        results.extend(_run_cg_link_trials(
+            dataset_name, cg_models, data, 'original-cg-quantized',
+            trials, val_ratio, test_ratio, neg_sampling, decoder,
+            epochs, patience, batch_size, lr, drop_rate,
+            h_feats, num_layers, step_num, sample_num,
+            syn_graph_factory=make_quant_graph,
             curve_records=curve_records))
 
     # --- Synthetic-CGT: per-trial hybrid graph built from per-trial .pt ---

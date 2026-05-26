@@ -68,8 +68,11 @@ def parse_link_args():
                           choices=['dot', 'mlp'],
                           help='Edge decoder: dot product or MLP')
     lp_group.add_argument('--eval_mode', type=str, default='both',
-                          choices=['original_cg', 'synthetic_cgt', 'both'],
-                          help='Which CGT comp-graph paths to run in Phase 2.')
+                          choices=['original_cg', 'original_cg_quantized',
+                                   'synthetic_cgt', 'both'],
+                          help='Which CGT comp-graph paths to run in Phase 2. '
+                               '"both" runs all three (original_cg, '
+                               'original_cg_quantized, synthetic_cgt).')
     lp_group.add_argument('--skip_phase1', action='store_true',
                           help='Skip Phase 1 (full-graph GNN baseline on original data).')
 
@@ -564,6 +567,68 @@ def build_synthetic_dgl_graph(original_graph, synthetic_data,
     return syn_graph
 
 
+def build_quantized_dgl_graph(original_graph, synthetic_data,
+                              trial_id=0, semi_supervised=False):
+    """
+    Build a DGL graph whose train/val node features are replaced by their
+    *assigned* cluster centers (not CGT-generated). Isolates the K-quantization
+    confound from CGT's sequence-model contribution: this and
+    build_synthetic_dgl_graph share the same cluster-center vocabulary and only
+    differ in how the train/val root features are chosen (real assignment vs
+    GPT-generated cluster id).
+
+    Same assumptions and outputs as build_synthetic_dgl_graph: original_graph
+    must already be L2-normalized; cluster centers come pre-L2-normalized from
+    CGT/generator/cluster.py.
+    """
+    mask_col = trial_id + (10 if semi_supervised else 0)
+    train_mask = original_graph.ndata['train_masks'][:, mask_col].bool()
+    val_mask = original_graph.ndata['val_masks'][:, mask_col].bool()
+
+    train_node_ids = torch.where(train_mask)[0]
+    val_node_ids = torch.where(val_mask)[0]
+
+    if 'ids' in synthetic_data:
+        saved_ids = synthetic_data['ids']
+        train_node_ids = torch.tensor(saved_ids['train'], dtype=torch.long)
+        val_node_ids = torch.tensor(saved_ids['val'], dtype=torch.long)
+
+    N = original_graph.num_nodes()
+    cluster_ids = _load_cluster_ids(synthetic_data, N)
+    cluster_centers = synthetic_data['cluster_centers']
+    if not isinstance(cluster_centers, torch.Tensor):
+        cluster_centers = torch.tensor(cluster_centers)
+    cluster_centers = cluster_centers.float()
+
+    quant_train_feats = cluster_centers[cluster_ids[train_node_ids.numpy()]]
+    quant_val_feats = cluster_centers[cluster_ids[val_node_ids.numpy()]]
+
+    orig_feat_dim = original_graph.ndata['feature'].shape[1]
+    if orig_feat_dim != quant_train_feats.shape[1]:
+        raise ValueError(
+            f"Feature dimension mismatch: original={orig_feat_dim}, "
+            f"cluster_centers={quant_train_feats.shape[1]}")
+
+    new_features = original_graph.ndata['feature'].clone().float()
+    new_features[train_node_ids] = quant_train_feats
+    new_features[val_node_ids] = quant_val_feats
+
+    src, dst = original_graph.edges()
+    quant_graph = dgl.graph((src, dst), num_nodes=original_graph.num_nodes())
+    quant_graph.ndata['feature'] = new_features
+    quant_graph.ndata['label'] = original_graph.ndata['label'].clone()
+    quant_graph.ndata['train_masks'] = original_graph.ndata['train_masks'].clone()
+    quant_graph.ndata['val_masks'] = original_graph.ndata['val_masks'].clone()
+    quant_graph.ndata['test_masks'] = original_graph.ndata['test_masks'].clone()
+
+    print(f"  Quantized graph: {quant_graph.num_nodes()} nodes, "
+          f"{quant_graph.num_edges()} edges | "
+          f"replaced {len(train_node_ids)} train + {len(val_node_ids)} val features "
+          f"with cluster-center assignments")
+
+    return quant_graph
+
+
 def format_duration(seconds):
     """Render a wall-clock duration as 's' / 'm Ss' / 'h Mm'."""
     if seconds < 60:
@@ -861,5 +926,96 @@ def build_original_cg_datasets(original_graph, syn_data,
           f"test={len(test_ds)} | "
           f"tree_nodes={test_ds.num_tree_nodes} "
           f"(step={step_num}, sample={sample_num}, noise={noise_num})")
+
+    return train_ds, val_ds, test_ds
+
+
+def _load_cluster_ids(syn_data, N, syn_path_hint=None):
+    """Load and validate per-node cluster assignments from a CGT .pt dict.
+
+    Hard error if 'cluster_ids' is missing — artifacts produced before
+    cluster_ids persistence was added (commit introducing the original-cg-
+    quantized baseline) must be retrained. Drops the trailing empty_id slot
+    when the saved tensor has shape (N+1,).
+    """
+    if 'cluster_ids' not in syn_data:
+        hint = f" ({syn_path_hint})" if syn_path_hint else ""
+        raise KeyError(
+            f"'cluster_ids' missing from CGT artifact{hint}. This .pt was "
+            "trained before cluster_ids persistence was added. Retrain CGT "
+            "(scripts/train/train_cgt.slurm) for this variant before running "
+            "the original-cg-quantized baseline.")
+    cluster_ids = syn_data['cluster_ids']
+    if isinstance(cluster_ids, torch.Tensor):
+        cluster_ids = cluster_ids.cpu().numpy()
+    cluster_ids = np.asarray(cluster_ids, dtype=np.int64)
+    if cluster_ids.shape[0] == N + 1:
+        cluster_ids = cluster_ids[:N]
+    elif cluster_ids.shape[0] != N:
+        raise ValueError(
+            f"cluster_ids length {cluster_ids.shape[0]} does not match "
+            f"original graph node count {N} (or N+1).")
+    return cluster_ids
+
+
+def build_original_cg_quantized_datasets(original_graph, syn_data,
+                                          trial_id=0, semi_supervised=False):
+    """Build computation-graph datasets that isolate the CGT quantization confound.
+
+    Identical to build_original_cg_datasets except train/val tree walks use
+    cluster-center features (cluster_centers[cluster_ids[node]]) at every
+    visited node instead of real continuous features. Test still uses real
+    L2-normalized features so the test path matches synthetic-cgt exactly —
+    only the training-feature support differs.
+
+    The three CG conditions decompose cleanly:
+      original-cg            -> original-cg-quantized:  pure quantization effect
+      original-cg-quantized  -> synthetic-cgt:          pure CGT generation effect
+
+    Returns:
+        train_ds, val_ds, test_ds: OriginalCompGraphDataset per split.
+    """
+    step_num, sample_num, noise_num, self_conn = _extract_cg_params(syn_data)
+
+    mask_col = trial_id + (10 if semi_supervised else 0)
+    train_ids = original_graph.ndata['train_masks'][:, mask_col].bool().nonzero(as_tuple=True)[0].numpy()
+    val_ids = original_graph.ndata['val_masks'][:, mask_col].bool().nonzero(as_tuple=True)[0].numpy()
+    test_ids = original_graph.ndata['test_masks'][:, mask_col].bool().nonzero(as_tuple=True)[0].numpy()
+
+    adj_list = dgl_to_adj_list(original_graph)
+    N = original_graph.num_nodes()
+
+    cluster_ids = _load_cluster_ids(syn_data, N)
+    cluster_centers = syn_data['cluster_centers']
+    if isinstance(cluster_centers, torch.Tensor):
+        cluster_centers = cluster_centers.cpu().numpy()
+    cluster_centers = np.asarray(cluster_centers, dtype=np.float32)
+
+    # Cluster centers are pre-L2-normalized by CGT/generator/cluster.py, so
+    # quant_features sits on the unit sphere — same manifold as real_features.
+    # Only the support cardinality differs (K directions vs N directions).
+    quant_features = cluster_centers[cluster_ids].astype(np.float32)
+    real_features = normalize(
+        original_graph.ndata['feature'].cpu().numpy().astype(np.float32),
+        axis=1, norm='l2')
+    labels = original_graph.ndata['label'].cpu().numpy().astype(np.int64)
+
+    train_ds = OriginalCompGraphDataset(
+        adj_list, quant_features, labels, train_ids,
+        step_num, sample_num, noise_num, self_conn)
+    val_ds = OriginalCompGraphDataset(
+        adj_list, quant_features, labels, val_ids,
+        step_num, sample_num, noise_num, self_conn)
+    test_ds = OriginalCompGraphDataset(
+        adj_list, real_features, labels, test_ids,
+        step_num, sample_num, noise_num, self_conn)
+
+    quant_norm = float(np.linalg.norm(quant_features, axis=1).mean())
+    real_norm = float(np.linalg.norm(real_features, axis=1).mean())
+    print(f"  Quantized CG datasets: train={len(train_ds)}, val={len(val_ds)}, "
+          f"test={len(test_ds)} | "
+          f"tree_nodes={test_ds.num_tree_nodes} "
+          f"(step={step_num}, sample={sample_num}, noise={noise_num}) | "
+          f"row-norm mean: quant={quant_norm:.4f}, real={real_norm:.4f}")
 
     return train_ds, val_ds, test_ds

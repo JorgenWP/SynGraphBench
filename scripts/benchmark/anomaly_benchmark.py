@@ -44,7 +44,8 @@ from utils import Dataset as GADBenchDataset, model_detector_dict
 from bench_utils import (
     parse_args,
     load_cgt_synthetic_data, build_cgt_datasets,
-    build_original_cg_datasets, print_comparison,
+    build_original_cg_datasets, build_original_cg_quantized_datasets,
+    print_comparison,
     load_bigg_synthetic_graph, load_bigg_real_subsampled_graph,
     apply_normalization,
     resolve_cgt_trial_paths, make_cgt_rebuild_fn,
@@ -368,6 +369,32 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
         rebuild_datasets_fn=lambda t: build_original_cg_datasets(
             data.graph, syn_data,
             trial_id=trial_id + t, semi_supervised=semi_supervised),
+        curve_records=curve_records))
+
+    # --- Quantized original data: real adjacency, cluster-center features for
+    #     train/val tree walks; real features for the test tree walk. Isolates
+    #     the K-quantization confound from CGT's sequence-model contribution.
+    #     Per-trial mode loads each trial's own .pt so cluster_ids vary with
+    #     the split — matches synthetic-cgt's per-trial behaviour below.
+    if trial_paths_probe is not None:
+        def quant_rebuild(t):
+            syn_data_t = load_cgt_synthetic_data(trial_paths_probe[t])
+            return build_original_cg_quantized_datasets(
+                data.graph, syn_data_t,
+                trial_id=trial_id + t, semi_supervised=semi_supervised)
+        quant_train0, quant_val0, quant_test0 = quant_rebuild(0)
+    else:
+        quant_train0, quant_val0, quant_test0 = build_original_cg_quantized_datasets(
+            data.graph, syn_data, trial_id=trial_id, semi_supervised=semi_supervised)
+        def quant_rebuild(t):
+            return build_original_cg_quantized_datasets(
+                data.graph, syn_data,
+                trial_id=trial_id + t, semi_supervised=semi_supervised)
+    results.extend(_run_cg_trials(
+        dataset_name, cg_models, quant_train0, quant_val0, quant_test0,
+        feat_dim, 'original-cg-quantized', trials, epochs, patience,
+        batch_size, lr, drop_rate, h_feats, num_layers,
+        rebuild_datasets_fn=quant_rebuild,
         curve_records=curve_records))
 
     # --- CGT synthetic computation graphs ---

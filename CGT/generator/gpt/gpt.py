@@ -160,6 +160,7 @@ def train_and_generate(args, graphs, feats, labels, ids):
         'train_labels': labels[ids["train"]],
         'val_labels': labels[ids["val"]],
         'cluster_centers': cluster_centers,
+        'cluster_ids': cluster_ids,
     }
 
 
