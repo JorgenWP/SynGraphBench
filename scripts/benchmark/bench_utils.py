@@ -69,10 +69,14 @@ def parse_link_args():
                           help='Edge decoder: dot product or MLP')
     lp_group.add_argument('--eval_mode', type=str, default='both',
                           choices=['original_cg', 'original_cg_quantized',
-                                   'synthetic_cgt', 'both'],
+                                   'synthetic_cgt', 'phase2_variant', 'both'],
                           help='Which CGT comp-graph paths to run in Phase 2. '
                                '"both" runs all three (original_cg, '
-                               'original_cg_quantized, synthetic_cgt).')
+                               'original_cg_quantized, synthetic_cgt). '
+                               '"phase2_variant" bundles the two that vary per '
+                               'CGT variant (original_cg_quantized + '
+                               'synthetic_cgt) so a single per-variant array '
+                               'task can run them in one process.')
     lp_group.add_argument('--skip_phase1', action='store_true',
                           help='Skip Phase 1 (full-graph GNN baseline on original data).')
 
@@ -158,6 +162,26 @@ def parse_args():
                                  'reflected in the inverted-graph cache name so '
                                  'switching modes does not silently reuse stale '
                                  'caches.')
+
+    # --- Evaluation control ---
+    # Lets a SLURM array job split the benchmark so the dataset-only baselines
+    # (Phase 1 whole-graph + original-cg) run once in a shared task and the
+    # per-CGT-variant baselines (quantized + synthetic-cgt) run in independent
+    # tasks. Mirrors --eval_mode / --skip_phase1 in parse_link_args.
+    eval_group = parser.add_argument_group('Evaluation control')
+    eval_group.add_argument('--eval_mode', type=str, default='both',
+                            choices=['original_cg', 'original_cg_quantized',
+                                     'synthetic_cgt', 'phase2_variant', 'both'],
+                            help='Which CGT comp-graph paths to run in Phase 2. '
+                                 '"both" runs all three (original_cg, '
+                                 'original_cg_quantized, synthetic_cgt). '
+                                 '"phase2_variant" bundles the two that vary '
+                                 'per CGT variant (original_cg_quantized + '
+                                 'synthetic_cgt) so a single per-variant array '
+                                 'task can run them in one process.')
+    eval_group.add_argument('--skip_phase1', action='store_true',
+                            help='Skip Phase 1 (whole-graph GNN baseline on '
+                                 'original data).')
 
     # --- Training ---
     train_group = parser.add_argument_group('Training')

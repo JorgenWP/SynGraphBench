@@ -311,18 +311,24 @@ def _run_cg_trials(dataset_name, cg_models, train_ds, val_ds, test_ds,
 def evaluate_models_cgt(dataset_name, models, data_dir,
                         trials, epochs, patience, syn_path,
                         batch_size, lr, drop_rate, h_feats, num_layers,
-                        trial_id=0, semi_supervised=False,
+                        trial_id=0, semi_supervised=False, eval_mode='both',
                         curve_records=None):
     """Evaluate GNN models on CGT computation graphs.
 
-    Runs two comparisons:
+    Runs up to three comparisons, gated by ``eval_mode``:
       1. Original-CG: train/val/test all built as computation graphs
          from the original graph (baseline for the CG format). Each trial
-         uses a different pre-stored mask split (trial_id + t).
-      2. Synthetic-CGT: train/val from CGT-generated cluster-center
-         sequences, test from original graph computation graphs. The
-         synthetic split is fixed in the .pt file, so trials here only
-         vary the random seed (initialization variance).
+         uses a different pre-stored mask split (trial_id + t). Depends
+         only on CG params, so it's invariant across k/cluster_num
+         variants — gate value: 'original_cg' or 'both'.
+      2. Original-CG-Quantized: real adjacency, cluster-center features
+         for train/val tree walks. Varies per CGT variant (depends on
+         cluster_ids / cluster_centers). Gate value: 'original_cg_quantized',
+         'phase2_variant', or 'both'.
+      3. Synthetic-CGT: train/val from CGT-generated cluster-center
+         sequences, test from original graph computation graphs. Varies
+         per CGT variant. Gate value: 'synthetic_cgt', 'phase2_variant',
+         or 'both'.
     """
     results = []
 
@@ -360,81 +366,84 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
     # --- Original data as computation graphs (CG baseline) ---
     # Rebuild datasets each trial so that different mask splits are used,
     # matching the same split-varying behaviour as the whole-graph path.
-    orig_train0, orig_val0, orig_test0 = build_original_cg_datasets(
-        data.graph, syn_data, trial_id=trial_id, semi_supervised=semi_supervised)
-    results.extend(_run_cg_trials(
-        dataset_name, cg_models, orig_train0, orig_val0, orig_test0,
-        feat_dim, 'original-cg', trials, epochs, patience,
-        batch_size, lr, drop_rate, h_feats, num_layers,
-        rebuild_datasets_fn=lambda t: build_original_cg_datasets(
-            data.graph, syn_data,
-            trial_id=trial_id + t, semi_supervised=semi_supervised),
-        curve_records=curve_records))
+    if eval_mode in ('original_cg', 'both'):
+        orig_train0, orig_val0, orig_test0 = build_original_cg_datasets(
+            data.graph, syn_data, trial_id=trial_id, semi_supervised=semi_supervised)
+        results.extend(_run_cg_trials(
+            dataset_name, cg_models, orig_train0, orig_val0, orig_test0,
+            feat_dim, 'original-cg', trials, epochs, patience,
+            batch_size, lr, drop_rate, h_feats, num_layers,
+            rebuild_datasets_fn=lambda t: build_original_cg_datasets(
+                data.graph, syn_data,
+                trial_id=trial_id + t, semi_supervised=semi_supervised),
+            curve_records=curve_records))
 
     # --- Quantized original data: real adjacency, cluster-center features for
     #     train/val tree walks; real features for the test tree walk. Isolates
     #     the K-quantization confound from CGT's sequence-model contribution.
     #     Per-trial mode loads each trial's own .pt so cluster_ids vary with
     #     the split — matches synthetic-cgt's per-trial behaviour below.
-    if trial_paths_probe is not None:
-        def quant_rebuild(t):
-            syn_data_t = load_cgt_synthetic_data(trial_paths_probe[t])
-            return build_original_cg_quantized_datasets(
-                data.graph, syn_data_t,
-                trial_id=trial_id + t, semi_supervised=semi_supervised)
-        quant_train0, quant_val0, quant_test0 = quant_rebuild(0)
-    else:
-        quant_train0, quant_val0, quant_test0 = build_original_cg_quantized_datasets(
-            data.graph, syn_data, trial_id=trial_id, semi_supervised=semi_supervised)
-        def quant_rebuild(t):
-            return build_original_cg_quantized_datasets(
-                data.graph, syn_data,
-                trial_id=trial_id + t, semi_supervised=semi_supervised)
-    results.extend(_run_cg_trials(
-        dataset_name, cg_models, quant_train0, quant_val0, quant_test0,
-        feat_dim, 'original-cg-quantized', trials, epochs, patience,
-        batch_size, lr, drop_rate, h_feats, num_layers,
-        rebuild_datasets_fn=quant_rebuild,
-        curve_records=curve_records))
+    if eval_mode in ('original_cg_quantized', 'phase2_variant', 'both'):
+        if trial_paths_probe is not None:
+            def quant_rebuild(t):
+                syn_data_t = load_cgt_synthetic_data(trial_paths_probe[t])
+                return build_original_cg_quantized_datasets(
+                    data.graph, syn_data_t,
+                    trial_id=trial_id + t, semi_supervised=semi_supervised)
+            quant_train0, quant_val0, quant_test0 = quant_rebuild(0)
+        else:
+            quant_train0, quant_val0, quant_test0 = build_original_cg_quantized_datasets(
+                data.graph, syn_data, trial_id=trial_id, semi_supervised=semi_supervised)
+            def quant_rebuild(t):
+                return build_original_cg_quantized_datasets(
+                    data.graph, syn_data,
+                    trial_id=trial_id + t, semi_supervised=semi_supervised)
+        results.extend(_run_cg_trials(
+            dataset_name, cg_models, quant_train0, quant_val0, quant_test0,
+            feat_dim, 'original-cg-quantized', trials, epochs, patience,
+            batch_size, lr, drop_rate, h_feats, num_layers,
+            rebuild_datasets_fn=quant_rebuild,
+            curve_records=curve_records))
 
     # --- CGT synthetic computation graphs ---
     # When per-trial .pt files exist (one per split), load a different file
     # each trial so the synthetic split varies — matching the original-CG
     # baseline. Otherwise fall back to single-file mode (seed-only variation).
-    trial_paths = resolve_cgt_trial_paths(syn_path, trials)
+    if eval_mode in ('synthetic_cgt', 'phase2_variant', 'both'):
+        trial_paths = resolve_cgt_trial_paths(syn_path, trials)
 
-    if trial_paths is not None:
-        print(f"  Found {len(trial_paths)} per-trial .pt files — varying splits across trials.")
-        syn_data_0 = load_cgt_synthetic_data(trial_paths[0])
-        syn_train0, syn_val0, test_ds0 = build_cgt_datasets(data.graph, syn_data_0)
-        rebuild_fn = make_cgt_rebuild_fn(
-            data.graph, trial_paths,
-            trial_id_offset=trial_id, semi_supervised=semi_supervised)
-        results.extend(_run_cg_trials(
-            dataset_name, cg_models, syn_train0, syn_val0, test_ds0,
-            feat_dim, 'synthetic-cgt', trials, epochs, patience,
-            batch_size, lr, drop_rate, h_feats, num_layers,
-            rebuild_datasets_fn=rebuild_fn,
-            curve_records=curve_records))
-    else:
-        # Single-file mode: verify the .pt was trained under the same
-        # trial_id / semi_supervised the benchmark is running with.
-        mask_col = trial_id + (10 if semi_supervised else 0)
-        single_test_ids = data.graph.ndata['test_masks'][:, mask_col].bool().nonzero(
-            as_tuple=True)[0].numpy()
-        _assert_pt_alignment(
-            syn_data,
-            expected_trial_id=trial_id,
-            expected_semi_supervised=semi_supervised,
-            expected_test_ids=single_test_ids,
-            source_label='synthetic-cgt[single-file]',
-        )
-        syn_train, syn_val, test_ds = build_cgt_datasets(data.graph, syn_data)
-        results.extend(_run_cg_trials(
-            dataset_name, cg_models, syn_train, syn_val, test_ds,
-            feat_dim, 'synthetic-cgt', trials, epochs, patience,
-            batch_size, lr, drop_rate, h_feats, num_layers,
-            curve_records=curve_records))
+        if trial_paths is not None:
+            print(f"  Found {len(trial_paths)} per-trial .pt files — varying splits across trials.")
+            syn_data_0 = load_cgt_synthetic_data(trial_paths[0])
+            syn_train0, syn_val0, test_ds0 = build_cgt_datasets(data.graph, syn_data_0)
+            rebuild_fn = make_cgt_rebuild_fn(
+                data.graph, trial_paths,
+                trial_id_offset=trial_id, semi_supervised=semi_supervised)
+            results.extend(_run_cg_trials(
+                dataset_name, cg_models, syn_train0, syn_val0, test_ds0,
+                feat_dim, 'synthetic-cgt', trials, epochs, patience,
+                batch_size, lr, drop_rate, h_feats, num_layers,
+                rebuild_datasets_fn=rebuild_fn,
+                curve_records=curve_records))
+        else:
+            # Single-file mode: verify the .pt was trained under the same
+            # trial_id / semi_supervised the benchmark is running with.
+            mask_col = trial_id + (10 if semi_supervised else 0)
+            single_test_ids = data.graph.ndata['test_masks'][:, mask_col].bool().nonzero(
+                as_tuple=True)[0].numpy()
+            _assert_pt_alignment(
+                syn_data,
+                expected_trial_id=trial_id,
+                expected_semi_supervised=semi_supervised,
+                expected_test_ids=single_test_ids,
+                source_label='synthetic-cgt[single-file]',
+            )
+            syn_train, syn_val, test_ds = build_cgt_datasets(data.graph, syn_data)
+            results.extend(_run_cg_trials(
+                dataset_name, cg_models, syn_train, syn_val, test_ds,
+                feat_dim, 'synthetic-cgt', trials, epochs, patience,
+                batch_size, lr, drop_rate, h_feats, num_layers,
+                curve_records=curve_records))
 
     del data
     return results
@@ -637,22 +646,27 @@ def main():
     all_curve_records = []
 
     # --- Phase 1: Evaluate on original data ---
-    print("\n" + "#" * 80)
-    print("# PHASE 1: EVALUATING ON ORIGINAL DATA")
-    print("#" * 80)
-    t_phase1 = time.time()
+    if args.skip_phase1:
+        print("\n" + "#" * 80)
+        print("# PHASE 1: SKIPPED (--skip_phase1)")
+        print("#" * 80)
+    else:
+        print("\n" + "#" * 80)
+        print("# PHASE 1: EVALUATING ON ORIGINAL DATA")
+        print("#" * 80)
+        t_phase1 = time.time()
 
-    for dataset_name in datasets:
-        results = evaluate_models(
-            dataset_name, models, args.data_dir,
-            args.trials, args.semi_supervised, args.trial_id,
-            args.epochs, args.patience,
-            args.lr, args.drop_rate, args.h_feats, args.num_layers,
-            curve_records=all_curve_records)
-        all_results.extend(results)
+        for dataset_name in datasets:
+            results = evaluate_models(
+                dataset_name, models, args.data_dir,
+                args.trials, args.semi_supervised, args.trial_id,
+                args.epochs, args.patience,
+                args.lr, args.drop_rate, args.h_feats, args.num_layers,
+                curve_records=all_curve_records)
+            all_results.extend(results)
 
-    phase1_elapsed = time.time() - t_phase1
-    print(f"\n[Phase 1: original-data] {format_duration(phase1_elapsed)}")
+        phase1_elapsed = time.time() - t_phase1
+        print(f"\n[Phase 1: original-data] {format_duration(phase1_elapsed)}")
 
     # --- Phase 2: Evaluate on synthetic data ---
     print("\n" + "#" * 80)
@@ -707,6 +721,7 @@ def main():
                 args.h_feats, args.num_layers,
                 trial_id=args.trial_id,
                 semi_supervised=bool(args.semi_supervised),
+                eval_mode=args.eval_mode,
                 curve_records=all_curve_records)
         else:
             # Full graph (BiGG, etc.): train+val on synthetic, test on original.
@@ -806,13 +821,23 @@ def main():
     print(f"\n[Phase 2: synthetic-data] {format_duration(phase2_elapsed)}")
 
     # --- Save and display results ---
+    # Suffix filenames when running a non-default subset so parallel SLURM array
+    # tasks (one per eval_mode) don't clobber each other's files.
+    if args.skip_phase1 or args.eval_mode != 'both':
+        phase_tag = 'phase2only' if args.skip_phase1 else 'allphases'
+        results_stem = f'evaluation_results__{phase_tag}_{args.eval_mode}'
+        curves_stem = f'divergence_curves__{phase_tag}_{args.eval_mode}'
+    else:
+        results_stem = 'evaluation_results'
+        curves_stem = 'divergence_curves'
+
     if all_results:
         results_df = pd.DataFrame(all_results)
 
-        xlsx_path = os.path.join(args.output_dir, 'evaluation_results.xlsx')
+        xlsx_path = os.path.join(args.output_dir, f'{results_stem}.xlsx')
         results_df.to_excel(xlsx_path, index=False)
 
-        csv_path = os.path.join(args.output_dir, 'evaluation_results.csv')
+        csv_path = os.path.join(args.output_dir, f'{results_stem}.csv')
         results_df.to_csv(csv_path, index=False)
 
         print(f"\nResults saved to:\n  {xlsx_path}\n  {csv_path}")
@@ -822,7 +847,7 @@ def main():
 
     if all_curve_records:
         curves_df = pd.DataFrame(all_curve_records)
-        curves_path = os.path.join(args.output_dir, 'divergence_curves.csv')
+        curves_path = os.path.join(args.output_dir, f'{curves_stem}.csv')
         curves_df.to_csv(curves_path, index=False)
         print(f"  Divergence curves saved to: {curves_path}")
 

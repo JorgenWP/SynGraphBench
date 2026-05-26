@@ -394,7 +394,7 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
     #     isolates CGT's sequence-model contribution from the K-quantization
     #     confound. Train/val features are quantized; neighbour/test features
     #     remain real and continuous (same as synthetic-cgt). ---
-    if eval_mode in ('original_cg_quantized', 'both'):
+    if eval_mode in ('original_cg_quantized', 'phase2_variant', 'both'):
         def make_quant_graph(t, expected_test_edges):
             syn_data = load_cgt_synthetic_data(trial_paths[t])
             _assert_link_pt_alignment(
@@ -413,7 +413,7 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
             curve_records=curve_records))
 
     # --- Synthetic-CGT: per-trial hybrid graph built from per-trial .pt ---
-    if eval_mode in ('synthetic_cgt', 'both'):
+    if eval_mode in ('synthetic_cgt', 'phase2_variant', 'both'):
         def make_syn_graph(t, expected_test_edges):
             syn_data = load_cgt_synthetic_data(trial_paths[t])
             _assert_link_pt_alignment(
