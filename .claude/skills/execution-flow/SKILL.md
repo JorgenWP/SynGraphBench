@@ -162,9 +162,10 @@ sbatch --export=ALL,DATASET=tolokers,MODE=shared,N_TRIALS=40 \
 sbatch --export=ALL,DATASET=questions,MODE=shared,N_TRIALS=40 \
        experiments/bo_tuning/slurm/bo_coordinator.slurm
 
-# weibo per_split — one array submission, 5 tasks (recommended over weibo shared:
-# 5×90 min trials instead of 1×7.5h trials, fits in normal walltime). SPLIT_ID
-# is auto-derived from SLURM_ARRAY_TASK_ID by the template. %5 caps concurrent tasks.
+# weibo per_split — one array submission, 5 tasks. SPLIT_ID is auto-derived
+# from SLURM_ARRAY_TASK_ID by the template. %5 caps concurrent tasks. weibo
+# per-split BiGG train time is comparable to tolokers (~30 min), not the older
+# 90 min figure — the same walltimes work.
 sbatch --array=0-4%5 \
        --export=ALL,DATASET=weibo,MODE=per_split,N_TRIALS=20 \
        experiments/bo_tuning/slurm/bo_coordinator.slurm
@@ -173,7 +174,17 @@ sbatch --array=0-4%5 \
 sbatch --wrap="python -m experiments.bo_tuning.final_report --dataset tolokers --mode shared"
 ```
 
-Recommendation per dataset: **tolokers, questions → shared**; **weibo → per_split×5** (natural parallelism, sidesteps the 7.5h-per-shared-trial walltime problem).
+Recommendation per dataset: run **both shared and per_split×5** for tolokers/questions/weibo when you can. weibo per-split BiGG time ≈ tolokers (~30 min); the same `--time=50h` shared / `--time=30h` per_split walltimes work across all three.
+
+### Subsample Search (Cluster)
+
+Three SLURM templates in `scripts/subsample_search/` drive the §3 sampler grid on IDUN. All three run in the `GADBench` env (not `bigg` — needs xgboost/catboost/sklearn; see also the dryrun's `splitsource.py` which loads via `dgl.load_graphs`). Each template declares empty config vars at the top — edit before sbatch:
+
+* **`plan_grid.slurm`** (CPU) — runs `experiments.subsample_search.plan_grid` for one dataset. Vars: `DATASET`, `EXCLUDE_METHODS` (e.g. `metis` for tfinance), `SPLIT_ID`, `GPU_VRAM_GB`, `K_FLOOR`, `BUDGET_S`, `TARGET_FULL_EPOCHS`. Writes `artifacts/grid/plan.csv` rows for that dataset.
+* **`run_grid.slurm`** (GPU 80g, 24h) — runs `experiments.subsample_search.run_grid` for one dataset. Vars: `DATASETS`, `EXCLUDE_METHODS`, `METHODS`, `PARAMS_TAGS`, `SPLITS`, `OUT_DIR` (use per-dataset to avoid CSV races with parallel jobs), `PLAN_CSV`, `EPOCHS`, `PATIENCE`. Resumable via `utility.csv`.
+* **`compute_baselines.slurm`** (GPU 32g, 4h) — runs `experiments.subsample_search.compute_baselines --datasets $DATASETS`. The script's hardcoded `DATASETS = ['tolokers', 'questions', 'weibo', 'reddit']` default is unchanged; pass yelp/tfinance explicitly via the SLURM var.
+
+Both `plan_grid.py` and `run_grid.py` accept `--exclude_methods <m1,m2,...>` to drop methods after enumeration. METIS scales poorly on tfinance (~21M edges) — set `EXCLUDE_METHODS=metis` on the tfinance templates. `run_grid.py`'s `--exclude_methods` is applied after `--methods`/`--params_tags` so they compose.
 
 ### Environment Setup
 

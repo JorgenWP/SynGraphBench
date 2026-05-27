@@ -32,7 +32,7 @@ from sampling import sample_with_method
 from masking import build_combined_graph
 from benchmark import run_models
 from structure_stats import compute_subgraph_stats
-from grid import enumerate_configs
+from grid import enumerate_configs, enumerate_planned_configs
 
 
 MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph', 'XGBoost']
@@ -46,21 +46,29 @@ def split_seed(split_id: int) -> int:
 
 
 def _assert_size_params_fit(dataset: str, split_id: int, n_lcc: int, configs: list) -> None:
-    """Fail fast if any config's K * target_size exceeds the train+val LCC.
-    Over-saturation makes M=1 unreachable (seed pool exhausted before K draws)
-    and inflates multiplicity under M=∞."""
+    """Warn (don't fail) when K * target_size exceeds the train+val LCC.
+
+    For M=1 the sampler will exhaust its seed pool and `num_subgraphs_actual`
+    will fall below K. For M>1 or M=∞ overlap is expected. Either way the run
+    proceeds — only the realized K may differ from the planned K."""
     for cfg in configs:
         ts = cfg['target_size']
         if ts is None:
-            continue                        # depth-only configs don't apply
-        budget = cfg['K'] * ts
-        if budget > n_lcc:
-            raise AssertionError(
-                f'[{dataset} split {split_id}] config {cfg["params_tag"]!r} '
-                f'asks for K * target_size = {cfg["K"]} * {ts} = {budget} nodes '
-                f'but the train+val LCC has only {n_lcc} nodes. '
-                f'Lower target_size in grid.PER_DATASET_TARGET_SIZE.'
-            )
+            continue
+        K = cfg['K']
+        if K <= 0:
+            continue
+        budget = K * ts
+        if budget <= n_lcc:
+            continue
+        M = cfg.get('multiplicity_cap')
+        if M == 1:
+            print(f'  [warn] {cfg["params_tag"]} M=1 budget {K}*{ts}={budget} > '
+                  f'LCC {n_lcc} — expect num_subgraphs_actual ≤ {n_lcc // ts}',
+                  flush=True)
+        else:
+            print(f'  [warn] {cfg["params_tag"]} K*ts={budget} > LCC {n_lcc} '
+                  f'— overlap expected under M={M}', flush=True)
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +201,8 @@ def main() -> None:
                     help='Comma-separated dataset names.')
     ap.add_argument('--methods', default=None,
                     help='Comma-separated subset of method names; default = all.')
+    ap.add_argument('--exclude_methods', default=None,
+                    help='Comma-separated method names to skip after --methods/--params_tags filtering.')
     ap.add_argument('--params_tags', default=None,
                     help='Comma-separated explicit params_tags; if provided, overrides --methods.')
     ap.add_argument('--data_dir', default=None)
@@ -207,6 +217,11 @@ def main() -> None:
                          'Defaults to <project_root>/datasets/bigg_subsamples.')
     ap.add_argument('--no_persist', action='store_true',
                     help='Skip writing subsamples to disk.')
+    ap.add_argument('--plan_csv', default=None,
+                    help='Path to a plan.csv produced by plan_grid.py. When set, '
+                         'each cell\'s K is taken from the plan and non-ok cells '
+                         'are dropped. Default: artifacts/grid/plan.csv if it '
+                         'exists. Pass an empty string to force legacy DEFAULT_K.')
     args = ap.parse_args()
 
     project_root = os.path.abspath(os.path.join(_HERE, '..', '..'))
@@ -218,6 +233,11 @@ def main() -> None:
 
     utility_csv = os.path.join(args.out_dir, 'utility.csv')
     structure_csv = os.path.join(args.out_dir, 'structure.csv')
+
+    # Plan CSV default: same dir as utility/structure. Empty string disables planning.
+    if args.plan_csv is None:
+        args.plan_csv = os.path.join(args.out_dir, 'plan.csv')
+    use_plan = bool(args.plan_csv) and os.path.exists(args.plan_csv)
 
     persist_root = None
     if not args.no_persist:
@@ -232,11 +252,14 @@ def main() -> None:
                      if args.methods else None)
     tag_filter = ([t.strip() for t in args.params_tags.split(',')]
                   if args.params_tags else None)
+    exclude_filter = ({m.strip() for m in args.exclude_methods.split(',')}
+                      if args.exclude_methods else None)
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f'== grid run | datasets={datasets} | splits={args.splits} | device={device} ==')
     print(f'   utility CSV: {utility_csv}')
     print(f'   structure CSV: {structure_csv}')
+    print(f'   plan CSV:    {args.plan_csv if use_plan else "(disabled — using DEFAULT_K)"}')
     if persist_root is not None:
         print(f'   persist dir:  {persist_root}')
     else:
@@ -248,11 +271,16 @@ def main() -> None:
     t_start = time.time()
     n_done = 0
     for dataset in datasets:
-        configs = enumerate_configs(dataset)
+        if use_plan:
+            configs = enumerate_planned_configs(dataset, args.plan_csv)
+        else:
+            configs = enumerate_configs(dataset)
         if tag_filter is not None:
             configs = [c for c in configs if c['params_tag'] in tag_filter]
         elif method_filter is not None:
             configs = [c for c in configs if c['method'] in method_filter]
+        if exclude_filter is not None:
+            configs = [c for c in configs if c['method'] not in exclude_filter]
 
         print(f'\n=== {dataset}: {len(configs)} configs × {len(trials)} trials × '
               f'{len(MODELS)} models ===')
