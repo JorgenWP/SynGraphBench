@@ -8,3 +8,4 @@ output/
 .vscode
 /experiments/bigg_capacity/.capacity_cache/
 experiments/bigg_capacity/timing_logs/
+experiments/subsample_search/artifacts/
