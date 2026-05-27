@@ -7,7 +7,7 @@
 # training subgraph.
 #
 # Usage:
-#   bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor] [mdn_base] [kl_schedule] [kl_anneal_epochs] [kl_cycle_epochs] [kl_ramp_ratio] [load_subsamples] [subsampling_config] [split_id] [recal_momentum]
+#   bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor] [mdn_base] [kl_schedule] [kl_anneal_epochs] [kl_cycle_epochs] [kl_ramp_ratio] [load_subsamples] [subsampling_config] [split_id] [recal_momentum] [min_subgraph_nodes]
 #
 # normalize:        feature normalisation — one of "zscore", "minmax", "row", "quantile", or "none" (default: none)
 # loss_weights:     comma-separated cont,label weights relative to struct, applied after dynamic normalization (default: 1,1)
@@ -101,6 +101,7 @@ LOAD_SUBSAMPLES="${34:-false}"
 SUBSAMPLING_CONFIG="${35:-}"
 SPLIT_ID="${36:-0}"
 RECAL_MOMENTUM="${37:-1.0}"
+MIN_SUBGRAPH_NODES="${38:-0}"
 SAVE_MODEL="${SAVE_MODEL:-false}"
 SAVE_MODEL_EVERY="${SAVE_MODEL_EVERY:-0}"
 
@@ -248,6 +249,7 @@ python -m bigg.extension.pipeline \
   -kl_cycle_epochs "$KL_CYCLE_EPOCHS" \
   -kl_ramp_ratio "$KL_RAMP_RATIO" \
   -recal_momentum "$RECAL_MOMENTUM" \
+  -min_subgraph_nodes "$MIN_SUBGRAPH_NODES" \
   $SAVE_MODEL_FLAG \
   -save_model_every "$SAVE_MODEL_EVERY" \
   -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LOSS_WEIGHTS}_${HETERO_FEAT}_lvf${LOGVAR_FLOOR}_bin${BINARY_FEAT}_vae${VAE_FEAT}_vd${VAE_DIM}_kl${KL_WEIGHT}_cat${CAT_FEAT}_nb${N_BINS}_mdn${MDN_FEAT}_k${MDN_COMPONENTS}_recalM${RECAL_MOMENTUM}_${SUBSAMPLE_TAG}"

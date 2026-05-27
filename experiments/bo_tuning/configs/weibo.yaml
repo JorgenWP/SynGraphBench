@@ -39,6 +39,7 @@ fixed_hp:
   load_subsamples:    True
   subsampling_config: metis_K15
   recal_momentum:     1.0
+  min_subgraph_nodes: 0          # drop loaded partitions below this many nodes; 0 = no filter
   subsample_size:     2000
   burn_prob:          0.3
   num_subgraphs:      ''

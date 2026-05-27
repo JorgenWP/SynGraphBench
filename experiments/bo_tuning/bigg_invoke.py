@@ -178,9 +178,9 @@ def output_dir_is_complete(out_dir: str, n_subgraphs: int) -> bool:
 
 def _positional_args(fixed: Dict[str, Any], params: Dict[str, float],
                      split_id: int) -> list:
-    """Build the 37 positional args for ``train_bigg_subsample.sh``.
+    """Build the 38 positional args for ``train_bigg_subsample.sh``.
 
-    Order must match ``scripts/train/train_bigg_subsample.sh:67-103``.
+    Order must match ``scripts/train/train_bigg_subsample.sh:67-104``.
     """
     return [
         fixed['dataset'],                               # 1
@@ -220,6 +220,7 @@ def _positional_args(fixed: Dict[str, Any], params: Dict[str, float],
         str(fixed.get('subsampling_config', '') or ''),  # 35
         str(split_id),                                  # 36
         str(fixed['recal_momentum']),                   # 37
+        str(fixed.get('min_subgraph_nodes', 0)),        # 38
     ]
 
 

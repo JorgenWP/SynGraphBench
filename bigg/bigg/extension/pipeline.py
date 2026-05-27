@@ -160,6 +160,10 @@ def main():
     pipeline_parser.add_argument('-split_id', type=int, default=0,
                                  help='GADBench split id (0..4) selecting which '
                                       'split<id>.pkl to load (default: 0).')
+    pipeline_parser.add_argument('-min_subgraph_nodes', type=int, default=0,
+                                 help='Drop loaded partitions with fewer than N '
+                                      'nodes. Applied after pickle load under '
+                                      '--load_subsamples; default 0 = no filter.')
     pipeline_parser.add_argument('-kl_schedule', type=str, default='none',
                                  choices=['none', 'linear', 'cyclic'],
                                  help='KL annealing schedule for the VAE coefficient. '
@@ -434,6 +438,17 @@ def main():
                     sg_simple.add_edges_from(sg_nx.edges())
                     sg_nx = sg_simple
                 raw_partitions.append((sg_nx, sub_nd, full_idx))
+            if pipeline_args.min_subgraph_nodes > 0:
+                kept, dropped_sizes = [], []
+                for sg, nd, fi in raw_partitions:
+                    if sg.number_of_nodes() >= pipeline_args.min_subgraph_nodes:
+                        kept.append((sg, nd, fi))
+                    else:
+                        dropped_sizes.append(sg.number_of_nodes())
+                if dropped_sizes:
+                    print(f'  Filtered {len(dropped_sizes)} partitions below '
+                          f'{pipeline_args.min_subgraph_nodes} nodes (sizes: {dropped_sizes})')
+                raw_partitions = kept
             print(f'  Subgraph sizes: {[sg.number_of_nodes() for sg, _, _ in raw_partitions]}')
 
         elif pipeline_args.subsample:
