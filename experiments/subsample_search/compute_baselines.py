@@ -5,6 +5,7 @@ Hyperparams are pinned to match `run_grid.py`: epochs=200, patience=50, lr=0.01,
 drop_rate=0.0, h_feats=32, num_layers=2."""
 from __future__ import annotations
 
+import argparse
 import os
 import random
 import sys
@@ -24,8 +25,8 @@ from utils import Dataset as GADBenchDataset, model_detector_dict  # noqa: E402
 
 
 MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph', 'XGBoost']
-DATASETS = ['tolokers', 'questions', 'weibo']
-SEEDS = [3407, 3417, 3427]
+DATASETS = ['tolokers', 'questions', 'weibo', 'reddit']
+SEEDS = [3407, 3417, 3427, 3437, 3447]
 
 
 def _set_seed(seed: int) -> None:
@@ -37,6 +38,12 @@ def _set_seed(seed: int) -> None:
 
 
 def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--datasets', default=','.join(DATASETS),
+                    help='Comma-separated dataset names. Default: all.')
+    args = ap.parse_args()
+    datasets = [d.strip() for d in args.datasets.split(',')]
+
     out_path = os.path.join(_HERE, 'artifacts', 'baselines.csv')
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -50,7 +57,7 @@ def main():
     else:
         done = set()
 
-    for dataset in DATASETS:
+    for dataset in datasets:
         for split_id, seed in enumerate(SEEDS):
             for model_name in MODELS:
                 if (dataset, model_name, split_id) in done:
