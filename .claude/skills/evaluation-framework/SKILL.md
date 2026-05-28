@@ -7,7 +7,7 @@ description: GADBench downstream evaluation framework — anomaly detection, lin
 
 GADBench serves as the **downstream evaluation framework** for both generative paradigms. It supports two distinct tasks.
 
-* **Environment:** `GADBench` Conda environment (Python 3.10, PyTorch 1.13.1, DGL).
+* **Environment:** `bigg` Conda environment (Python 3.10, PyTorch 2.4.1, DGL 2.x) — unified env carrying BiGG + the GADBench dep set (xgboost, catboost, pyod, sklearn, sympy, bidict, openpyxl).
 
 ---
 

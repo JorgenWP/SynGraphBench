@@ -8,7 +8,7 @@ results/evaluate/bigg/tolokers/.../evaluation_results.csv.
 
 Usage:
     cd <project root>
-    conda activate GADBench
+    conda activate bigg
     python experiments/subsample_search/run_validation.py
 """
 from __future__ import annotations

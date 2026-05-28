@@ -55,12 +55,12 @@ tune_portion:     tune
 models: [GCN, GIN, GraphSAGE, XGBGraph, XGBoost]
 
 benchmark:
-  # Benchmark runs in the GADBench env (needs xgboost, dgl, the rest).
-  # The BO coordinator (in the bigg env) resolves this name to an absolute
-  # python via `conda info --json` at runtime, so the same config works on
-  # any host where the env is named "GADBench". Override with `python: /abs/path`
-  # to bypass the lookup.
-  conda_env:  GADBench
+  # Benchmark runs in the bigg env (unified env carrying BiGG + GADBench deps).
+  # The BO coordinator (also in bigg) resolves this name to an absolute python
+  # via `conda info --json` at runtime, so the same config works on any host
+  # where the env is named "bigg". Override with `python: /abs/path` to bypass
+  # the lookup.
+  conda_env:  bigg
   epochs:     200
   patience:   50
   lr:         0.01

@@ -134,7 +134,7 @@ Output saved to `datasets/synthetic/cgt/<dataset>/<task>/<variant>/<variant>_t{t
 ### BO Hyperparameter Tuning
 
 **`python -m experiments.bo_tuning.coordinator --dataset {tolokers|questions|weibo} --mode {shared|per_split} [--split_id N] [--n_trials N] [--max_trials N] [--max_wall_seconds S] [--study_version v1]`**
-Bayesian-optimization tuner over BiGG's `lr`, `kl_weight`, `lw_cont`, `lw_label` at privacy=0. Runs in the `bigg` conda env; spawns the benchmark in the `GADBench` env (env name in `configs/{dataset}.yaml::benchmark.conda_env`, resolved at runtime via `conda info --json` so the same config works on any host). Resumable: re-launching against the same study DB picks up where it left off; `cleanup_stale.py` (auto-called on start) re-enqueues trials killed by walltime.
+Bayesian-optimization tuner over BiGG's `lr`, `kl_weight`, `lw_cont`, `lw_label` at privacy=0. Runs entirely in the unified `bigg` conda env — coordinator and benchmark subprocess both (env name in `configs/{dataset}.yaml::benchmark.conda_env`, resolved at runtime via `conda info --json` so the same config works on any host). Resumable: re-launching against the same study DB picks up where it left off; `cleanup_stale.py` (auto-called on start) re-enqueues trials killed by walltime.
 
 * `shared` mode → one Optuna study per dataset; each trial trains all 5 splits and the BO objective is `CVaR_60%(split_gap) − 0.2·n_collapsed_splits`.
 * `per_split` mode → 5 independent studies per dataset (one per split); each trial trains 1 split; objective degenerates to `mean_m(gap[m,s]) − 0.2·collapse_indicator`.
@@ -179,7 +179,7 @@ Recommendation per dataset: run **both shared and per_split×5** for tolokers/qu
 
 ### Subsample Search (Cluster)
 
-Three SLURM templates in `scripts/subsample_search/` drive the §3 sampler grid on IDUN. All three run in the `GADBench` env (not `bigg` — needs xgboost/catboost/sklearn; see also the dryrun's `splitsource.py` which loads via `dgl.load_graphs`). Each template declares empty config vars at the top — edit before sbatch:
+Three SLURM templates in `scripts/subsample_search/` drive the §3 sampler grid on IDUN. All three run in the unified `bigg` env (which carries the GADBench dep set — xgboost/catboost/sklearn — alongside BiGG; see also the dryrun's `splitsource.py` which loads via `dgl.load_graphs`). Each template declares empty config vars at the top — edit before sbatch:
 
 * **`plan_grid.slurm`** (CPU) — runs `experiments.subsample_search.plan_grid` for one dataset. Vars: `DATASET`, `EXCLUDE_METHODS` (e.g. `metis` for tfinance), `SPLIT_ID`, `GPU_VRAM_GB`, `K_FLOOR`, `BUDGET_S`, `TARGET_FULL_EPOCHS`. Writes `artifacts/grid/plan.csv` rows for that dataset.
 * **`run_grid.slurm`** (GPU 80g, 24h) — runs `experiments.subsample_search.run_grid` for one dataset. Vars: `DATASETS`, `EXCLUDE_METHODS`, `METHODS`, `PARAMS_TAGS`, `SPLITS`, `OUT_DIR` (use per-dataset to avoid CSV races with parallel jobs), `PLAN_CSV`, `EPOCHS`, `PATIENCE`. Resumable via `utility.csv`.

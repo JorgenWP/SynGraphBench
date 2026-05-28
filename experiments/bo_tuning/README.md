@@ -6,10 +6,10 @@ privacy sweep doesn't conflate capacity sensitivity with privacy sensitivity.
 
 ## Environment assumptions
 
-The coordinator runs in the **`bigg`** conda env (Optuna + BiGG installed
-there). The benchmark subprocess runs in the **`GADBench`** conda env
-(xgboost, dgl, the rest). Configs reference the benchmark env *by name*
-(`conda_env: GADBench`); the coordinator resolves the absolute python
+Coordinator and benchmark subprocess both run in the **`bigg`** conda env
+(unified env carrying BiGG + GADBench deps — xgboost, catboost, pyod,
+sklearn, sympy, bidict, openpyxl). Configs reference the benchmark env
+*by name* (`conda_env: bigg`); the coordinator resolves the absolute python
 binary via `conda info --json` at startup, so the same configs work on any
 host — local laptop or IDUN. If the cluster's env is named differently,
 edit the YAML's `conda_env`, or override with `python: /abs/path` to

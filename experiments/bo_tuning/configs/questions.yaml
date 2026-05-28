@@ -49,7 +49,7 @@ tune_portion:     tune
 models: [GCN, GIN, GraphSAGE, XGBGraph, XGBoost]
 
 benchmark:
-  conda_env:  GADBench
+  conda_env:  bigg
   epochs:     200
   patience:   50
   lr:         0.01
