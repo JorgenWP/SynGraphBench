@@ -523,18 +523,23 @@ def load_cgt_synthetic_data(syn_path):
 def build_synthetic_dgl_graph(original_graph, synthetic_data,
                               trial_id=0, semi_supervised=False):
     """
-    Build a DGL graph with synthetic node features for train/val nodes.
+    Build a DGL graph whose entire feature matrix lives in the K-direction
+    cluster codebook. Train/val roots get CGT-generated cluster centers
+    (cluster_centers[gen_*_seqs[:, 0]]); every other row gets its k-means
+    assignment (cluster_centers[cluster_ids[node]]).
 
-    Keeps the original graph structure (edges) and test node features/labels.
-    Replaces train/val node features with CGT-generated features derived from
-    cluster centers corresponding to the generated computation graph root nodes.
+    This mirrors AD's build_cgt_datasets substitution scope: under the
+    "synthetic data as a privacy-respecting replacement for real data"
+    framing, the downstream user only has the K-direction codebook + cluster
+    IDs, so every training-tree position must read a K-direction vector. The
+    (original-cg → original-cg-quantized) and (quantized → synthetic-cgt)
+    deltas are now apples-to-apples comparable across AD and LP.
 
-    Assumes the caller passes an ``original_graph`` whose ``ndata['feature']``
-    has already been L2-normalized (``evaluate_link_models_cgt`` does this once
-    per dataset). Combined with the L2-normalized cluster centers from
-    ``CGT/generator/cluster.py``, every row of the returned graph's feature
-    matrix is unit-norm — no scale clash between synthetic train/val rows and
-    real test/other rows inside a merged computation graph.
+    Cluster centers come pre-L2-normalized from CGT/generator/cluster.py, so
+    the returned feature matrix is unit-norm everywhere except for any
+    train/val root where the CGT happened to emit empty_id (zero vector,
+    surfaced via the counter below). Test edges are scored against the real
+    L2-normed feature matrix via the detectors' test_features= kwarg.
     """
     mask_col = trial_id + (10 if semi_supervised else 0)
     train_mask = original_graph.ndata['train_masks'][:, mask_col].bool()
@@ -554,8 +559,10 @@ def build_synthetic_dgl_graph(original_graph, synthetic_data,
         val_node_ids = torch.tensor(saved_ids['val'], dtype=torch.long)
 
     # Root of each computation graph tree = position 0
-    syn_train_feats = cluster_centers[gen_train_seqs[:, 0]].float()
-    syn_val_feats = cluster_centers[gen_val_seqs[:, 0]].float()
+    cluster_centers_t = (cluster_centers if isinstance(cluster_centers, torch.Tensor)
+                         else torch.tensor(cluster_centers)).float()
+    syn_train_feats = cluster_centers_t[gen_train_seqs[:, 0]]
+    syn_val_feats = cluster_centers_t[gen_val_seqs[:, 0]]
 
     orig_feat_dim = original_graph.ndata['feature'].shape[1]
     syn_feat_dim = syn_train_feats.shape[1]
@@ -572,9 +579,26 @@ def build_synthetic_dgl_graph(original_graph, synthetic_data,
             f"Val node count mismatch: {len(val_node_ids)} vs "
             f"{len(syn_val_feats)} synthetic sequences")
 
-    new_features = original_graph.ndata['feature'].clone().float()
+    # Full-N k-means quantization as the base (mirrors AD scope at
+    # build_original_cg_quantized_datasets). Then overwrite train+val roots
+    # with CGT-generated cluster centers.
+    N = original_graph.num_nodes()
+    cluster_ids = _load_cluster_ids(synthetic_data, N)
+    new_features = cluster_centers_t[
+        torch.as_tensor(cluster_ids, dtype=torch.long)].clone()
     new_features[train_node_ids] = syn_train_feats
     new_features[val_node_ids] = syn_val_feats
+
+    # Surface CGT-emitted empty_id at root (those rows become zero vectors).
+    # Saved cluster_centers has shape (K+1, d); empty_id == shape[0] - 1.
+    empty_id = cluster_centers_t.shape[0] - 1
+    n_empty_train = int((gen_train_seqs[:, 0] == empty_id).sum())
+    n_empty_val = int((gen_val_seqs[:, 0] == empty_id).sum())
+    if n_empty_train or n_empty_val:
+        print(f"  [empty_id] CGT emitted empty_id at root for "
+              f"{n_empty_train}/{len(gen_train_seqs)} train and "
+              f"{n_empty_val}/{len(gen_val_seqs)} val nodes "
+              f"(those rows are zero vectors)")
 
     src, dst = original_graph.edges()
     syn_graph = dgl.graph((src, dst), num_nodes=original_graph.num_nodes())
@@ -584,9 +608,11 @@ def build_synthetic_dgl_graph(original_graph, synthetic_data,
     syn_graph.ndata['val_masks'] = original_graph.ndata['val_masks'].clone()
     syn_graph.ndata['test_masks'] = original_graph.ndata['test_masks'].clone()
 
+    n_other = syn_graph.num_nodes() - len(train_node_ids) - len(val_node_ids)
     print(f"  Synthetic graph: {syn_graph.num_nodes()} nodes, "
-          f"{syn_graph.num_edges()} edges | "
-          f"replaced {len(train_node_ids)} train + {len(val_node_ids)} val features")
+          f"{syn_graph.num_edges()} edges | full-N substitution: "
+          f"{len(train_node_ids)} train + {len(val_node_ids)} val roots from CGT, "
+          f"{n_other} others from k-means assignment")
 
     return syn_graph
 
@@ -594,28 +620,23 @@ def build_synthetic_dgl_graph(original_graph, synthetic_data,
 def build_quantized_dgl_graph(original_graph, synthetic_data,
                               trial_id=0, semi_supervised=False):
     """
-    Build a DGL graph whose train/val node features are replaced by their
-    *assigned* cluster centers (not CGT-generated). Isolates the K-quantization
-    confound from CGT's sequence-model contribution: this and
-    build_synthetic_dgl_graph share the same cluster-center vocabulary and only
-    differ in how the train/val root features are chosen (real assignment vs
-    GPT-generated cluster id).
+    Build a DGL graph whose entire feature matrix is the k-means quantization
+    of the real features: every row is cluster_centers[cluster_ids[node]].
+    Isolates the K-quantization confound from CGT's sequence-model
+    contribution — this and build_synthetic_dgl_graph share the same
+    K-direction codebook everywhere; they differ only in that synthetic-cgt
+    overwrites train/val roots with CGT-generated centers.
 
-    Same assumptions and outputs as build_synthetic_dgl_graph: original_graph
-    must already be L2-normalized; cluster centers come pre-L2-normalized from
-    CGT/generator/cluster.py.
+    Mirrors AD's build_original_cg_quantized_datasets scope so the
+    (original-cg → original-cg-quantized) ablation is comparable across
+    tasks. Cluster centers come pre-L2-normalized from CGT/generator/
+    cluster.py; the returned feature matrix is unit-norm at every row.
+
+    trial_id / semi_supervised are retained for API compatibility with the
+    factory in link_benchmark.py but are unused — the substitution scope is
+    no longer split-dependent.
     """
-    mask_col = trial_id + (10 if semi_supervised else 0)
-    train_mask = original_graph.ndata['train_masks'][:, mask_col].bool()
-    val_mask = original_graph.ndata['val_masks'][:, mask_col].bool()
-
-    train_node_ids = torch.where(train_mask)[0]
-    val_node_ids = torch.where(val_mask)[0]
-
-    if 'ids' in synthetic_data:
-        saved_ids = synthetic_data['ids']
-        train_node_ids = torch.tensor(saved_ids['train'], dtype=torch.long)
-        val_node_ids = torch.tensor(saved_ids['val'], dtype=torch.long)
+    del trial_id, semi_supervised  # retained for API compat; scope is full-N
 
     N = original_graph.num_nodes()
     cluster_ids = _load_cluster_ids(synthetic_data, N)
@@ -624,18 +645,14 @@ def build_quantized_dgl_graph(original_graph, synthetic_data,
         cluster_centers = torch.tensor(cluster_centers)
     cluster_centers = cluster_centers.float()
 
-    quant_train_feats = cluster_centers[cluster_ids[train_node_ids.numpy()]]
-    quant_val_feats = cluster_centers[cluster_ids[val_node_ids.numpy()]]
-
     orig_feat_dim = original_graph.ndata['feature'].shape[1]
-    if orig_feat_dim != quant_train_feats.shape[1]:
+    if orig_feat_dim != cluster_centers.shape[1]:
         raise ValueError(
             f"Feature dimension mismatch: original={orig_feat_dim}, "
-            f"cluster_centers={quant_train_feats.shape[1]}")
+            f"cluster_centers={cluster_centers.shape[1]}")
 
-    new_features = original_graph.ndata['feature'].clone().float()
-    new_features[train_node_ids] = quant_train_feats
-    new_features[val_node_ids] = quant_val_feats
+    new_features = cluster_centers[
+        torch.as_tensor(cluster_ids, dtype=torch.long)].clone()
 
     src, dst = original_graph.edges()
     quant_graph = dgl.graph((src, dst), num_nodes=original_graph.num_nodes())
@@ -646,9 +663,8 @@ def build_quantized_dgl_graph(original_graph, synthetic_data,
     quant_graph.ndata['test_masks'] = original_graph.ndata['test_masks'].clone()
 
     print(f"  Quantized graph: {quant_graph.num_nodes()} nodes, "
-          f"{quant_graph.num_edges()} edges | "
-          f"replaced {len(train_node_ids)} train + {len(val_node_ids)} val features "
-          f"with cluster-center assignments")
+          f"{quant_graph.num_edges()} edges | full-N k-means quantization: "
+          f"all {N} rows = cluster_centers[cluster_ids]")
 
     return quant_graph
 

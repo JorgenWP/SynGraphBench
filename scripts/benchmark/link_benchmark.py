@@ -229,11 +229,15 @@ def _run_cg_link_trials(dataset_name, cg_models, base_data, source_label,
                 trial_data.name = dataset_name + f'_synthetic_cgt_t{t}'
                 trial_data.graph = syn_graph.long()
                 trial_data.split(val_ratio, test_ratio, t, neg_sampling)
-                # TSTR: test edges are scored against the real (L2-normed)
-                # feature matrix so the synthetic/quantized rows planted at
-                # train+val mask positions of trial_data.graph never leak
-                # into test computation trees. base_data.graph was L2-normed
-                # once by evaluate_link_models_cgt.
+                # TSTR: trial_data.graph's ndata['feature'] is fully
+                # K-quantized for both synthetic-cgt (train/val roots =
+                # CGT-sampled centers, others = k-means assignment) and
+                # original-cg-quantized (all rows = k-means assignment).
+                # Test edges must be scored against the real L2-normed
+                # matrix from base_data.graph so no K-direction vector
+                # leaks into a test-edge computation tree.
+                # base_data.graph was L2-normed once by
+                # evaluate_link_models_cgt.
                 test_features = base_data.graph.ndata['feature'].cpu().numpy()
             else:
                 trial_data = base_data
@@ -338,16 +342,19 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
       1. Original-CG: merged endpoint trees built from the original graph
          (with the trial's test edges withheld), baseline for the CG
          format.
-      2. Original-CG-quantized: same as (1) but train/val root features are
-         replaced by their *assigned* cluster centers
-         (cluster_centers[cluster_ids[node]] via build_quantized_dgl_graph).
+      2. Original-CG-quantized: same as (1) but the *entire* N-row feature
+         matrix is replaced by k-means cluster assignments
+         (cluster_centers[cluster_ids] via build_quantized_dgl_graph).
          Isolates the K-quantization confound from CGT's sequence-model
          contribution: (2)-(1) is the pure quantization effect; (3)-(2) is
-         the pure CGT generation effect.
-      3. Synthetic-CGT: merged endpoint trees built from a hybrid graph
-         whose train/val root features are replaced by CGT-generated
-         cluster-center features (via build_synthetic_dgl_graph). Each
-         trial loads its own .pt with alignment-checked test edges.
+         the pure CGT generation effect. Matches AD's
+         build_original_cg_quantized_datasets scope so the ablation
+         magnitude is comparable across tasks.
+      3. Synthetic-CGT: merged endpoint trees built from a graph whose
+         entire feature matrix is K-quantized — train/val roots from
+         CGT-generated cluster centers, all other rows from k-means
+         assignment (via build_synthetic_dgl_graph). Each trial loads its
+         own .pt with alignment-checked test edges.
 
     Features are L2-normalized once here so both downstream paths feed
     unit-norm features to MergedCompGraphLinkPredictor — matching CGT's
@@ -395,13 +402,13 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
             h_feats, num_layers, step_num, sample_num,
             curve_records=curve_records))
 
-    # --- Quantized-CG: per-trial hybrid graph whose train/val root features
-    #     are the *assigned* cluster centers (cluster_centers[cluster_ids[node]]),
-    #     not CGT-generated. Shares the cluster-center vocabulary with
-    #     synthetic-cgt below, so the synthetic-cgt minus quantized delta
-    #     isolates CGT's sequence-model contribution from the K-quantization
-    #     confound. Train/val features are quantized; neighbour/test features
-    #     remain real and continuous (same as synthetic-cgt). ---
+    # --- Quantized-CG: per-trial graph whose entire N-row feature matrix is
+    #     k-means quantized (cluster_centers[cluster_ids]). Shares the
+    #     K-direction codebook with synthetic-cgt below, so the synthetic-cgt
+    #     minus quantized delta isolates CGT's sequence-model contribution
+    #     from the K-quantization confound. Every position in a training
+    #     computation tree reads a K-direction vector (matches AD's
+    #     build_original_cg_quantized_datasets scope). ---
     if eval_mode in ('original_cg_quantized', 'phase2_variant', 'both'):
         def make_quant_graph(t, expected_test_edges):
             syn_data = load_cgt_synthetic_data(trial_paths[t])
