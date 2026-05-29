@@ -23,8 +23,8 @@ import pandas as pd
 import yaml
 
 from .bigg_invoke import (
-    expected_output_dir, PROJECT_ROOT, build_save_name, train_one_split,
-    resolve_benchmark_python,
+    expected_output_dir, PROJECT_ROOT, build_save_name,
+    bo_bigg_cache_root, resolve_benchmark_python,
 )
 
 
@@ -39,10 +39,12 @@ def _load_config(dataset: str) -> dict:
         return yaml.safe_load(f)
 
 
-def _ensure_bundle(bundle_dir: str, dataset: str, save_names_by_split: Dict[int, str]):
+def _ensure_bundle(bundle_dir: str, dataset: str,
+                   save_names_by_split: Dict[int, str],
+                   cache_root: str):
     os.makedirs(bundle_dir, exist_ok=True)
     for sid, save_name in save_names_by_split.items():
-        target = expected_output_dir(dataset, save_name)
+        target = expected_output_dir(dataset, save_name, cache_root=cache_root)
         if not os.path.isdir(target):
             raise FileNotFoundError(
                 f'best-config output missing for split {sid}: {target}')
@@ -59,10 +61,6 @@ def main():
     parser.add_argument('--mode', required=True, choices=['shared', 'per_split'])
     parser.add_argument('--split_id', type=int, default=None)
     parser.add_argument('--study_version', default='v1')
-    parser.add_argument('--retrain_missing', action='store_true',
-                        help='If a best-config save_dir is missing, retrain it. '
-                             'Default behaviour fails fast on missing dirs so '
-                             'we never silently re-run trials on cached splits.')
     args = parser.parse_args()
 
     cfg = _load_config(args.dataset)
@@ -101,29 +99,21 @@ def main():
     save_names = {sid: build_save_name(fixed_hp, best.params, sid, n_subgraphs)
                   for sid in split_ids}
 
-    # Retrain any missing splits (the canonical save_dir might have been
-    # purged or never finished). Without --retrain_missing this fails fast.
+    # BO trials wrote to the BO-scoped cache (see bo_bigg_cache_root); the
+    # canonical datasets/synthetic/bigg/<dataset>/hidden_labels/ path is not
+    # populated unless someone re-trained outside the BO pipeline. Look up
+    # bundles in the cache and fail fast if any are missing.
+    cache_root = bo_bigg_cache_root(args.dataset)
     for sid, sn in save_names.items():
-        target = expected_output_dir(args.dataset, sn)
+        target = expected_output_dir(args.dataset, sn, cache_root=cache_root)
         if not os.path.isdir(target):
-            if not args.retrain_missing:
-                raise FileNotFoundError(
-                    f'best-config split {sid} not on disk: {target}\n'
-                    f'pass --retrain_missing to rebuild it.')
-            print(f'[final-report] retraining missing split {sid}')
-            log_dir = os.path.join(base_root, 'final_report', 'logs',
-                                   f'retrain_split{sid}')
-            res = train_one_split(fixed_hp, best.params, sid, n_subgraphs,
-                                  log_dir=log_dir,
-                                  stdout_fname='train.out',
-                                  stderr_fname='train.err')
-            if res['status'] != 'completed':
-                raise RuntimeError(f'retrain failed for split {sid}: {res["failure"]}')
+            raise FileNotFoundError(
+                f'best-config split {sid} not in BO cache: {target}')
 
     final_dir = os.path.join(base_root, 'final_report')
     bundle_dir = os.path.join(final_dir, 'bundle')
     os.makedirs(final_dir, exist_ok=True)
-    _ensure_bundle(bundle_dir, args.dataset, save_names)
+    _ensure_bundle(bundle_dir, args.dataset, save_names, cache_root)
 
     out_dir = os.path.join(final_dir, 'benchmark_heldout')
     os.makedirs(out_dir, exist_ok=True)
