@@ -17,6 +17,11 @@ WARM_START_DEFAULTS = {
     'tolokers':  {'lr': 3e-4, 'kl_weight': 0.25, 'lw_cont': 0.05, 'lw_label': 0.10},
     'questions': {'lr': 3e-4, 'kl_weight': 0.25, 'lw_cont': 0.01, 'lw_label': 0.10},
     'weibo':     {'lr': 3e-4, 'kl_weight': 0.25, 'lw_cont': 0.05, 'lw_label': 0.10},
+    'reddit':     {'lr': 3e-4, 'kl_weight': 0.25, 'lw_cont': 0.05, 'lw_label': 0.10},
+    'elliptic':     {'lr': 3e-4, 'kl_weight': 0.25, 'lw_cont': 0.05, 'lw_label': 0.10},
+    'amazon':     {'lr': 3e-4, 'kl_weight': 0.25, 'lw_cont': 0.05, 'lw_label': 0.10},
+    'tfinance':     {'lr': 3e-4, 'kl_weight': 0.25, 'lw_cont': 0.05, 'lw_label': 0.10},
+    'yelp':     {'lr': 3e-4, 'kl_weight': 0.25, 'lw_cont': 0.05, 'lw_label': 0.10},
 }
 
 # Conservative bounds. Override per dataset in configs/{dataset}.yaml if needed.

@@ -1,19 +1,19 @@
 #!/bin/sh
 #SBATCH --account=share-ie-idi      # "share-ie-idi" "ie-idi"
-#SBATCH --job-name="BiGG_SUBSAMPLE_<something>"
+#SBATCH --job-name="BiGG_SUBSAMPLE_REDDIT_test_bfs_snow"
 #SBATCH --time=01:30:00             # Time limit (hh:mm:ss)
 
 #SBATCH --partition=GPUQ            # Asking for GPU
 #SBATCH --gres=gpu:1                # Number of GPUs
-#SBATCH --constraint=gpu32g
+
 #SBATCH --mem=10G                   # Gigabytes of system memory (not GPU memory)
-#SBATCH --nodes=2                   # Number of compute nodes
-#SBATCH --ntasks-per-node=2         # Number of tasks per node
+#SBATCH --nodes=1                   # Number of compute nodes
+#SBATCH --ntasks-per-node=1         # Number of tasks per node
 
-#SBATCH --output=output/bigg/train/output_<something>.txt    # Specifying 'stdout'
-#SBATCH --error=output/bigg/train/error_<something>.txt      # Specifying 'stderr'
+#SBATCH --output=output/bigg/train/output/bo_tuning/testing_runs/reddit_bfs_5.txt    # Specifying 'stdout'
+#SBATCH --error=output/bigg/train/error/bo_tuning/testing_runs/reddit_bfs_5.txt      # Specifying 'stderr'
 
-#SBATCH --mail-user=<something>@stud.ntnu.no         # The email to send notifications to
+#SBATCH --mail-user=eirimhau@stud.ntnu.no         # The email to send notifications to
 #SBATCH --mail-type=ALL
 
 WORKDIR=${SLURM_SUBMIT_DIR}
@@ -31,41 +31,41 @@ module load Anaconda3/2024.02-1
 conda activate bigg
 
 # Arguments
-DATASET="questions"
+DATASET="reddit"
 BLKSIZE=-1
-BSIZE=1
+BSIZE=5
 EPOCHS=300
-LR=0.001
+LR=0.0003
 EMBED_DIM=256
 NOISE_STD=0.3
-SS_MAX_PROB=0.0
-SS_START_EPOCH=0
+SS_MAX_PROB=0.3
+SS_START_EPOCH=120
 BFS_PREPROCESS=True
-NORMALIZE=zscore        # "zscore", "minmax", "row", or "none"
-LOSS_WEIGHTS="0.01,0.1"  # cont,label weights relative to struct (applied after dynamic normalization)
-HETERO_FEAT=true        # "true" for heteroscedastic feature prediction (mean + variance), "false" for deterministic MSE
+NORMALIZE=cdf        # "zscore", "minmax", "row", or "none"
+LOSS_WEIGHTS="0.05,0.1"  # cont,label weights relative to struct (applied after dynamic normalization)
+HETERO_FEAT=false        # "true" for heteroscedastic feature prediction (mean + variance), "false" for deterministic MSE
 MASK_TEST_LABELS=true   # "true" to exclude test node labels (split 0) from label loss
 LOGVAR_FLOOR=-10.0       # lower clamp for log-variance in hetero_feat mode
 SUBSAMPLE_SIZE=2000     # target number of nodes per BFS subgraph
 BURN_PROB=0.7           # forest fire burn probability (controls subgraph density)
 NUM_SUBGRAPHS=15        # number of subgraphs to use (leave empty for auto = ceil(N / subsample_size))
-BINARY_FEAT=false       # "true" to auto-detect binary features and use BCE loss + Bernoulli sampling
-VAE_FEAT=false          # "true" to add a per-node label-agnostic CVAE latent shared across feature decoders
+BINARY_FEAT=true       # "true" to auto-detect binary features and use BCE loss + Bernoulli sampling
+VAE_FEAT=true          # "true" to add a per-node label-agnostic CVAE latent shared across feature decoders
 VAE_DIM=16              # latent dimensionality when VAE_FEAT is on
-KL_WEIGHT=1.0           # coefficient on the KL term in the VAE ELBO
+KL_WEIGHT=0.25           # coefficient on the KL term in the VAE ELBO
 CAT_FEAT=false          # "true" to use AR categorical feature predictor (quantile bins + soft labels). Mutually exclusive with HETERO_FEAT / VAE_FEAT.
 N_BINS=32               # number of quantile bins per continuous feature when CAT_FEAT is on
 BIN_SIGMA=              # Gaussian soft-label std in feature-value units (leave empty for auto)
-MDN_FEAT=false          # "true" to use Mixture Density Network feature head. Mutually exclusive with HETERO_FEAT / CAT_FEAT. Composes with VAE_FEAT.
+MDN_FEAT=true          # "true" to use Mixture Density Network feature head. Mutually exclusive with HETERO_FEAT / CAT_FEAT. Composes with VAE_FEAT.
 MDN_COMPONENTS=8        # number of mixture components per feature when MDN_FEAT is on
-MDN_LOGSIGMA_FLOOR=-4.0 # lower clamp for MDN component log-sigma
-MDN_BASE=gaussian       # "gaussian" (unbounded) or "logit_normal" (targets in [0,1]; pairs with NORMALIZE=cdf)
+MDN_LOGSIGMA_FLOOR=-10.0 # lower clamp for MDN component log-sigma
+MDN_BASE=logit_normal       # "gaussian" (unbounded) or "logit_normal" (targets in [0,1]; pairs with NORMALIZE=cdf)
 KL_SCHEDULE=none        # KL annealing schedule: "none", "linear", or "cyclic"
 KL_ANNEAL_EPOCHS=0      # linear: epochs over which β ramps 0 → kl_weight (required if KL_SCHEDULE=linear)
 KL_CYCLE_EPOCHS=0       # cyclic: cycle length in epochs (required if KL_SCHEDULE=cyclic)
 KL_RAMP_RATIO=0.5       # cyclic: fraction of cycle spent ramping (paper R, default 0.5)
-LOAD_SUBSAMPLES=false   # "true" to load pre-computed subgraphs from datasets/bigg_subsamples; ignores SUBSAMPLE_SIZE/BURN_PROB/NUM_SUBGRAPHS
-SUBSAMPLING_CONFIG=     # params_tag (e.g. "ff_b0.5_M1") — required when LOAD_SUBSAMPLES=true
+LOAD_SUBSAMPLES=true   # "true" to load pre-computed subgraphs from datasets/bigg_subsamples; ignores SUBSAMPLE_SIZE/BURN_PROB/NUM_SUBGRAPHS
+SUBSAMPLING_CONFIG="ff_ts500_b0.3_M2"     # params_tag (e.g. "ff_b0.5_M1") — required when LOAD_SUBSAMPLES=true
 SPLIT_ID=0              # GADBench split id (0..4) selecting which split<id>.pkl to load
 RECAL_MOMENTUM=1.0      # EMA momentum for dynamic loss-weight recalibration in [0,1]. 1.0 disables (backward compat); 0.9/0.99 = ~10/~100 epoch horizon.
 MIN_SUBGRAPH_NODES=0    # minimum node count per loaded subgraph; 0 = no filter (drops remnants from disjoint partitioners like bfs_partition / M=1 forest_fire)

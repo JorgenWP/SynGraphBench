@@ -21,15 +21,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-
-# Datasets whose `target_size` is locked because downstream BO state depends
-# on their existing `params_tag` scheme. Do NOT add to this list lightly:
-# changing a frozen dataset's value would invalidate pickled partitions,
-# dryrun cache rows, utility.csv rows, and BO trial checkpoints for that
-# dataset.
-PER_DATASET_TARGET_SIZE_FROZEN: Dict[str, int] = {
-    'tolokers': 500,
-}
+PER_DATASET_TARGET_SIZE_FROZEN: Dict[str, int] = {}
 
 # Datasets where `target_size` is searched. Cells whose predicted peak VRAM
 # exceeds the budget are dropped by `plan_grid.py`'s VRAM gate; no need to
@@ -42,6 +34,7 @@ PER_DATASET_TARGET_SIZES_SWEEP: Dict[str, List[int]] = {
     'yelp':      [500, 1500, 2500],
     'tfinance':  [500, 1500, 2500],
     'tsocial':   [500, 1500, 2500],
+    'tolokers':   [500, 1500, 2500],
 }
 
 DEFAULT_K = 15  # nominal K for iterative methods; overridden per cell by the

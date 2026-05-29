@@ -55,7 +55,7 @@ def _ensure_bundle(bundle_dir: str, dataset: str, save_names_by_split: Dict[int,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', required=True,
-                        choices=['tolokers', 'questions', 'weibo'])
+                        choices=['tolokers', 'questions', 'weibo', 'reddit', 'yelp', 'amazon', 'tfinance', 'elliptic'])
     parser.add_argument('--mode', required=True, choices=['shared', 'per_split'])
     parser.add_argument('--split_id', type=int, default=None)
     parser.add_argument('--study_version', default='v1')

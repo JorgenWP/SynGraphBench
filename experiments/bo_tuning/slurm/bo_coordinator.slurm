@@ -1,16 +1,16 @@
 #!/bin/sh
 #SBATCH --account=share-ie-idi
-#SBATCH --job-name="BO_BIGG"
+#SBATCH --job-name="BO_BIGG_yelp_80"
 #SBATCH --time=12:00:00
 #SBATCH --partition=GPUQ
 #SBATCH --gres=gpu:1
-#SBATCH --constraint=gpu32g
+
 #SBATCH --mem=20G
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --output=output/bo_tuning/coordinator_%j.out
-#SBATCH --error=output/bo_tuning/coordinator_%j.err
-#SBATCH --mail-user=eirikmhauge123@gmail.com
+#SBATCH --output=output/bo_tuning/per_split/yelp/coordinator_%j.out
+#SBATCH --error=output/bo_tuning/per_split/yelp/coordinator_%j.err
+#SBATCH --mail-user=eirimhau@stud.ntnu.no
 #SBATCH --mail-type=END,FAIL
 
 # Persistent BO coordinator (Topology A).

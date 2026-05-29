@@ -332,7 +332,7 @@ def _run_one_trial(study, *, dataset, fixed_hp, n_subgraphs, models,
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', required=True,
-                        choices=['tolokers', 'questions', 'weibo'])
+                        choices=['tolokers', 'questions', 'weibo', 'reddit', 'yelp', 'amazon', 'tfinance', 'elliptic'])
     parser.add_argument('--mode', required=True, choices=['shared', 'per_split'])
     parser.add_argument('--split_id', type=int, default=None,
                         help='Required in per_split mode (0..n_splits-1).')
