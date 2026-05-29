@@ -45,7 +45,7 @@ CG_LP_SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE']
 class MergedCompGraphLinkPredictor(BaseDetector):
     """Link prediction via per-edge merged endpoint computation graphs."""
 
-    def __init__(self, train_config, model_config, data):
+    def __init__(self, train_config, model_config, data, test_features=None):
         super().__init__(train_config, model_config, data)
         self.device = train_config['device']
 
@@ -90,6 +90,22 @@ class MergedCompGraphLinkPredictor(BaseDetector):
         self.features = data.graph.ndata['feature'].cpu().numpy().astype(
             np.float32)
 
+        # TSTR test path: real features for test-edge scoring when data.graph
+        # has been built with synthetic/quantized train+val node features.
+        # Mirrors anomaly's build_original_cg_quantized_datasets pattern of
+        # using quant_features for train/val datasets and real_features for
+        # the test dataset (bench_utils.py:1027-1034). When None, the
+        # detector falls back to self.features everywhere (original-cg path).
+        if test_features is not None:
+            self.test_features = np.ascontiguousarray(
+                test_features, dtype=np.float32)
+            if self.test_features.shape != self.features.shape:
+                raise ValueError(
+                    f"test_features shape {self.test_features.shape} != "
+                    f"features shape {self.features.shape}")
+        else:
+            self.test_features = None
+
         merged_adj = compute_merged_tree_adj(
             self.step_num, self.sample_num + self.noise_num,
             self.self_connection)
@@ -102,10 +118,14 @@ class MergedCompGraphLinkPredictor(BaseDetector):
         # immutable edge tensors created once per trial deduplicate the
         # ~414+ batches/epoch otherwise rebuilt for evaluation.
         self._eval_batch_cache = {}
+        # Separate cache for the real-features test path so swapping the
+        # feature matrix can't bleed across train/val (hybrid) batches.
+        self._test_eval_batch_cache = {}
 
-    def _edge_loader(self, edges):
+    def _edge_loader(self, edges, features=None):
+        feats = self.features if features is None else features
         ds = MergedOriginalCompGraphDataset(
-            self.train_adj_list, self.features, edges,
+            self.train_adj_list, feats, edges,
             self.step_num, self.sample_num,
             self.noise_num, self.self_connection)
         collate = make_merged_comp_graph_collate(
@@ -141,6 +161,28 @@ class MergedCompGraphLinkPredictor(BaseDetector):
         if cached is None:
             cached = [b.to(self.device) for b in self._edge_loader(edges)]
             self._eval_batch_cache[cache_key] = cached
+
+        scores = [self._score_batch_on_device(b) for b in cached]
+        return torch.cat(scores, dim=0)
+
+    def _score_test_edges(self, edges):
+        """Score edges using real (TSTR) features instead of self.features.
+
+        Mirrors _score_edges but materializes node features from
+        self.test_features so test-edge computation trees never read the
+        synthetic/quantized rows planted at train+val mask positions of
+        self.features. Uses a separate batch cache so the hybrid-features
+        batches for val edges can't collide with test-edge batches.
+        """
+        if edges.shape[0] == 0:
+            return torch.empty(0, device=self.device)
+
+        cache_key = id(edges)
+        cached = self._test_eval_batch_cache.get(cache_key)
+        if cached is None:
+            loader = self._edge_loader(edges, features=self.test_features)
+            cached = [b.to(self.device) for b in loader]
+            self._test_eval_batch_cache[cache_key] = cached
 
         scores = [self._score_batch_on_device(b) for b in cached]
         return torch.cat(scores, dim=0)
@@ -283,11 +325,14 @@ class MergedCompGraphLinkPredictor(BaseDetector):
             sync(); t3 = time.time()
             t_val = t3 - t2
 
+            test_score_fn = (self._score_test_edges
+                             if self.test_features is not None
+                             else self._score_edges)
             with torch.no_grad():
                 test_pos = torch.sigmoid(
-                    self._score_edges(self.test_pos_edges))
+                    test_score_fn(self.test_pos_edges))
                 test_neg = torch.sigmoid(
-                    self._score_edges(self.test_neg_edges))
+                    test_score_fn(self.test_neg_edges))
             epoch_test = self.eval(test_pos, test_neg)
             sync(); t4 = time.time()
             t_test = t4 - t3
@@ -349,7 +394,7 @@ class CGTXGBoostLinkPredictor(BaseDetector):
     aggregation. CGT-only.
     """
 
-    def __init__(self, train_config, model_config, data):
+    def __init__(self, train_config, model_config, data, test_features=None):
         super().__init__(train_config, model_config, data)
         import xgboost as xgb
 
@@ -363,6 +408,19 @@ class CGTXGBoostLinkPredictor(BaseDetector):
         self.train_adj_list = dgl_to_adj_list(data.train_graph)
         self.features = data.graph.ndata['feature'].cpu().numpy().astype(
             np.float32)
+
+        # TSTR test path: real features when train/val rows of self.features
+        # are synthetic/quantized cluster centers. See the MergedCompGraph
+        # variant above for rationale and the anomaly-benchmark mirror.
+        if test_features is not None:
+            self.test_features = np.ascontiguousarray(
+                test_features, dtype=np.float32)
+            if self.test_features.shape != self.features.shape:
+                raise ValueError(
+                    f"test_features shape {self.test_features.shape} != "
+                    f"features shape {self.features.shape}")
+        else:
+            self.test_features = None
 
         merged_adj = compute_merged_tree_adj(
             self.step_num, self.sample_num + self.noise_num,
@@ -379,16 +437,17 @@ class CGTXGBoostLinkPredictor(BaseDetector):
 
         self.gin = None
 
-    def _edge_features(self, edges):
+    def _edge_features(self, edges, features=None):
+        node_features = self.features if features is None else features
         if edges.shape[0] == 0:
-            feat_dim = self.features.shape[1]
+            feat_dim = node_features.shape[1]
             if self.gin is not None:
                 feat_dim *= self.model_config.get('num_layers', 2) + 1
             return np.zeros((0, feat_dim), dtype=np.float32)
 
         edges_cpu = edges.cpu() if torch.is_tensor(edges) else edges
         ds = MergedOriginalCompGraphDataset(
-            self.train_adj_list, self.features, edges_cpu,
+            self.train_adj_list, node_features, edges_cpu,
             self.step_num, self.sample_num,
             self.noise_num, self.self_connection)
         collate = make_merged_comp_graph_collate(
@@ -409,6 +468,10 @@ class CGTXGBoostLinkPredictor(BaseDetector):
                     batched, emb, self.per_tree_num_nodes)
                 feats.append((h_u * h_v).cpu().numpy())
         return np.vstack(feats)
+
+    def _test_edge_features(self, edges):
+        """Materialize edge features using real (TSTR) node features."""
+        return self._edge_features(edges, features=self.test_features)
 
     def _filter_collisions(self, neg_edges):
         src, dst = neg_edges[:, 0], neg_edges[:, 1]
@@ -475,9 +538,12 @@ class CGTXGBoostLinkPredictor(BaseDetector):
 
         n_test_pos = self.test_pos_edges.shape[0]
         n_test_neg = self.test_neg_edges.shape[0]
+        test_feat_fn = (self._test_edge_features
+                        if self.test_features is not None
+                        else self._edge_features)
         test_X = np.vstack([
-            self._edge_features(self.test_pos_edges),
-            self._edge_features(self.test_neg_edges),
+            test_feat_fn(self.test_pos_edges),
+            test_feat_fn(self.test_neg_edges),
         ])
         test_probs = self.model.predict_proba(test_X)[:, 1]
         test_pos_probs = torch.tensor(test_probs[:n_test_pos])
@@ -491,8 +557,9 @@ class CGTXGBGraphLinkPredictor(CGTXGBoostLinkPredictor):
     `num_layers` must equal `step_num` (enforced).
     """
 
-    def __init__(self, train_config, model_config, data):
-        super().__init__(train_config, model_config, data)
+    def __init__(self, train_config, model_config, data, test_features=None):
+        super().__init__(train_config, model_config, data,
+                         test_features=test_features)
         from models.gnn import GIN_noparam
 
         num_layers = model_config.get('num_layers', 2)

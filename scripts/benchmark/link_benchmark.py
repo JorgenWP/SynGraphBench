@@ -229,8 +229,15 @@ def _run_cg_link_trials(dataset_name, cg_models, base_data, source_label,
                 trial_data.name = dataset_name + f'_synthetic_cgt_t{t}'
                 trial_data.graph = syn_graph.long()
                 trial_data.split(val_ratio, test_ratio, t, neg_sampling)
+                # TSTR: test edges are scored against the real (L2-normed)
+                # feature matrix so the synthetic/quantized rows planted at
+                # train+val mask positions of trial_data.graph never leak
+                # into test computation trees. base_data.graph was L2-normed
+                # once by evaluate_link_models_cgt.
+                test_features = base_data.graph.ndata['feature'].cpu().numpy()
             else:
                 trial_data = base_data
+                test_features = None
 
             train_config = {
                 'device': 'cuda' if torch.cuda.is_available() else 'cpu',
@@ -255,7 +262,8 @@ def _run_cg_link_trials(dataset_name, cg_models, base_data, source_label,
             detector_cls = CGT_LP_TREE_MODELS.get(
                 model_name, CompGraphLinkPredictor)
             detector = detector_cls(
-                train_config, model_config, trial_data)
+                train_config, model_config, trial_data,
+                test_features=test_features)
             st = time.time()
             test_score = detector.train()
             ed = time.time()
