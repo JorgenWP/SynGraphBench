@@ -104,12 +104,12 @@ def build_save_name(fixed: Dict[str, Any], params: Dict[str, float], split_id: i
     """
     norm_tag = fixed['normalize'] if fixed['normalize'] is not None else 'none'
     bfs_tag = 'bfs' if fixed['bfs_preprocess'] else 'nobfs'
-    lw_tag = f"{params['lw_cont']}_{params['lw_label']}"
+    lw_tag = f"{str(params['lw_cont'])[:8]}_{str(params['lw_label'])[:8]}"
     hetero_tag = 'hetero' if fixed['hetero_feat'] else 'det'
     lvf_tag = f"_lvf{fixed['logvar_floor']}" if fixed['hetero_feat'] else ''
     mask_tag = '_masked' if fixed['mask_test_labels'] else ''
     bin_tag = '_binfeat' if fixed['binary_feat'] else ''
-    vae_tag = (f"_vae{fixed['vae_dim']}_kl{params['kl_weight']}"
+    vae_tag = (f"_vae{fixed['vae_dim']}_kl{str(params['kl_weight'])[:8]}"
                if fixed['vae_feat'] else '')
     kl_sched = fixed['kl_schedule']
     if fixed['vae_feat'] and kl_sched == 'linear':
@@ -137,7 +137,7 @@ def build_save_name(fixed: Dict[str, Any], params: Dict[str, float], split_id: i
     return (
         f"blksize_{fixed['blksize']}"
         f"_b_{fixed['batch_size']}"
-        f"_lr_{params['lr']}"
+        f"_lr_{str(params['lr'])[:8]}"
         f"_epochs_{fixed['epochs']}"
         f"_noise_{fixed['noise_std']}"
         f"_ss_{fixed['ss_max_prob']}"

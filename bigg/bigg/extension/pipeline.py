@@ -708,12 +708,12 @@ def main():
     # checkpoint snapshots can write under the same out_dir / save_dir).
     norm_tag = pipeline_args.normalize if pipeline_args.normalize is not None else 'none'
     bfs_tag = 'bfs' if pipeline_args.bfs_preprocess else 'nobfs'
-    lw_tag = pipeline_args.loss_weights.replace(',', '_')
+    lw_tag = '_'.join(p[:8] for p in pipeline_args.loss_weights.split(','))
     hetero_tag = 'hetero' if pipeline_args.hetero_feat else 'det'
     lvf_tag = f'_lvf{pipeline_args.logvar_floor}' if pipeline_args.hetero_feat else ''
     mask_tag = '_masked' if pipeline_args.mask_test_labels else ''
     bin_tag = '_binfeat' if pipeline_args.binary_feat else ''
-    vae_tag = f'_vae{pipeline_args.vae_dim}_kl{pipeline_args.kl_weight}' if pipeline_args.vae_feat else ''
+    vae_tag = f'_vae{pipeline_args.vae_dim}_kl{str(pipeline_args.kl_weight)[:8]}' if pipeline_args.vae_feat else ''
     if pipeline_args.vae_feat and pipeline_args.kl_schedule == 'linear':
         kl_sched_tag = f'_klan{pipeline_args.kl_anneal_epochs}'
     elif pipeline_args.vae_feat and pipeline_args.kl_schedule == 'cyclic':
@@ -734,7 +734,7 @@ def main():
         sub_tag = f'_sub{len(subgraphs)}_size{pipeline_args.subsample_size}_p{pipeline_args.burn_prob}'
     else:
         sub_tag = ''
-    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{cmd_args.learning_rate}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{vae_tag}{kl_sched_tag}{cat_tag}{mdn_tag}{recal_tag}{sub_tag}'
+    save_name = f'blksize_{cmd_args.blksize}_b_{cmd_args.batch_size}_lr_{str(cmd_args.learning_rate)[:8]}_epochs_{cmd_args.num_epochs}_noise_{pipeline_args.noise_std}_ss_{pipeline_args.ss_max_prob}_norm_{norm_tag}_{bfs_tag}_lw_{lw_tag}_{hetero_tag}{lvf_tag}{mask_tag}{bin_tag}{vae_tag}{kl_sched_tag}{cat_tag}{mdn_tag}{recal_tag}{sub_tag}'
     # BIGG_SYNTHETIC_SAVE_ROOT lets callers (e.g. the BO coordinator) redirect
     # synthetic outputs out of datasets/synthetic so BO scaffolding doesn't
     # clutter the canonical pipeline location. Unset → legacy behavior.

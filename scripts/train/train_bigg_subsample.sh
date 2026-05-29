@@ -212,6 +212,11 @@ else
   SUBSAMPLE_TAG="sub${SUBSAMPLE_SIZE}_p${BURN_PROB}"
 fi
 
+# Truncate float halves of LOSS_WEIGHTS to 8 chars each for save_dir basename
+LW_CONT_TRUNC="${LOSS_WEIGHTS%%,*}"
+LW_LABEL_TRUNC="${LOSS_WEIGHTS#*,}"
+LW_TRUNC="${LW_CONT_TRUNC:0:8},${LW_LABEL_TRUNC:0:8}"
+
 python -m bigg.extension.pipeline \
   -data_dir "$DATASET" \
   -model_type conditional \
@@ -252,4 +257,4 @@ python -m bigg.extension.pipeline \
   -min_subgraph_nodes "$MIN_SUBGRAPH_NODES" \
   $SAVE_MODEL_FLAG \
   -save_model_every "$SAVE_MODEL_EVERY" \
-  -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LOSS_WEIGHTS}_${HETERO_FEAT}_lvf${LOGVAR_FLOOR}_bin${BINARY_FEAT}_vae${VAE_FEAT}_vd${VAE_DIM}_kl${KL_WEIGHT}_cat${CAT_FEAT}_nb${N_BINS}_mdn${MDN_FEAT}_k${MDN_COMPONENTS}_recalM${RECAL_MOMENTUM}_${SUBSAMPLE_TAG}"
+  -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR:0:8}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LW_TRUNC}_${HETERO_FEAT}_lvf${LOGVAR_FLOOR}_bin${BINARY_FEAT}_vae${VAE_FEAT}_vd${VAE_DIM}_kl${KL_WEIGHT:0:8}_cat${CAT_FEAT}_nb${N_BINS}_mdn${MDN_FEAT}_k${MDN_COMPONENTS}_recalM${RECAL_MOMENTUM}_${SUBSAMPLE_TAG}"
