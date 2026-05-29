@@ -8,7 +8,7 @@ from generator.gpt.dataset import Dataset, QuantizedDataset
 from generator.gpt.model import GPTConfig, XLNet
 from generator.gpt.trainer import Trainer, TrainerConfig
 from generator.gpt.utils import sample
-from generator.cluster import cluster_feats
+from generator.cluster import cluster_feats, load_cached_clusters
 
 save_dir = '../CGT/generator/gpt/save'
 
@@ -143,8 +143,10 @@ def train_and_generate(args, graphs, feats, labels, ids):
     if not os.path.isdir(save_dir):
         os.makedirs(save_dir)
 
-    # Quantize features into cluster IDs
-    cluster_ids, cluster_centers = cluster_feats(args, feats, fit_ids=ids["train"] + ids["val"])
+    # Quantize features into cluster IDs — load the precomputed partition from the
+    # shared cache (fail-loud if missing). Fit-set selection is the producer's job
+    # (train+val for hidden_labels, all nodes for hidden_links).
+    cluster_ids, cluster_centers = load_cached_clusters(args, feats)
 
     # Train CGT on train+val nodes
     target_ids = ids["train"] + ids["val"]

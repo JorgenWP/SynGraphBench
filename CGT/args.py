@@ -129,6 +129,9 @@ def get_parser():
                         help='Size of mininum cluster')
     parser.add_argument('--cluster_sample_num', type=int, default=5000,
                         help='Number of nodes participated in kmeans')
+    parser.add_argument('--cache_root', type=str, default='cache/clustering',
+                        help='Root of the precomputed clustering cache '
+                             '(relative to project root unless absolute)')
 
     # GPT-related hyperparameters
     parser.add_argument('--gpt_train_name', type=str, default="default",

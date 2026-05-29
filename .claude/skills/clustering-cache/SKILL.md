@@ -65,43 +65,20 @@ Default `root = cache/clustering/` (relative to project root). Validate `os.path
 
 ## Consumer adaptation patterns
 
-### CGT — replace the in-pipeline clustering call
+### CGT — load the cache instead of clustering in-pipeline
 
-Current call site: `CGT/generator/gpt/gpt.py:147` (the `train_and_generate` path).
+**Status: implemented for CGT *training*.** The loader is `load_cached_clusters(args, feats)` in `CGT/generator/cluster.py` (sits next to `cluster_feats`, with a consumer-side copy of the `_cache_dir` resolver). It is wired into the `train_and_generate` path at `CGT/generator/gpt/gpt.py:147`:
 
 ```python
-# before
-cluster_ids, cluster_centers = cluster_feats(
-    args, feats, fit_ids=ids["train"] + ids["val"]
-)
-
-# after — load from cache, re-add empty_id padding so the rest of the
-# pipeline (GPT training, generation, QuantizedDataset) keeps its (N+1,)
-# / (K+1, D) shape contract intact.
-import os, json
-cd = cache_dir(args.cache_root, args.dataset, args.task,
-               args.trial_id, args.cluster_size, args.cluster_num)
-assert os.path.isfile(f"{cd}/DONE"), (
-    f"missing cluster cache at {cd}; "
-    f"run scripts/cluster/precompute_clusters.py first"
-)
-with open(f"{cd}/meta.json") as f:
-    meta = json.load(f)
-assert meta["feat_dim"] == feats.shape[1], (
-    f"cache feat_dim={meta['feat_dim']} != current feats.shape[1]={feats.shape[1]}"
-)
-ids_np = torch.load(f"{cd}/cluster_ids.pt").numpy()
-centers_np = torch.load(f"{cd}/l2_centers.pt").numpy()
-cluster_ids = torch.LongTensor(np.append(ids_np, args.cluster_num))
-cluster_centers = torch.FloatTensor(
-    np.concatenate([centers_np, np.zeros((1, centers_np.shape[1]))], axis=0)
-)
-print(f"[CGT] loaded cluster cache: {cd}")
+# CGT/generator/gpt/gpt.py — train_and_generate
+cluster_ids, cluster_centers = load_cached_clusters(args, feats)
 ```
 
-Everything downstream (`gpt.train_and_generate`, `QuantizedDataset` in `dataset.py:127`) is shape-compatible — the empty_id padding restores the contract the rest of the code assumes.
+`load_cached_clusters` resolves the cache dir (anchoring a relative `--cache_root` to the project root via `__file__`), **fails loud** if `DONE` is missing (with a message naming the `precompute_clusters.py` command), validates `meta.json` (`feat_dim`, `cluster_size`, `cluster_num`) and tensor shapes, then re-adds the empty_id padding so it returns the exact `(N+1,)` / `(K+1, D)` contract `cluster_feats` produced. Everything downstream (`gpt.train`/`generate`, `QuantizedDataset` in `dataset.py:127`) is unchanged.
 
-Same change applies to the standard (non-train/val-restricted) call site at `gpt.py:108`; only difference is `fit_ids=None` in the original call.
+The selecting flag is `--cache_root` (added in `CGT/args.py`, default `cache/clustering`); `--cluster_size`, `--cluster_num`, `--trial_id`, `--task`, `--dataset` already exist. `train_cgt.sh` cds to the project root, so the relative default resolves without any shell/SLURM change.
+
+**Not yet migrated:** the eval/benchmark `run()` path at `gpt.py:108` (the `fit_ids=None` call) still uses `cluster_feats`. Both functions remain importable; migrating `run()` and the benchmark/BiGG consumers is future work.
 
 ### BiGG — quantize input features before normalization
 
@@ -153,7 +130,9 @@ When a train or benchmark script grows the ability to read the cache, the flags 
 | `--cache-root` | no | Default `cache/clustering`. Override only for testing alternate caches. |
 | `--trial-id` / `--trial_id` | already exists | Used to resolve `t<trial>/` for `hidden_labels`; ignored for `hidden_links` |
 
-Don't add `--cluster-sample-num` or other K-means hyperparams to the consumer side — those are baked into the cache. Mismatch between consumer expectations and `meta.json` is a fail-loud condition.
+CGT uses underscore-style flags, so the names landed as `--cache_root`, `--cluster_size`, `--cluster_num`, `--trial_id` (all already existed except `--cache_root`).
+
+Don't add `--cluster-sample-num` or other K-means hyperparams to the consumer side — those are baked into the cache. Mismatch between consumer expectations and `meta.json` is a fail-loud condition. Note for CGT specifically: the producer fits on the full fit-set (forces `cluster_sample_num = fit_set_size`), so once training reads the cache, `--cluster_sample_num` no longer affects the partition (it still appears in the synthetic variant name).
 
 ## Methodology guard-rails
 

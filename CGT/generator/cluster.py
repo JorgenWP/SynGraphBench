@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import os
 import random
@@ -236,5 +237,81 @@ def cluster_feats(args, feats, fit_ids=None):
     cluster_ids = torch.LongTensor(np.append(cluster_ids, args.cluster_num))
     cluster_centers = torch.FloatTensor(np.concatenate((cluster_centers, np.zeros((1, cluster_centers.shape[1]))), axis=0))
 
+    return cluster_ids, cluster_centers
+
+
+def _cache_dir(cache_root, dataset, task, trial, cluster_size, cluster_num):
+    """Resolve a clustering-cache entry dir.
+
+    Mirrors scripts/cluster/precompute_clusters.py:_cache_dir — hidden_links is
+    trial-invariant, so its layout drops the t<trial> segment.
+    """
+    leaf = f"k{cluster_size}_c{cluster_num}"
+    if task == "hidden_links":
+        return os.path.join(cache_root, dataset, task, leaf)
+    return os.path.join(cache_root, dataset, task, f"t{trial}", leaf)
+
+
+def load_cached_clusters(args, feats):
+    """Load a precomputed k-anonymity clustering from the shared cache.
+
+    Returns exactly the contract cluster_feats produces, so the rest of the CGT
+    pipeline (GPT training, generation, QuantizedDataset) is unaffected:
+        cluster_ids:     (N+1,) LongTensor  (trailing empty_id = args.cluster_num).
+        cluster_centers: (K+1, d) FloatTensor (L2-normed centers + trailing zero row).
+
+    Fails loud if the cache entry is missing (no DONE) or its meta.json disagrees
+    with this run — never falls back to on-the-fly clustering, so CGT and the BiGG
+    run it is compared against always read the identical partition.
+    """
+    cache_root = args.cache_root
+    if not os.path.isabs(cache_root):
+        # Anchor the relative default to the project root (CGT/generator/ -> ../..),
+        # so the cache resolves regardless of the launch cwd.
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", ".."))
+        cache_root = os.path.join(project_root, cache_root)
+
+    cd = _cache_dir(cache_root, args.dataset, args.task,
+                    args.trial_id, args.cluster_size, args.cluster_num)
+
+    if not os.path.isfile(os.path.join(cd, "DONE")):
+        raise FileNotFoundError(
+            f"[CGT] cluster cache missing (no DONE) at: {cd}\n"
+            f"Materialize it first (or the config may be infeasible: "
+            f"cluster_size*cluster_num must be <= fit_set size):\n"
+            f"  python scripts/cluster/precompute_clusters.py "
+            f"--datasets {args.dataset} --cluster-sizes {args.cluster_size} "
+            f"--cluster-nums {args.cluster_num} --tasks {args.task}"
+            + ("" if args.task == "hidden_links" else f" --trials {args.trial_id}"))
+
+    with open(os.path.join(cd, "meta.json")) as f:
+        meta = json.load(f)
+    if meta["feat_dim"] != feats.shape[1]:
+        raise ValueError(
+            f"[CGT] cache feat_dim={meta['feat_dim']} != "
+            f"feats.shape[1]={feats.shape[1]} at {cd}")
+    if meta["cluster_size"] != args.cluster_size or meta["cluster_num"] != args.cluster_num:
+        raise ValueError(
+            f"[CGT] cache size/num {(meta['cluster_size'], meta['cluster_num'])} "
+            f"!= args {(args.cluster_size, args.cluster_num)} at {cd}")
+
+    ids_np = torch.load(os.path.join(cd, "cluster_ids.pt")).numpy()
+    centers_np = torch.load(os.path.join(cd, "l2_centers.pt")).numpy()
+    if centers_np.shape[0] != args.cluster_num:
+        raise ValueError(
+            f"[CGT] cache l2_centers has {centers_np.shape[0]} rows, "
+            f"expected cluster_num={args.cluster_num} at {cd}")
+    if ids_np.shape[0] != feats.shape[0]:
+        raise ValueError(
+            f"[CGT] cache cluster_ids has {ids_np.shape[0]} entries, "
+            f"expected N={feats.shape[0]} at {cd}")
+
+    # Re-add the empty_id padding cluster_feats appends (cluster.py L2-norm block
+    # above): trailing empty_id on the ids, trailing zero row on the centers.
+    cluster_ids = torch.LongTensor(np.append(ids_np, args.cluster_num))
+    cluster_centers = torch.FloatTensor(
+        np.concatenate([centers_np, np.zeros((1, centers_np.shape[1]))], axis=0))
+    print(f"[CGT] loaded cluster cache: {cd}")
     return cluster_ids, cluster_centers
 
