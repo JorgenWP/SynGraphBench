@@ -42,6 +42,7 @@ from bench_utils import (
     parse_link_args, load_cgt_synthetic_data,
     print_comparison, resolve_cgt_trial_paths,
     _assert_link_pt_alignment, build_synthetic_dgl_graph,
+    apply_inferred_trial_id,
     format_duration,
 )
 from models.cross_graph_link_predictor import (
@@ -74,7 +75,8 @@ def set_seed(seed=3407):
 def evaluate_link_models(dataset_name, models, data_dir, data_source,
                          trials, val_ratio, test_ratio, neg_sampling,
                          decoder, epochs, patience, lr, drop_rate,
-                         h_feats, num_layers, synthetic_dir=None):
+                         h_feats, num_layers, synthetic_dir=None,
+                         trial_id=0):
     """Train and evaluate link prediction models on full graphs."""
     results = []
 
@@ -103,7 +105,7 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
             set_seed(seed)
 
             print(f"  Trial {t}, seed={seed}")
-            data.split(val_ratio, test_ratio, t, neg_sampling)
+            data.split(val_ratio, test_ratio, trial_id + t, neg_sampling)
 
             train_config = {
                 'device': 'cuda' if torch.cuda.is_available() else 'cpu',
@@ -342,7 +344,8 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
 def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir, syn_file_name,
                                      trials, val_ratio, test_ratio, neg_sampling,
                                      decoder, epochs, patience, lr, drop_rate,
-                                     h_feats, num_layers, norm_stats_path=None):
+                                     h_feats, num_layers, norm_stats_path=None,
+                                     trial_id=0):
     """Train GNNs on synthetic graph edges, validate on synthetic val, test on original test edges."""
 
     # Load normalization stats if available
@@ -372,11 +375,11 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
 
             # Synthetic graph: train + val edges
             syn_data = LinkDataset(syn_file_name, prefix=dataset_dir + '/')
-            syn_data.split(val_ratio, test_ratio, t, neg_sampling)
+            syn_data.split(val_ratio, test_ratio, trial_id + t, neg_sampling)
 
             # Original graph: test edges
             orig_data = LinkDataset(dataset_name, prefix=data_dir + '/original/')
-            orig_data.split(val_ratio, test_ratio, t, neg_sampling)
+            orig_data.split(val_ratio, test_ratio, trial_id + t, neg_sampling)
 
             # Apply same normalization as was used during synthetic generation
             if norm_stats is not None:
@@ -455,6 +458,7 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
 
 def main():
     args = parse_link_args()
+    apply_inferred_trial_id(args)
     script_start = time.time()
 
     # Resolve default paths relative to project root
@@ -516,7 +520,8 @@ def main():
             args.val_ratio, args.test_ratio,
             args.neg_sampling, args.decoder,
             args.epochs, args.patience,
-            args.lr, args.drop_rate, args.h_feats, args.num_layers)
+            args.lr, args.drop_rate, args.h_feats, args.num_layers,
+            trial_id=args.trial_id)
         all_results.extend(results)
 
     # --- Phase 2: Evaluate on synthetic data ---
@@ -581,7 +586,8 @@ def main():
                 args.neg_sampling, args.decoder,
                 args.epochs, args.patience,
                 args.lr, args.drop_rate, args.h_feats, args.num_layers,
-                norm_stats_path=norm_stats_path)
+                norm_stats_path=norm_stats_path,
+                trial_id=args.trial_id)
         all_results.extend(results)
 
     # --- Save and display results ---

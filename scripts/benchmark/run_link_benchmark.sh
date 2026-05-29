@@ -16,6 +16,13 @@
 #   task            Task subfolder under <dataset>/ (default: hidden_links)
 #                   Supported: hidden_labels, hidden_links, structure
 #
+# GADBench split id (trial_id) is auto-inferred from a BiGG synthetic_name
+# containing _loadsub_..._split{N}_n... and is NOT exposed as a positional
+# argument — BiGG's training subsample for split N excludes only that split's
+# test nodes, so a misaligned trial_id silently leaks training data. To
+# override (legacy stems / cross-split debugging), call the Python script
+# directly with --trial_id.
+#
 # Examples:
 #   bash scripts/benchmark/run_link_benchmark.sh reddit GCN,GIN 3 cgt
 #   bash scripts/benchmark/run_link_benchmark.sh reddit GCN,GIN 3 cgt "" random dot hidden_links
