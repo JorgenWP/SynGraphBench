@@ -1,6 +1,8 @@
 import argparse
+import json
 import math
 import os
+import re
 import numpy as np
 import torch
 import dgl
@@ -55,6 +57,12 @@ def parse_link_args():
                                  'datasets/kanon/<dataset>/<stem>.dgl. '
                                  'Only valid with --synthetic_type graph and a '
                                  'single dataset in --datasets.')
+
+    data_group.add_argument('--cache_root', type=str, default='cache/clustering',
+                            help='Root of the precomputed clustering cache '
+                                 '(relative to project root unless absolute). '
+                                 'CGT comp-graph baselines read cluster centers '
+                                 'from here.')
 
     lp_group = parser.add_argument_group('Link prediction')
     lp_group.add_argument('--val_ratio', type=float, default=0.05,
@@ -146,6 +154,11 @@ def parse_args():
                                  'single dataset in --datasets.')
     data_group.add_argument('--semi_supervised', type=int, default=0,
                             help='Use semi-supervised split (0 or 1)')
+    data_group.add_argument('--cache_root', type=str, default='cache/clustering',
+                            help='Root of the precomputed clustering cache '
+                                 '(relative to project root unless absolute). '
+                                 'CGT comp-graph baselines read cluster centers '
+                                 'from here.')
     data_group.add_argument('--trial_id', type=int, default=0,
                             help='Trial ID for mask split (must match CGT training)')
     data_group.add_argument('--cdf_invert', type=str, default='linear',
@@ -520,6 +533,139 @@ def load_cgt_synthetic_data(syn_path):
         return torch.load(syn_path)
 
 
+def _cache_dir(cache_root, dataset, task, trial, cluster_size, cluster_num):
+    """Resolve a clustering-cache entry dir.
+
+    Mirrors scripts/cluster/precompute_clusters.py:_cache_dir (and CGT's
+    load_cached_clusters). hidden_links is trial-invariant, so its layout
+    drops the t<trial> segment.
+    """
+    leaf = f"k{cluster_size}_c{cluster_num}"
+    if task == "hidden_links":
+        return os.path.join(cache_root, dataset, task, leaf)
+    return os.path.join(cache_root, dataset, task, f"t{trial}", leaf)
+
+
+def parse_cluster_kc(stem):
+    """Parse (cluster_num, cluster_size) from a CGT variant stem.
+
+    The stem is {dataset}_e{epochs}_k{cluster_num}_c{cluster_size}_d..._f..._s...
+    so the stem's `k` is cluster_num and `c` is cluster_size. NOTE the inversion
+    versus the cache leaf, which is k{cluster_size}_c{cluster_num}.
+    """
+    m = re.search(r"_k(\d+)_c(\d+)", stem)
+    if not m:
+        raise ValueError(
+            f"cannot parse _k<cluster_num>_c<cluster_size> from "
+            f"synthetic_name={stem!r}; required to resolve the clustering cache.")
+    return int(m.group(1)), int(m.group(2))
+
+
+def apply_cluster_cache(syn_data, original_graph, cache_root, dataset, task,
+                        cluster_num, cluster_size, role):
+    """Reconcile a CGT .pt's cluster codebook with the shared clustering cache.
+
+    Mutates syn_data in place so the downstream builders read the cache-sourced
+    cluster_ids / cluster_centers, matching the partition CGT (and BiGG) train
+    against. Fails loud on a missing cache entry — never recomputes.
+
+    role="quantized": the cache is authoritative; its cluster_ids / l2_centers
+        are written into syn_data (the .pt copy is overridden if it differs).
+    role="synthetic": the .pt's gen_*_ids index the codebook the GPT trained on,
+        so the .pt codebook MUST equal the cache; a mismatch is a stale .pt and
+        raises (its generated sequences would index a different codebook).
+
+    Returns the resolved cache directory (for logging/tests).
+    """
+    if not os.path.isabs(cache_root):
+        # Anchor the relative default to the project root (scripts/benchmark -> ../..)
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", ".."))
+        cache_root = os.path.join(project_root, cache_root)
+
+    if task == "hidden_links":
+        trial = None
+    else:
+        trial = syn_data.get("trial_id")
+        if trial is None:
+            raise ValueError(
+                f"[bench] cannot resolve cache trial for task={task}: the .pt "
+                f"lacks 'trial_id' metadata. Retrain CGT for this variant so the "
+                f"artifact records its trial.")
+
+    cd = _cache_dir(cache_root, dataset, task, trial, cluster_size, cluster_num)
+    if not os.path.isfile(os.path.join(cd, "DONE")):
+        raise FileNotFoundError(
+            f"[bench] cluster cache missing (no DONE) at: {cd}\n"
+            f"Materialize it first:\n"
+            f"  python scripts/cluster/precompute_clusters.py "
+            f"--datasets {dataset} --cluster-sizes {cluster_size} "
+            f"--cluster-nums {cluster_num} --tasks {task}"
+            + ("" if task == "hidden_links" else f" --trials {trial}"))
+
+    with open(os.path.join(cd, "meta.json")) as f:
+        meta = json.load(f)
+    N = original_graph.num_nodes()
+    feat_dim = original_graph.ndata["feature"].shape[1]
+    if meta["feat_dim"] != feat_dim:
+        raise ValueError(
+            f"[bench] cache feat_dim={meta['feat_dim']} != graph "
+            f"feat_dim={feat_dim} at {cd}")
+    if meta["cluster_size"] != cluster_size or meta["cluster_num"] != cluster_num:
+        raise ValueError(
+            f"[bench] cache (size,num)=({meta['cluster_size']},{meta['cluster_num']}) "
+            f"!= stem ({cluster_size},{cluster_num}) at {cd}")
+
+    ids_np = torch.load(os.path.join(cd, "cluster_ids.pt")).numpy()
+    centers_np = torch.load(os.path.join(cd, "l2_centers.pt")).numpy()
+    if centers_np.shape[0] != cluster_num:
+        raise ValueError(
+            f"[bench] cache l2_centers has {centers_np.shape[0]} rows, "
+            f"expected cluster_num={cluster_num} at {cd}")
+    if ids_np.shape[0] != N:
+        raise ValueError(
+            f"[bench] cache cluster_ids has {ids_np.shape[0]} entries, "
+            f"expected N={N} at {cd}")
+
+    # Re-add the empty_id padding CGT appends so the shape matches the .pt
+    # contract ((K+1, D) centers, (N+1,) ids). build_synthetic_dgl_graph reads
+    # empty_id = cluster_centers.shape[0] - 1, so the K+1 row MUST be preserved.
+    centers_pad = np.concatenate(
+        [centers_np, np.zeros((1, centers_np.shape[1]))], axis=0).astype(np.float32)
+    ids_pad = np.append(ids_np, cluster_num).astype(np.int64)
+
+    # Validate against the .pt's own codebook when present.
+    if "cluster_centers" in syn_data and "cluster_ids" in syn_data:
+        pt_centers = syn_data["cluster_centers"]
+        pt_centers = (pt_centers.cpu().numpy() if torch.is_tensor(pt_centers)
+                      else np.asarray(pt_centers)).astype(np.float32)
+        pt_ids = _load_cluster_ids(syn_data, N)  # stripped to (N,)
+        centers_match = (pt_centers.shape == centers_pad.shape
+                         and np.allclose(pt_centers, centers_pad,
+                                         rtol=1e-5, atol=1e-6))
+        ids_match = np.array_equal(pt_ids, ids_np)
+        if role == "synthetic" and not (centers_match and ids_match):
+            raise AssertionError(
+                f"[bench] synthetic-cgt .pt codebook != cache codebook at {cd} "
+                f"(centers_match={centers_match}, ids_match={ids_match}). The "
+                f".pt's gen_*_ids index a different codebook than the cache — the "
+                f".pt is stale relative to this cache entry. Retrain CGT for this "
+                f"variant (or re-run precompute without --force).")
+        if role == "quantized" and not (centers_match and ids_match):
+            print(f"  [bench] NOTE: quantized baseline overriding .pt codebook "
+                  f"with cache (centers_match={centers_match}, "
+                  f"ids_match={ids_match}) at {cd}")
+    elif role == "synthetic":
+        print(f"  [bench] WARNING: .pt lacks an embedded codebook; cannot verify "
+              f"gen-sequence consistency against cache {cd}. Trusting cache — "
+              f"retrain CGT to embed the codebook for full validation.")
+
+    syn_data["cluster_centers"] = torch.from_numpy(centers_pad)
+    syn_data["cluster_ids"] = torch.from_numpy(ids_pad)
+    print(f"  [bench] cluster cache ({role}): {cd}")
+    return cd
+
+
 def build_synthetic_dgl_graph(original_graph, synthetic_data,
                               trial_id=0, semi_supervised=False):
     """
@@ -819,12 +965,16 @@ def resolve_cgt_trial_paths(syn_path, num_trials):
 
 
 def make_cgt_rebuild_fn(original_graph, trial_paths,
-                        trial_id_offset=0, semi_supervised=False):
+                        trial_id_offset=0, semi_supervised=False,
+                        cluster_cache=None):
     """Return a rebuild_datasets_fn(t) that loads per-trial .pt files.
 
     For trial t: loads trial_paths[t], builds synthetic train/val from it,
     and builds the test set from the original graph using mask column
     (trial_id_offset + t) so the test split varies across trials.
+
+    When cluster_cache is set, the per-trial .pt codebook is validated against
+    the shared clustering cache (role="synthetic") before use.
     """
     # Precompute graph data shared across trials
     adj_list = dgl_to_adj_list(original_graph)
@@ -834,6 +984,9 @@ def make_cgt_rebuild_fn(original_graph, trial_paths,
 
     def rebuild(t):
         syn_data = load_cgt_synthetic_data(trial_paths[t])
+        if cluster_cache is not None:
+            apply_cluster_cache(syn_data, original_graph, **cluster_cache,
+                                role="synthetic")
         step_num, sample_num, noise_num, self_conn = _extract_cg_params(syn_data)
         total_sample = sample_num + noise_num
 

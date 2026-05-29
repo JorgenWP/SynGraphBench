@@ -104,20 +104,16 @@ After CDF/quantile normalization → BiGG training → inversion via `_invert_to
 
 ### Benchmark — load cache instead of reading centers from synthetic .pt
 
-`scripts/benchmark/bench_utils.py` already has the consumer skeleton in `OriginalCompGraphQuantizedDataset` (lines 985-1045) — it currently reads cluster centers from the synthetic `.pt` payload. Two adaptations land here:
+**Status: implemented for both tasks** (anomaly `anomaly_benchmark.py`, link `link_benchmark.py`). The benchmark runs in the **GADBench** conda env and must NOT import `CGT/generator/cluster.py` (it imports `k_means_constrained`/`sklearn`). So the loader is duplicated into `scripts/benchmark/bench_utils.py` — `apply_cluster_cache(syn_data, original_graph, cache_root, dataset, task, cluster_num, cluster_size, role)` plus `_cache_dir` and `parse_cluster_kc` — using only `json`/`os`/`re`/`numpy`/`torch`.
 
-1. **`original_cg_quantized` path** (the quantization-only baseline): replace the `.pt`-embedded `cluster_centers` / `cluster_ids` with cache loads keyed by `(dataset, task, trial, cluster_size, cluster_num)`. This makes the baseline read exactly the same partition the synthetic CGT run was trained against.
+The benchmark builds cluster features from `syn_data['cluster_ids']` / `syn_data['cluster_centers']` in five paths; `apply_cluster_cache` mutates `syn_data` in place at each so they read the cache instead of the `.pt` payload, keyed by `(dataset, task, trial, cluster_size, cluster_num)`:
 
-2. **Real-data baseline `original_cg`** (Phase 1 and Phase 2 baselines): if the synthetic side uses cluster-center features, the baseline MUST too — otherwise the baseline operates in a richer feature space than any synthetic variant, and "synthetic vs real" stops being apples-to-apples. Replace `original_graph.ndata['feature']` (currently L2-normalized at `bench_utils.py:936`) with `l2_centers[cluster_ids]` (already L2-normed; same K directions the synthetic sees).
+- **`role="quantized"`** — the cache is authoritative. Used by `build_original_cg_quantized_datasets` (AD) and `build_quantized_dgl_graph` (LP). Pins the quantization-only baseline to the same partition CGT/BiGG are compared against.
+- **`role="synthetic"`** — the `.pt`'s `gen_*_ids` index the codebook the GPT trained on, so the cache codebook MUST equal the `.pt`'s (training already read the cache). `apply_cluster_cache` **asserts** `np.allclose(centers)` / `np.array_equal(ids)` and fails loud on mismatch (stale `.pt`). Used by `build_cgt_datasets`, `make_cgt_rebuild_fn` (AD), `build_synthetic_dgl_graph` (LP).
 
-```python
-# benchmark — feature substitution for the real-data baseline under k-anonymity
-cd = cache_dir(cache_root, dataset, task, trial, cluster_size, cluster_num)
-l2_centers = torch.load(f"{cd}/l2_centers.pt").numpy()
-cluster_ids = torch.load(f"{cd}/cluster_ids.pt").numpy()
-features = l2_centers[cluster_ids]   # (N, D); L2-normed, K distinct rows
-# pass features into the GNN training pipeline as usual — no further normalization
-```
+Key details: the cache stores `(N,)` ids and `(K,D)` `l2_centers`; the loader re-adds the trailing empty_id padding to `(N+1,)` / `(K+1,D)` (`build_synthetic_dgl_graph` reads `empty_id = cluster_centers.shape[0]-1`). Cache trial = `syn_data['trial_id']` for `hidden_labels` (fail loud if absent); `None` for `hidden_links`. `cluster_num`/`cluster_size` are parsed from the variant stem via `parse_cluster_kc` — **note the inversion**: stem `_k<cluster_num>_c<cluster_size>` vs cache leaf `k<cluster_size>_c<cluster_num>`.
+
+**`original_cg` (full real-feature baseline) is intentionally NOT cache-substituted** — it is the richer-feature reference anchoring the ablation ladder (`original-cg → original-cg-quantized` = quantization cost; `original-cg-quantized → synthetic-cgt` = generation cost). The matched k-anonymity baseline is `original_cg_quantized`, which reads the cache. `eval_mode=original_cg`-only runs never touch the cache.
 
 ## CLI conventions for adapted scripts
 
@@ -139,7 +135,7 @@ Don't add `--cluster-sample-num` or other K-means hyperparams to the consumer si
 When adapting scripts, enforce these or the comparison silently breaks:
 
 1. **Same cache, both models.** A CGT run and the BiGG run it's compared against must point at the same `(dataset, task, trial, cluster_size, cluster_num)` cache entry. Surface the resolved cache directory in every run's log (`[CGT] loaded cluster cache: ...`, `[BiGG] loaded cluster cache: ...`) so reviewers can confirm by grep.
-2. **Same cache, baseline included.** If the synthetic eval uses cluster-center features, the real-data baseline must too. Otherwise the baseline has a feature-space advantage and the "synthetic vs real" gap is not measuring generation quality, it's measuring quantization cost.
+2. **Same cache, matched baseline.** The matched k-anonymity baseline is `original_cg_quantized` (it reads `l2_centers`/`cluster_ids` from the cache), NOT a re-featured `original_cg`. `original_cg` deliberately stays in the full real-feature space as the richer-feature reference: `original-cg → original-cg-quantized` measures quantization cost, `original-cg-quantized → synthetic-cgt` measures generation cost. Keep both, and ensure the quantized baseline points at the same cache entry the synthetic run was trained against.
 3. **Fail-loud on missing `DONE`.** Never compute clustering on the fly as a fallback when the cache is missing — re-running `scripts/cluster/precompute_clusters.py` is the only path to materialize an entry, and it should be a deliberate, logged act.
 4. **No per-run reclustering of the same key.** If two scripts in the same comparison both decide to "just refit because the cache is stale," they will diverge (different random init, different repair tie-breaks). Refit once via the producer, write the cache, then read.
 

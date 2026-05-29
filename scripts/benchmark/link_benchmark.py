@@ -44,6 +44,7 @@ from bench_utils import (
     print_comparison, resolve_cgt_trial_paths,
     _assert_link_pt_alignment, build_synthetic_dgl_graph,
     build_quantized_dgl_graph,
+    apply_cluster_cache, parse_cluster_kc,
     format_duration,
 )
 from models.cross_graph_link_predictor import (
@@ -335,7 +336,7 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
                              neg_sampling, decoder, epochs, patience,
                              trial_paths, batch_size, lr, drop_rate,
                              h_feats, num_layers, eval_mode='both',
-                             curve_records=None):
+                             cluster_cache=None, curve_records=None):
     """Evaluate link prediction on CGT merged computation graphs.
 
     Runs three comparisons:
@@ -416,6 +417,9 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
                 syn_data, expected_trial_id=t,
                 expected_test_edges=expected_test_edges,
                 source_label=f'original-cg-quantized[t={t}]')
+            if cluster_cache is not None:
+                apply_cluster_cache(syn_data, data.graph, **cluster_cache,
+                                    role="quantized")
             return build_quantized_dgl_graph(
                 data.graph, syn_data, trial_id=t)
 
@@ -435,6 +439,9 @@ def evaluate_link_models_cgt(dataset_name, models, data_dir,
                 syn_data, expected_trial_id=t,
                 expected_test_edges=expected_test_edges,
                 source_label=f'synthetic-cgt[t={t}]')
+            if cluster_cache is not None:
+                apply_cluster_cache(syn_data, data.graph, **cluster_cache,
+                                    role="synthetic")
             return build_synthetic_dgl_graph(
                 data.graph, syn_data, trial_id=t)
 
@@ -722,6 +729,14 @@ def main():
         print(f"\n  Found {args.synthetic_type} synthetic data: {syn_path}")
 
         if args.synthetic_type == 'comp-graph':
+            # The quantized/synthetic baselines read cluster centers from the
+            # shared clustering cache (cluster_num/size parsed from the stem;
+            # hidden_links is trial-invariant).
+            cluster_num, cluster_size = parse_cluster_kc(stem)
+            cluster_cache = dict(
+                cache_root=args.cache_root, dataset=dataset_name,
+                task=args.task, cluster_num=cluster_num,
+                cluster_size=cluster_size)
             results = evaluate_link_models_cgt(
                 dataset_name, models, args.data_dir,
                 args.trials, args.val_ratio, args.test_ratio,
@@ -730,6 +745,7 @@ def main():
                 args.batch_size, args.lr, args.drop_rate,
                 args.h_feats, args.num_layers,
                 eval_mode=args.eval_mode,
+                cluster_cache=cluster_cache,
                 curve_records=all_curve_records)
         else:
             # Full graph (BiGG, etc.): train+val on synthetic, test on original.

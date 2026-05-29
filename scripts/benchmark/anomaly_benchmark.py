@@ -49,6 +49,7 @@ from bench_utils import (
     load_bigg_synthetic_graph, load_bigg_real_subsampled_graph,
     apply_normalization,
     resolve_cgt_trial_paths, make_cgt_rebuild_fn,
+    apply_cluster_cache, parse_cluster_kc,
     _assert_pt_alignment, format_duration,
 )
 from models.anomaly_detection.cgt_detector import (
@@ -312,7 +313,7 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
                         trials, epochs, patience, syn_path,
                         batch_size, lr, drop_rate, h_feats, num_layers,
                         trial_id=0, semi_supervised=False, eval_mode='both',
-                        curve_records=None):
+                        cluster_cache=None, curve_records=None):
     """Evaluate GNN models on CGT computation graphs.
 
     Runs up to three comparisons, gated by ``eval_mode``:
@@ -387,11 +388,17 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
         if trial_paths_probe is not None:
             def quant_rebuild(t):
                 syn_data_t = load_cgt_synthetic_data(trial_paths_probe[t])
+                if cluster_cache is not None:
+                    apply_cluster_cache(syn_data_t, data.graph, **cluster_cache,
+                                        role="quantized")
                 return build_original_cg_quantized_datasets(
                     data.graph, syn_data_t,
                     trial_id=trial_id + t, semi_supervised=semi_supervised)
             quant_train0, quant_val0, quant_test0 = quant_rebuild(0)
         else:
+            if cluster_cache is not None:
+                apply_cluster_cache(syn_data, data.graph, **cluster_cache,
+                                    role="quantized")
             quant_train0, quant_val0, quant_test0 = build_original_cg_quantized_datasets(
                 data.graph, syn_data, trial_id=trial_id, semi_supervised=semi_supervised)
             def quant_rebuild(t):
@@ -415,10 +422,14 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
         if trial_paths is not None:
             print(f"  Found {len(trial_paths)} per-trial .pt files — varying splits across trials.")
             syn_data_0 = load_cgt_synthetic_data(trial_paths[0])
+            if cluster_cache is not None:
+                apply_cluster_cache(syn_data_0, data.graph, **cluster_cache,
+                                    role="synthetic")
             syn_train0, syn_val0, test_ds0 = build_cgt_datasets(data.graph, syn_data_0)
             rebuild_fn = make_cgt_rebuild_fn(
                 data.graph, trial_paths,
-                trial_id_offset=trial_id, semi_supervised=semi_supervised)
+                trial_id_offset=trial_id, semi_supervised=semi_supervised,
+                cluster_cache=cluster_cache)
             results.extend(_run_cg_trials(
                 dataset_name, cg_models, syn_train0, syn_val0, test_ds0,
                 feat_dim, 'synthetic-cgt', trials, epochs, patience,
@@ -438,6 +449,9 @@ def evaluate_models_cgt(dataset_name, models, data_dir,
                 expected_test_ids=single_test_ids,
                 source_label='synthetic-cgt[single-file]',
             )
+            if cluster_cache is not None:
+                apply_cluster_cache(syn_data, data.graph, **cluster_cache,
+                                    role="synthetic")
             syn_train, syn_val, test_ds = build_cgt_datasets(data.graph, syn_data)
             results.extend(_run_cg_trials(
                 dataset_name, cg_models, syn_train, syn_val, test_ds,
@@ -713,7 +727,14 @@ def main():
             print(f"\n  Found {args.synthetic_type} synthetic data: {syn_path}")
 
         if args.synthetic_type == 'comp-graph':
-            # CGT: use computation graph trees with GADBench GNNs
+            # CGT: use computation graph trees with GADBench GNNs.
+            # The quantized/synthetic baselines read cluster centers from the
+            # shared clustering cache (cluster_num/size parsed from the stem).
+            cluster_num, cluster_size = parse_cluster_kc(stem)
+            cluster_cache = dict(
+                cache_root=args.cache_root, dataset=dataset_name,
+                task=args.task, cluster_num=cluster_num,
+                cluster_size=cluster_size)
             results = evaluate_models_cgt(
                 dataset_name, models, args.data_dir,
                 args.trials, args.epochs, args.patience, syn_path,
@@ -722,6 +743,7 @@ def main():
                 trial_id=args.trial_id,
                 semi_supervised=bool(args.semi_supervised),
                 eval_mode=args.eval_mode,
+                cluster_cache=cluster_cache,
                 curve_records=all_curve_records)
         else:
             # Full graph (BiGG, etc.): train+val on synthetic, test on original.
