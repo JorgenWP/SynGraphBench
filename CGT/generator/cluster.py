@@ -184,9 +184,18 @@ def cluster_fit_and_assign(args, feats, fit_ids=None):
         cluster_ids[fit_arr] = clf.predict(
             pca.transform(fit_feats), size_min=args.cluster_size).astype(np.int64)
         if n_holdout:
+            # Nearest-center in PCA space, batched over nodes so the
+            # (batch, K, d) distance tensor never blows up RAM (a single
+            # (n_holdout, K, d) broadcast is hundreds of GB on large graphs).
             held_pca = pca.transform(feats[non_fit_mask])
-            d2 = ((held_pca[:, None, :] - clf.cluster_centers_[None, :, :]) ** 2).sum(-1)
-            cluster_ids[non_fit_mask] = d2.argmin(1).astype(np.int64)
+            centers_pca = clf.cluster_centers_
+            held_ids = np.empty(held_pca.shape[0], dtype=np.int64)
+            batch_size = 1000
+            for s in range(0, held_pca.shape[0], batch_size):
+                chunk = held_pca[s:s + batch_size]
+                d2 = ((chunk[:, None, :] - centers_pca[None, :, :]) ** 2).sum(-1)
+                held_ids[s:s + batch_size] = d2.argmin(1)
+            cluster_ids[non_fit_mask] = held_ids
         repair_moves = 0
     else:
         print(f"[Clustering] assigning {n} nodes via argmin + greedy repair "
