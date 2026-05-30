@@ -4,7 +4,9 @@ Writes one cache entry per `(dataset, task, [trial,] cluster_size, cluster_num)`
 under `cache/clustering/`. Each entry contains:
   - cluster_ids.pt     (N,) LongTensor, node -> cluster id
   - raw_centers.pt     (K, D) FloatTensor, mean of pre-L2-norm features per cluster
-                       (BiGG's input; BiGG applies its own CDF/quantile normalization)
+                       over the fit set (train+val) members only — matches the
+                       population l2_centers represent (BiGG's input; BiGG applies
+                       its own CDF/quantile normalization)
   - l2_centers.pt      (K, D) FloatTensor, L2-normed in original space
                        (CGT's input; matches CGT's current convention)
   - meta.json          dataset/task/trial/k/etc. + member-count stats
@@ -108,18 +110,29 @@ def _save_atomic(cache_dir, cluster_ids, raw_centers, l2_centers, meta):
     open(osp.join(cache_dir, 'DONE'), 'w').close()
 
 
-def _compute_raw_centers(feat_raw, cluster_ids, k):
+def _compute_raw_centers(feat_raw, cluster_ids, k, fit_ids=None):
     """Mean of truly-raw (pre-L2-norm) features per cluster.
 
-    Empty clusters get a zero row (kept consistent with CGT's empty_id
-    convention, though that row is not appended here).
+    Averages over the fit set (train+val) members only when `fit_ids` is given,
+    matching l2_centers (which come from a k-means fit on train+val): test
+    features never enter any released center, so BiGG's codebook stays on the
+    same k-anonymous population as CGT's. With `fit_ids=None` (hidden_links,
+    where the fit set is all nodes) this averages over every node.
+
+    Every cluster has >= cluster_size fit members, so no fit-scoped row is empty;
+    empty rows (if any) stay zero, consistent with CGT's empty_id convention.
     """
     d = feat_raw.shape[1]
     raw_centers = np.zeros((k, d), dtype=np.float32)
+    if fit_ids is None:
+        feat_fit, ids_fit = feat_raw, cluster_ids
+    else:
+        fit_arr = np.asarray(fit_ids, dtype=np.int64)
+        feat_fit, ids_fit = feat_raw[fit_arr], cluster_ids[fit_arr]
     for c in range(k):
-        mask = cluster_ids == c
+        mask = ids_fit == c
         if mask.any():
-            raw_centers[c] = feat_raw[mask].mean(axis=0)
+            raw_centers[c] = feat_fit[mask].mean(axis=0)
     return raw_centers
 
 
@@ -159,9 +172,10 @@ def _process_one(args_ns, feat_raw, feat_l2, fit_ids, dataset, task,
     norms = np.where(norms == 0, 1.0, norms)
     l2_centers = (centers_orig / norms).astype(np.float32)
 
-    # BiGG-side centers: average pre-L2-norm features per cluster.
+    # BiGG-side centers: average pre-L2-norm features per cluster over the fit
+    # set (train+val) only, matching the train+val population l2_centers represent.
     raw_centers = _compute_raw_centers(feat_raw, cluster_ids_np,
-                                       centers_orig.shape[0])
+                                       centers_orig.shape[0], fit_ids=fit_ids)
 
     meta = {
         'dataset': dataset,

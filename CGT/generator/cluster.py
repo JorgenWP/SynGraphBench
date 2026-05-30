@@ -12,8 +12,10 @@ from k_means_constrained import KMeansConstrained
 #from .clustering import clustering_algorithm
 #from .clustering import clustering_params
 
-# Above this node count, KMeansConstrained.predict (min-cost flow over N*K edges)
-# becomes infeasible on RAM/time; fall back to argmin + greedy repair instead.
+# Above this fit-set size, KMeansConstrained.predict (min-cost flow over
+# |fit set|*K edges) becomes infeasible on RAM/time; fall back to argmin +
+# greedy repair instead. The constraint runs over the fit set (train+val), so
+# this bounds the fit set, not all N.
 # Empirical — validate on Elliptic (~204K nodes) and lower if needed.
 _CONSTRAINED_MAX_N = 500_000
 
@@ -133,14 +135,18 @@ def cluster_fit_and_assign(args, feats, fit_ids=None):
 
     Input:
         feats: original feature matrix (N, d).
-        fit_ids: optional node id subset used to fit k-means (e.g. train+val);
-            assignment still covers all nodes.
+        fit_ids: optional node id subset used to fit k-means AND to enforce the
+            min cluster size (e.g. train+val). Assignment still covers all N
+            nodes, but the k-anonymity floor is guaranteed only on the fit set;
+            holdout nodes (outside fit_ids) are assigned by unconstrained
+            nearest-center and never dilute the floor. None => fit/constrain on
+            all nodes.
     Return:
         cluster_ids: (N,) int64 ndarray.
         cluster_centers: (K, d) float ndarray in original feature space
             (pre-L2-norm).
-        stats: dict with member-count stats and repair_moves for downstream
-            logging / meta.json.
+        stats: dict with member-count stats (incl. fit_min, the guaranteed
+            train+val floor) and repair_moves for downstream logging / meta.json.
     """
     start_time = perf_counter()
     fit_feats = feats if fit_ids is None else feats[fit_ids]
@@ -155,67 +161,106 @@ def cluster_fit_and_assign(args, feats, fit_ids=None):
     else:
         cluster_centers, pca, clf = kmeans(fit_feats, args.cluster_num, args.cluster_size, args.cluster_sample_num)
 
-    use_constrained = (clf is not None) and (feats.shape[0] <= _CONSTRAINED_MAX_N)
+    # The k-anonymity (min cluster size) constraint is enforced ONLY on the fit
+    # set (train+val for hidden_labels) — that is the population the generative
+    # model is trained on, so the floor must hold there. Holdout nodes (e.g. the
+    # anomaly test set) are assigned afterward by unconstrained nearest-center;
+    # they appear in the partition only as neighbour / computation-graph context
+    # and must not dilute the floor.
+    n = feats.shape[0]
+    fit_arr = (np.arange(n, dtype=np.int64) if fit_ids is None
+               else np.asarray(fit_ids, dtype=np.int64))
+    non_fit_mask = np.ones(n, dtype=bool)
+    non_fit_mask[fit_arr] = False
+    n_holdout = int(non_fit_mask.sum())
+
+    # Size the constrained/argmin decision on the set the MCF actually runs over
+    # (the fit set), not all N.
+    use_constrained = (clf is not None) and (fit_feats.shape[0] <= _CONSTRAINED_MAX_N)
+    cluster_ids = np.empty(n, dtype=np.int64)
     if use_constrained:
-        print(f"[Clustering] assigning {feats.shape[0]} nodes via constrained MCF "
-              f"(size_min={args.cluster_size})")
-        cluster_ids = clf.predict(pca.transform(feats), size_min=args.cluster_size).astype(np.int64)
+        print(f"[Clustering] assigning {fit_feats.shape[0]} fit nodes via constrained MCF "
+              f"(size_min={args.cluster_size}); {n_holdout} holdout nodes via nearest-center")
+        cluster_ids[fit_arr] = clf.predict(
+            pca.transform(fit_feats), size_min=args.cluster_size).astype(np.int64)
+        if n_holdout:
+            held_pca = pca.transform(feats[non_fit_mask])
+            d2 = ((held_pca[:, None, :] - clf.cluster_centers_[None, :, :]) ** 2).sum(-1)
+            cluster_ids[non_fit_mask] = d2.argmin(1).astype(np.int64)
         repair_moves = 0
     else:
-        print(f"[Clustering] assigning {feats.shape[0]} nodes via argmin + greedy repair "
-              f"(size_min={args.cluster_size}, N>{_CONSTRAINED_MAX_N} or DP)")
+        print(f"[Clustering] assigning {n} nodes via argmin + greedy repair "
+              f"(size_min={args.cluster_size} on {fit_feats.shape[0]} fit nodes; "
+              f"N>{_CONSTRAINED_MAX_N} or DP)")
         batch_size = 1000
-        cluster_ids = np.zeros(feats.shape[0], dtype=np.int64)
-        for batch in range(feats.shape[0] // batch_size + 1):
-            if batch < feats.shape[0] // batch_size:
+        for batch in range(n // batch_size + 1):
+            if batch < n // batch_size:
                 idx = list(range(batch * batch_size, (batch + 1) * batch_size))
             else:
-                idx = list(range(batch * batch_size, feats.shape[0]))
+                idx = list(range(batch * batch_size, n))
             if not idx:
                 continue
             cluster_ids[idx] = ((feats[idx, None, :] - cluster_centers[None, :, :]) ** 2).sum(-1).argmin(1)
-        cluster_ids, repair_moves = _repair_min_size(cluster_ids, feats, cluster_centers, args.cluster_size)
+        # Repair the floor on the fit set only; holdout nodes keep their argmin.
+        fit_sub, repair_moves = _repair_min_size(
+            cluster_ids[fit_arr].copy(), fit_feats, cluster_centers, args.cluster_size)
+        cluster_ids[fit_arr] = fit_sub
 
-    sizes = np.bincount(cluster_ids, minlength=cluster_centers.shape[0])
+    k = cluster_centers.shape[0]
+    sizes = np.bincount(cluster_ids, minlength=k)
     empty = int((sizes == 0).sum())
     nonzero = sizes[sizes > 0]
     min_nonzero = int(nonzero.min()) if nonzero.size > 0 else 0
-    print(f"[Clustering] produced {cluster_centers.shape[0]} clusters (empty={empty}); "
-          f"member counts: min_nonzero={min_nonzero}, max={sizes.max()}, "
+    # The k-anonymity floor as actually guaranteed: min per-cluster count over
+    # the fit set (the population trained on). Fail loud if it slips below the
+    # target — both the constrained and the greedy-repair paths guarantee it.
+    fit_sizes = np.bincount(cluster_ids[fit_arr], minlength=k)
+    fit_min = int(fit_sizes.min())
+    if fit_min < args.cluster_size:
+        raise RuntimeError(
+            f"[Clustering] k-anonymity violated on fit set: min fit-cluster size "
+            f"{fit_min} < cluster_size {args.cluster_size}.")
+    print(f"[Clustering] produced {k} clusters (empty={empty}); "
+          f"all-N member counts: min_nonzero={min_nonzero}, max={sizes.max()}, "
           f"mean={sizes.mean():.1f}, median={int(np.median(sizes))}, std={sizes.std():.1f}; "
-          f"repair_moves={repair_moves}")
+          f"fit-set floor min={fit_min} (>= cluster_size={args.cluster_size}); "
+          f"holdout={n_holdout}; repair_moves={repair_moves}")
 
     elapsed = perf_counter() - start_time
     print("Clustering time: {:.3f}".format(elapsed))
 
     stats = {
-        'k': int(cluster_centers.shape[0]),
+        'k': int(k),
         'empty': empty,
         'min_nonzero': min_nonzero,
         'max': int(sizes.max()),
         'mean': float(sizes.mean()),
         'median': int(np.median(sizes)),
         'std': float(sizes.std()),
+        'fit_min': fit_min,
+        'holdout_assigned': n_holdout,
         'repair_moves': int(repair_moves),
         'elapsed_seconds': float(elapsed),
         'fit_method': fit_method,
         'fit_set_size': int(len(fit_feats)),
-        'total_nodes': int(feats.shape[0]),
+        'total_nodes': int(n),
     }
     return cluster_ids, cluster_centers, stats
 
 
 def cluster_feats(args, feats, fit_ids=None):
     """
-    Cluster feature vectors. Final assignment is k-anonymity-preserving:
-    constrained min-cost flow over all nodes for N <= _CONSTRAINED_MAX_N,
-    or argmin + greedy repair otherwise (and on the DP path, which has no
-    fitted KMeansConstrained object).
+    Cluster feature vectors. The k-anonymity (min cluster size) constraint is
+    enforced on the fit set: constrained min-cost flow when |fit set| <=
+    _CONSTRAINED_MAX_N, else argmin + greedy repair (also the DP path, which has
+    no fitted KMeansConstrained object). Holdout nodes outside fit_ids are
+    assigned afterward by unconstrained nearest-center.
 
     Input:
         feats: original feature matrix (N, d).
-        fit_ids: optional node id subset used to fit k-means (e.g. train+val);
-            assignment still covers all nodes.
+        fit_ids: optional node id subset used to fit k-means and enforce the min
+            cluster size (e.g. train+val); assignment still covers all N nodes.
+            None => all nodes.
     Return:
         cluster_ids: (N+1,) LongTensor of cluster ids (with trailing empty_id).
         cluster_centers: (K+1, d) FloatTensor of centers (with trailing zero row).

@@ -58,10 +58,10 @@ Default `root = cache/clustering/` (relative to project root). Validate `os.path
 |---|---|---|---|
 | `cluster_ids.pt` | `(N,)` long | **CGT and BiGG** | The shared partition — this is the fairness lock |
 | `l2_centers.pt` | `(K, D)` float | **CGT only** | L2-normed cluster centers in original feature space; drop-in for the centers `cluster_feats` would have returned |
-| `raw_centers.pt` | `(K, D)` float | **BiGG only** | Per-cluster mean of *pre-L2-norm* features; fed into BiGG's CDF/quantile normalization in place of each node's own feature |
+| `raw_centers.pt` | `(K, D)` float | **BiGG only** | Per-cluster mean of *pre-L2-norm* features over the **fit set (train+val) members only** (matches the population `l2_centers` represent); fed into BiGG's CDF/quantile normalization in place of each node's own feature |
 | `meta.json` | JSON | both | Provenance + sanity check — verify `cluster_size`, `cluster_num`, `feat_dim`, `fit_set_size`, `seed` match consumer expectations |
 
-`cluster_ids.pt` covers **all N nodes** (not just train+val) — the K-means fit uses train+val, but the assignment step covers the full graph. The trailing empty_id row that `cluster_feats` appends (`cluster_ids[-1] = cluster_num`, `cluster_centers[-1] = 0`) is NOT in the cache — consumers that need it must append it themselves after loading.
+`cluster_ids.pt` covers **all N nodes**, but the k-anonymity floor is enforced only on the **fit set (train+val)** — the population the generative model trains on. K-means is fit on train+val, the min-size-constrained assignment runs on train+val, and the remaining (e.g. test) nodes are assigned afterward by **unconstrained nearest-center** purely as neighbour / computation-graph context (they never dilute the floor). So `min cluster size ≥ cluster_size` is guaranteed on `cluster_ids[train+val]`, not on the full-N counts — see `meta.json`'s `cluster_stats.fit_min`. The trailing empty_id row that `cluster_feats` appends (`cluster_ids[-1] = cluster_num`, `cluster_centers[-1] = 0`) is NOT in the cache — consumers that need it must append it themselves after loading.
 
 ## Consumer adaptation patterns
 
