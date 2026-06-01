@@ -62,7 +62,7 @@ def _ensure_bundle(trial_dir, dataset, save_names_by_split, cache_root=None):
 
 
 def run_trial(*, dataset, fixed_hp, params, split_ids, trial_dir,
-              n_subgraphs, models, seeds_per_split, tune_test_ratio,
+              n_subgraphs_by_split, models, seeds_per_split, tune_test_ratio,
               tune_test_seed, tune_portion, mode, benchmark_env,
               baseline_csv_path=None, cache_root=None,
               data_dir=None, semi_supervised=0):
@@ -91,7 +91,8 @@ def run_trial(*, dataset, fixed_hp, params, split_ids, trial_dir,
     for sid in split_ids:
         log_dir = os.path.join(logs_dir, f'split{sid}')
         res = train_one_split(
-            fixed_hp, params, split_id=sid, n_subgraphs=n_subgraphs,
+            fixed_hp, params, split_id=sid,
+            n_subgraphs=n_subgraphs_by_split[sid],
             log_dir=log_dir, cache_root=cache_root,
             stdout_fname='train.out', stderr_fname='train.err')
         split_train_sec[sid] = res['wall_sec']

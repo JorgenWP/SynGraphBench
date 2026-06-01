@@ -28,6 +28,7 @@ import yaml
 
 from .bigg_invoke import (
     PROJECT_ROOT, resolve_benchmark_python, bo_bigg_cache_root,
+    load_n_subgraphs_per_split,
 )
 from .search_space import (
     suggest_params, WARM_START_DEFAULTS, DEFAULT_BOUNDS,
@@ -279,7 +280,7 @@ def _ensure_baseline_cache(dataset, study_version, fixed_hp, benchmark_env,
         return csv_path
 
 
-def _run_one_trial(study, *, dataset, fixed_hp, n_subgraphs, models,
+def _run_one_trial(study, *, dataset, fixed_hp, n_subgraphs_by_split, models,
                    seeds_per_split, tune_test_ratio, tune_test_seed,
                    tune_portion, mode, benchmark_env, root, baseline_csv_path,
                    cache_root, study_split_id=None, bounds=None):
@@ -300,7 +301,7 @@ def _run_one_trial(study, *, dataset, fixed_hp, n_subgraphs, models,
     metrics = run_trial(
         dataset=dataset, fixed_hp=fixed_hp, params=params,
         split_ids=split_ids, trial_dir=trial_dir,
-        n_subgraphs=n_subgraphs, models=models,
+        n_subgraphs_by_split=n_subgraphs_by_split, models=models,
         seeds_per_split=seeds_per_split,
         tune_test_ratio=tune_test_ratio,
         tune_test_seed=tune_test_seed,
@@ -356,7 +357,13 @@ def main():
     fixed_hp = cfg['fixed_hp']
     bounds = cfg.get('search_space', {})
     benchmark_env = cfg['benchmark']
-    n_subgraphs = fixed_hp['n_subgraphs']
+    # Read the actual post-filter K per split from the partition pickles.
+    # Variable-K subsampling methods (ff/rwr/bfs/uniform with caps) emit
+    # different K per split; the pickles are the source of truth.
+    n_subgraphs_by_split = load_n_subgraphs_per_split(
+        args.dataset, fixed_hp['subsampling_config'],
+        fixed_hp['n_splits'], fixed_hp.get('min_subgraph_nodes', 0))
+    print(f'[bo-coordinator] K per split: {n_subgraphs_by_split}')
     seeds_per_split = cfg.get('seeds_per_split', 3)
     tune_test_ratio = cfg.get('tune_test_ratio', 0.5)
     tune_test_seed = cfg.get('tune_test_seed', 20260523)
@@ -405,7 +412,7 @@ def main():
 
         n = _run_one_trial(
             study, dataset=args.dataset, fixed_hp=fixed_hp,
-            n_subgraphs=n_subgraphs, models=models,
+            n_subgraphs_by_split=n_subgraphs_by_split, models=models,
             seeds_per_split=seeds_per_split,
             tune_test_ratio=tune_test_ratio,
             tune_test_seed=tune_test_seed,

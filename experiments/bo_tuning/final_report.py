@@ -25,6 +25,7 @@ import yaml
 from .bigg_invoke import (
     expected_output_dir, PROJECT_ROOT, build_save_name,
     bo_bigg_cache_root, resolve_benchmark_python,
+    load_n_subgraphs_per_split,
 )
 
 
@@ -65,7 +66,9 @@ def main():
 
     cfg = _load_config(args.dataset)
     fixed_hp = cfg['fixed_hp']
-    n_subgraphs = fixed_hp['n_subgraphs']
+    n_subgraphs_by_split = load_n_subgraphs_per_split(
+        args.dataset, fixed_hp['subsampling_config'],
+        fixed_hp['n_splits'], fixed_hp.get('min_subgraph_nodes', 0))
     seeds_per_split = cfg.get('seeds_per_split', 3)
     tune_test_ratio = cfg.get('tune_test_ratio', 0.5)
     tune_test_seed = cfg.get('tune_test_seed', 20260523)
@@ -96,7 +99,8 @@ def main():
 
     split_ids = (list(range(fixed_hp['n_splits'])) if args.mode == 'shared'
                  else [args.split_id])
-    save_names = {sid: build_save_name(fixed_hp, best.params, sid, n_subgraphs)
+    save_names = {sid: build_save_name(fixed_hp, best.params, sid,
+                                       n_subgraphs_by_split[sid])
                   for sid in split_ids}
 
     # BO trials wrote to the BO-scoped cache (see bo_bigg_cache_root); the

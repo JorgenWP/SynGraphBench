@@ -17,6 +17,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import pickle
 import shutil
 import subprocess
 import sys
@@ -88,6 +89,35 @@ def resolve_benchmark_python(benchmark_cfg: Dict[str, Any]) -> str:
     if env:
         return resolve_conda_env_python(env)
     return sys.executable
+
+
+def load_n_subgraphs_per_split(dataset: str, subsampling_config: str,
+                               n_splits: int,
+                               min_subgraph_nodes: int) -> Dict[int, int]:
+    """Post-filter partition count per split, read from the actual pickles.
+
+    Mirrors the filter in ``bigg/bigg/extension/pipeline.py:441-451``:
+    drops partitions whose node count is below ``min_subgraph_nodes`` and
+    returns ``len(kept)`` for each split. This makes the coordinator
+    authoritative about K — variable-K subsampling methods (forest fire,
+    RWR, BFS-snowball, uniform with multiplicity caps) produce a different
+    K per split, and the YAML scalar that was previously used as ground
+    truth would diverge from what BiGG actually writes.
+    """
+    out: Dict[int, int] = {}
+    for sid in range(n_splits):
+        pkl = os.path.join(PROJECT_ROOT, 'datasets', 'bigg_subsamples',
+                           dataset, subsampling_config, f'split{sid}.pkl')
+        if not os.path.exists(pkl):
+            raise FileNotFoundError(
+                f'Subsample pickle not found: {pkl}. '
+                f'Generate it via experiments/subsample_search/run_grid.py first.')
+        with open(pkl, 'rb') as f:
+            payload = pickle.load(f)
+        kept = sum(1 for sg, _, _ in payload['partitions']
+                   if sg.number_of_nodes() >= min_subgraph_nodes)
+        out[sid] = kept
+    return out
 
 
 def build_save_name(fixed: Dict[str, Any], params: Dict[str, float], split_id: int,
