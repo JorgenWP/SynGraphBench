@@ -187,12 +187,12 @@ SYNTHETIC_NAME="<variant_stem>"        # exactly the VARIANT produced by trainin
 
 `SYNTHETIC_NAME` is the directory name under `datasets/synthetic/cgt/<dataset>/<task>/`. The benchmark loads `<variant>_t0.pt … <variant>_t{TRIALS-1}.pt` from it. If `SYNTHETIC_NAME` is empty, the script falls back to the dataset key.
 
-**Supported models differ by task** (`scripts/benchmark/anomaly_benchmark.py`, `link_benchmark.py:53`):
+**Both tasks support the same five models** (`scripts/benchmark/anomaly_benchmark.py`; `link_benchmark.py:57` `SUPPORTED_MODELS`, with the plain-`XGBoost` path at `link_benchmark.py:126-127`):
 
 | Task | Supported models |
 |---|---|
 | Anomaly detection | `GCN, GIN, GraphSAGE, XGBoost, XGBGraph` |
-| Link prediction | `GCN, GIN, GraphSAGE, XGBGraph` (no plain `XGBoost`) |
+| Link prediction | `GCN, GIN, GraphSAGE, XGBoost, XGBGraph` |
 
 Output logs follow the same nesting as training: `output/cgt/benchmark/<dataset>/<task>/<description>_output.txt`.
 
