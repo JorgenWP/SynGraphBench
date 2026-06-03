@@ -349,15 +349,24 @@ class MergedOriginalCompGraphDataset(Dataset):
     """Per-edge merged computation graphs built from an original graph.
 
     For each edge (u, v): samples a depth-`step_num`, fanout-`sample_num`
-    tree rooted at u, a second tree rooted at v, and stacks their features
-    as `[2 * T, feat_dim]`. The merged-tree adjacency (from
-    `compute_merged_tree_adj`) wires the two root nodes together so the
-    GNN forward pass sees both neighborhoods in a single message-passing
-    graph.
+    tree rooted at u and a second tree rooted at v, and returns the merged
+    tree's node IDs as a `[2 * T]` integer array (u's tree followed by v's
+    tree).
+
+    Only node IDs are produced here — feature gather and DGL graph assembly
+    are deferred to the GPU in the predictor (see `build_merged_skeleton`),
+    so the DataLoader worker payload is a small integer array rather than a
+    fully materialised `DGLGraph` with features serialised across the worker
+    boundary every batch. Node IDs index a feature matrix that is padded with
+    one zero row at index `num_nodes` (the `empty_id` used when a parent has
+    fewer than `sample_num` neighbours).
+
+    `csr` lets the caller pass a pre-built `(adj_flat, adj_offsets, degrees)`
+    tuple so the O(N) CSR construction isn't repeated for every epoch's loader.
     """
 
-    def __init__(self, adj_list, features, edges, step_num, sample_num,
-                 noise_num=0, self_connection=False):
+    def __init__(self, adj_list, num_nodes, edges, step_num, sample_num,
+                 noise_num=0, self_connection=False, csr=None):
         if torch.is_tensor(edges):
             edges = edges.cpu().numpy()
         self.edges = np.asarray(edges, dtype=np.int64)
@@ -365,22 +374,22 @@ class MergedOriginalCompGraphDataset(Dataset):
         self.sample_num = sample_num
         self.noise_num = noise_num
         self.total_sample = sample_num + noise_num
-        self.node_num = features.shape[0]
+        self.node_num = num_nodes
         self.self_connection = self_connection
+        # empty_id indexes the zero pad row appended to the feature matrix.
+        self.empty_id = num_nodes
 
-        # Pad features with a zero row for empty/missing neighbors
-        self.features = np.concatenate(
-            [features, np.zeros((1, features.shape[1]), dtype=features.dtype)])
-        self.empty_id = features.shape[0]
-
-        # CSR-style adjacency for vectorized batch sampling.
-        self.adj_flat, self.adj_offsets, self.degrees = _build_csr_adj(
-            adj_list, self.node_num)
+        # CSR-style adjacency for vectorized batch sampling. Built once and
+        # reused across epochs when passed in via `csr`.
+        if csr is None:
+            self.adj_flat, self.adj_offsets, self.degrees = _build_csr_adj(
+                adj_list, self.node_num)
+        else:
+            self.adj_flat, self.adj_offsets, self.degrees = csr
 
         merged = compute_merged_tree_adj(
             step_num, self.total_sample, self_connection)
-        self.template_src, self.template_dst, self.num_merged_nodes = \
-            compute_template_edges(merged)
+        _, _, self.num_merged_nodes = compute_template_edges(merged)
         self.per_tree_num_nodes = self.num_merged_nodes // 2
 
     def __len__(self):
@@ -397,40 +406,55 @@ class MergedOriginalCompGraphDataset(Dataset):
             self.node_num, self.adj_flat, self.adj_offsets, self.degrees,
             self.empty_id)                             # [2B, T]
         nodes = np.concatenate([trees[:B], trees[B:]], axis=1)  # [B, 2T]
-        feats = self.features[nodes]                   # [B, 2T, F]
-        feats_t = torch.from_numpy(np.ascontiguousarray(feats))
-        return [{"feat": feats_t[i]} for i in range(B)]
+        return nodes
 
     def __getitem__(self, index):
         return self.__getitems__([index])[0]
 
 
-def make_merged_comp_graph_collate(template_src, template_dst, num_merged_nodes):
-    """Collate per-edge merged CGs into one DGL batch graph.
+def make_merged_comp_graph_collate():
+    """Flatten per-edge merged-tree node IDs into one int64 tensor.
 
-    Mirrors `make_comp_graph_collate`; the only difference is that each
-    sample contributes `num_merged_nodes = 2 * T` nodes and the template
-    edge set already includes the root-root edge.
+    Receives the `[B, 2T]` node-ID block returned by `__getitems__` (or a
+    list of `[2T]` rows from per-item fetch) and returns a flat `[B * 2T]`
+    int64 tensor. The batched DGL graph is built once per batch size in the
+    predictor (`build_merged_skeleton`) and features are gathered on the GPU,
+    so neither a graph nor features cross the worker boundary here.
     """
-    num_edges = len(template_src)
 
-    def collate(items):
-        B = len(items)
-        all_feats = torch.cat([item['feat'] for item in items], dim=0)
-
-        offsets = torch.arange(B, dtype=torch.long) * num_merged_nodes
-        src = (template_src.unsqueeze(0) + offsets.unsqueeze(1)).reshape(-1)
-        dst = (template_dst.unsqueeze(0) + offsets.unsqueeze(1)).reshape(-1)
-
-        g = dgl.graph((src, dst), num_nodes=B * num_merged_nodes)
-        g.ndata['feature'] = all_feats
-        g.set_batch_num_nodes(
-            torch.full((B,), num_merged_nodes, dtype=torch.long))
-        g.set_batch_num_edges(
-            torch.full((B,), num_edges, dtype=torch.long))
-        return g
+    def collate(batch):
+        if isinstance(batch, np.ndarray):
+            nodes = batch
+        elif torch.is_tensor(batch):
+            nodes = batch.cpu().numpy()
+        else:  # list of [2T] rows (per-item fetch fallback)
+            nodes = np.stack([np.asarray(b) for b in batch], axis=0)
+        flat = np.ascontiguousarray(nodes.reshape(-1), dtype=np.int64)
+        return torch.from_numpy(flat)
 
     return collate
+
+
+def build_merged_skeleton(template_src, template_dst, num_merged_nodes, m):
+    """Build the batched merged-CG DGL graph skeleton for `m` edges.
+
+    The merged-tree topology is identical for every edge, so the batched
+    graph for a given batch size can be built once and reused across batches
+    and epochs — only `ndata['feature']` is swapped per batch. Returns a CPU
+    graph with `batch_num_nodes`/`batch_num_edges` set; the caller moves it to
+    the device (`.to()` preserves the batch metadata) and caches it.
+    """
+    num_edges = template_src.shape[0]
+    offsets = torch.arange(m, dtype=torch.long) * num_merged_nodes
+    src = (template_src.unsqueeze(0) + offsets.unsqueeze(1)).reshape(-1)
+    dst = (template_dst.unsqueeze(0) + offsets.unsqueeze(1)).reshape(-1)
+
+    g = dgl.graph((src, dst), num_nodes=m * num_merged_nodes)
+    g.set_batch_num_nodes(
+        torch.full((m,), num_merged_nodes, dtype=torch.long))
+    g.set_batch_num_edges(
+        torch.full((m,), num_edges, dtype=torch.long))
+    return g
 
 
 def extract_edge_root_embeddings(batched_graph, all_logits, per_tree_num_nodes):

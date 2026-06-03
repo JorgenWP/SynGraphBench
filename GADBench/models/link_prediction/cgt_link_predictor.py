@@ -31,6 +31,8 @@ from torch.utils.data import DataLoader
 
 from data.comp_graph import (
     MergedOriginalCompGraphDataset,
+    _build_csr_adj,
+    build_merged_skeleton,
     compute_merged_tree_adj,
     compute_template_edges,
     dgl_to_adj_list,
@@ -41,13 +43,191 @@ from models.link_prediction.link_predictor import BaseDetector, MLPDecoder
 
 CG_LP_SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE']
 
+# DataLoader workers for merged-CG tree sampling are auto-sized from the
+# per-loader batch count (no CLI flag — scale-driven choice). The worker payload
+# is now a small int64 node-ID array (feature gather + graph assembly happen on
+# the main process / GPU), so workers only parallelise the light numpy tree
+# sampler and their benefit saturates fast; tiny loaders pay more in per-epoch
+# fork/teardown than they save.
+_CG_LP_MIN_BATCHES_FOR_WORKERS = 16   # below this, sample in-process (0 workers)
+_CG_LP_MAX_WORKERS = 4                # overlap saturates; cap to avoid oversubscription
 
-class MergedCompGraphLinkPredictor(BaseDetector):
+
+def _resolve_num_workers(num_batches):
+    """Pick DataLoader worker count from a loader's batch count.
+
+    Few batches -> 0 (in-process; fork/teardown would dominate). Otherwise a
+    small fixed count that overlaps CPU tree sampling with GPU compute. The
+    count depends only on the workload (not on CPUs available), so the
+    worker-RNG-dependent tree sampling stays reproducible across SLURM
+    allocations rather than shifting with `--cpus-per-task`.
+    """
+    if num_batches < _CG_LP_MIN_BATCHES_FOR_WORKERS:
+        return 0
+    return _CG_LP_MAX_WORKERS
+
+
+class _MergedCGBatchMixin:
+    """Shared merged computation-graph machinery for the CGT link predictors.
+
+    The DataLoader (workers) only samples merged-tree node IDs; the expensive,
+    feature-dimension-dependent work — gathering node features and assembling
+    the batched DGL graph — runs on the main process / GPU here, reusing:
+
+      * a resident, zero-padded feature matrix on the device (gather by index),
+      * a CSR adjacency built once per trial (not per epoch), and
+      * a batched-graph skeleton cached per batch size (topology is fixed; only
+        ``ndata['feature']`` changes per batch).
+
+    This replaces the previous path that built a full ``DGLGraph`` with features
+    inside each worker and serialised it across the process boundary every
+    batch — the dominant cost in the old pipeline. DataLoader worker count is
+    auto-sized per loader (see ``_resolve_num_workers``), and negative sampling
+    runs on-device against a resident edge-set so it doesn't bottleneck the
+    now-faster training loop.
+    """
+
+    def _setup_merged_cg(self, data, test_features):
+        self.step_num = self.train_config.get('step_num', 2)
+        self.sample_num = self.train_config.get('sample_num', 5)
+        self.noise_num = self.train_config.get('noise_num', 0)
+        self.self_connection = self.train_config.get('self_connection', False)
+        self.batch_size = self.train_config.get('batch_size', 256)
+
+        # Tree sampling uses train_graph (no test/val edge leakage).
+        self.train_adj_list = dgl_to_adj_list(data.train_graph)
+        self.features = data.graph.ndata['feature'].cpu().numpy().astype(
+            np.float32)
+        self.num_nodes_feat = self.features.shape[0]
+        self.feat_dim = self.features.shape[1]
+
+        # CSR adjacency built once per trial and reused across every epoch's
+        # loader (was previously rebuilt inside each dataset construction).
+        self._csr = _build_csr_adj(self.train_adj_list, self.num_nodes_feat)
+
+        # Resident, zero-padded feature matrices on the device. Trees emit node
+        # IDs in [0, N]; row N (empty_id) is the zero pad. Gather is by index.
+        self.feat_gpu = self._padded_device_features(self.features)
+
+        # TSTR test path: real features for test-edge scoring when self.features
+        # carries synthetic/quantized train+val rows. See the class docstrings
+        # and the anomaly-benchmark mirror for rationale. When None, the
+        # detector falls back to self.features everywhere (original-cg path).
+        if test_features is not None:
+            tf = np.ascontiguousarray(test_features, dtype=np.float32)
+            if tf.shape != self.features.shape:
+                raise ValueError(
+                    f"test_features shape {tf.shape} != "
+                    f"features shape {self.features.shape}")
+            self.test_features = tf
+            self.test_feat_gpu = self._padded_device_features(tf)
+        else:
+            self.test_features = None
+            self.test_feat_gpu = None
+
+        merged_adj = compute_merged_tree_adj(
+            self.step_num, self.sample_num + self.noise_num,
+            self.self_connection)
+        self.template_src, self.template_dst, self.num_merged_nodes = \
+            compute_template_edges(merged_adj)
+        self.per_tree_num_nodes = self.num_merged_nodes // 2
+
+        # Resident sorted edge-hash set for on-device negative collision checks
+        # (was a CPU torch.isin against a large edge set every epoch).
+        self.edge_set_gpu = self.edge_set.to(self.device)
+
+        # Batched-graph skeletons keyed by batch size (number of edges).
+        self._skeleton_cache = {}
+        # Node-ID caches for the fixed eval edge sets (val/test). Trees are
+        # sampled once and frozen; features are gathered fresh each epoch.
+        self._eval_batch_cache = {}
+        self._test_eval_batch_cache = {}
+
+    def _padded_device_features(self, feats_np):
+        t = torch.from_numpy(np.ascontiguousarray(feats_np, dtype=np.float32))
+        pad = torch.zeros(1, t.shape[1], dtype=t.dtype)
+        return torch.cat([t, pad], dim=0).to(self.device)
+
+    def _edge_loader(self, edges):
+        """DataLoader yielding flat int64 node-ID tensors per batch."""
+        ds = MergedOriginalCompGraphDataset(
+            None, self.num_nodes_feat, edges,
+            self.step_num, self.sample_num,
+            self.noise_num, self.self_connection, csr=self._csr)
+        collate = make_merged_comp_graph_collate()
+        num_batches = (len(ds) + self.batch_size - 1) // self.batch_size
+        return DataLoader(
+            ds, batch_size=self.batch_size, shuffle=False,
+            collate_fn=collate, num_workers=_resolve_num_workers(num_batches))
+
+    def _get_skeleton(self, m):
+        g = self._skeleton_cache.get(m)
+        if g is None:
+            g = build_merged_skeleton(
+                self.template_src, self.template_dst,
+                self.num_merged_nodes, m).to(self.device)
+            self._skeleton_cache[m] = g
+        return g
+
+    def _assemble(self, node_ids, feat_gpu):
+        """Build a batched merged-CG graph from device node IDs + feature gather."""
+        m = node_ids.shape[0] // self.num_merged_nodes
+        g = self._get_skeleton(m)
+        g.ndata['feature'] = feat_gpu[node_ids]
+        return g
+
+    # --- Negative sampling (on-device; shared by GNN and tree-model LP) ------
+    # Training negatives are resampled every epoch, so this ran hot once the
+    # data pipeline was fixed. Drawing and collision-filtering on the device
+    # (against the resident `edge_set_gpu`) avoids the per-epoch CPU work and
+    # host->device transfer. Returns edges already on `self.device`.
+
+    def _filter_collisions(self, neg_edges):
+        src, dst = neg_edges[:, 0], neg_edges[:, 1]
+        N = self.num_nodes
+        for _ in range(10):
+            hashes = src.long() * N + dst.long()
+            collision = torch.isin(hashes, self.edge_set_gpu) | (src == dst)
+            if not collision.any():
+                break
+            n_bad = int(collision.sum().item())
+            dst[collision] = torch.randint(
+                0, N, (n_bad,), device=neg_edges.device)
+        return neg_edges
+
+    def _sample_random_negatives(self, n):
+        neg = torch.stack([
+            torch.randint(0, self.num_nodes, (n,), device=self.device),
+            torch.randint(0, self.num_nodes, (n,), device=self.device),
+        ], dim=1)
+        return self._filter_collisions(neg)
+
+    def _sample_hard_negatives(self, pos_edges):
+        # 2-hop walk needs the CPU graph; the rest stays on-device.
+        src = pos_edges[:, 0]
+        walk_nodes, _ = dgl.sampling.random_walk(
+            self.train_graph.cpu(), src.cpu(), metapath=[None, None])
+        hard_dst = walk_nodes[:, 2].to(self.device)
+        failed = hard_dst == -1
+        if failed.any():
+            hard_dst = hard_dst.clone()
+            hard_dst[failed] = torch.randint(
+                0, self.num_nodes, (int(failed.sum().item()),),
+                device=self.device)
+        neg = torch.stack([src.to(self.device), hard_dst], dim=1)
+        return self._filter_collisions(neg)
+
+
+class MergedCompGraphLinkPredictor(_MergedCGBatchMixin, BaseDetector):
     """Link prediction via per-edge merged endpoint computation graphs."""
 
     def __init__(self, train_config, model_config, data, test_features=None):
         super().__init__(train_config, model_config, data)
         self.device = train_config['device']
+
+        # Static merged-CG state: CSR adjacency, resident device feature
+        # matrices, templates, and skeleton/eval caches (see the mixin).
+        self._setup_merged_cg(data, test_features)
 
         model_config['output_emb'] = True
         if model_config['model'] == 'GraphSAGE':
@@ -72,67 +252,12 @@ class MergedCompGraphLinkPredictor(BaseDetector):
         else:
             self.decoder = None
 
-        self.step_num = train_config.get('step_num', 2)
-        self.sample_num = train_config.get('sample_num', 5)
-        self.noise_num = train_config.get('noise_num', 0)
-        self.self_connection = train_config.get('self_connection', False)
-        self.batch_size = train_config.get('batch_size', 256)
-
         num_layers = model_config.get('num_layers', 2)
         if num_layers != self.step_num:
             print(
                 f"  WARNING: num_layers={num_layers} != step_num={self.step_num}. "
                 f"GNN depth should equal merged-tree depth for a fair "
                 f"comparison with full-graph LP.")
-
-        # Tree sampling uses train_graph (no test/val edge leakage)
-        self.train_adj_list = dgl_to_adj_list(data.train_graph)
-        self.features = data.graph.ndata['feature'].cpu().numpy().astype(
-            np.float32)
-
-        # TSTR test path: real features for test-edge scoring when data.graph
-        # has been built with synthetic/quantized train+val node features.
-        # Mirrors anomaly's build_original_cg_quantized_datasets pattern of
-        # using quant_features for train/val datasets and real_features for
-        # the test dataset (bench_utils.py:1027-1034). When None, the
-        # detector falls back to self.features everywhere (original-cg path).
-        if test_features is not None:
-            self.test_features = np.ascontiguousarray(
-                test_features, dtype=np.float32)
-            if self.test_features.shape != self.features.shape:
-                raise ValueError(
-                    f"test_features shape {self.test_features.shape} != "
-                    f"features shape {self.features.shape}")
-        else:
-            self.test_features = None
-
-        merged_adj = compute_merged_tree_adj(
-            self.step_num, self.sample_num + self.noise_num,
-            self.self_connection)
-        self.template_src, self.template_dst, self.num_merged_nodes = \
-            compute_template_edges(merged_adj)
-        self.per_tree_num_nodes = self.num_merged_nodes // 2
-
-        # Cache of pre-built merged-CG batches for fixed eval edge sets
-        # (val_pos/val_neg/test_pos/test_neg). Keyed by id(edges) so the
-        # immutable edge tensors created once per trial deduplicate the
-        # ~414+ batches/epoch otherwise rebuilt for evaluation.
-        self._eval_batch_cache = {}
-        # Separate cache for the real-features test path so swapping the
-        # feature matrix can't bleed across train/val (hybrid) batches.
-        self._test_eval_batch_cache = {}
-
-    def _edge_loader(self, edges, features=None):
-        feats = self.features if features is None else features
-        ds = MergedOriginalCompGraphDataset(
-            self.train_adj_list, feats, edges,
-            self.step_num, self.sample_num,
-            self.noise_num, self.self_connection)
-        collate = make_merged_comp_graph_collate(
-            self.template_src, self.template_dst, self.num_merged_nodes)
-        return DataLoader(
-            ds, batch_size=self.batch_size, shuffle=False,
-            collate_fn=collate, num_workers=8)
 
     def _score_batch_on_device(self, batched):
         h = self.model(batched)
@@ -142,50 +267,45 @@ class MergedCompGraphLinkPredictor(BaseDetector):
             return self.decoder.score_from_pair(h_u, h_v)
         return (h_u * h_v).sum(dim=-1)
 
-    def _score_batch(self, batched):
-        return self._score_batch_on_device(batched.to(self.device))
+    def _score_node_ids(self, node_ids, feat_gpu):
+        return self._score_batch_on_device(self._assemble(node_ids, feat_gpu))
+
+    def _score_cached(self, edges, cache, feat_gpu):
+        """Score a fixed edge set, caching its (frozen) merged-tree node IDs.
+
+        For val/test edge sets the trees are sampled once and cached as device
+        node-ID tensors; each call only re-gathers features from `feat_gpu` and
+        re-runs the GNN forward. Train-time edges are not cached here — they are
+        resampled every epoch and streamed directly through `_train_step`.
+        """
+        if edges.shape[0] == 0:
+            return torch.empty(0, device=self.device)
+
+        cache_key = id(edges)
+        cached = cache.get(cache_key)
+        if cached is None:
+            cached = [nid.to(self.device) for nid in self._edge_loader(edges)]
+            cache[cache_key] = cached
+
+        scores = [self._score_node_ids(nid, feat_gpu) for nid in cached]
+        return torch.cat(scores, dim=0)
 
     def _score_edges(self, edges):
-        """Score edges by building batched merged computation graphs.
-
-        For fixed edge sets (val_pos/val_neg/test_pos/test_neg) we build
-        the batched merged-CG graphs once and cache them; subsequent
-        calls only re-run the GNN forward. Train-time edges (resampled
-        every epoch) are not cached — `id(edges)` differs per call.
-        """
-        if edges.shape[0] == 0:
-            return torch.empty(0, device=self.device)
-
-        cache_key = id(edges)
-        cached = self._eval_batch_cache.get(cache_key)
-        if cached is None:
-            cached = [b.to(self.device) for b in self._edge_loader(edges)]
-            self._eval_batch_cache[cache_key] = cached
-
-        scores = [self._score_batch_on_device(b) for b in cached]
-        return torch.cat(scores, dim=0)
+        """Score edges against self.features (train/val path)."""
+        return self._score_cached(edges, self._eval_batch_cache, self.feat_gpu)
 
     def _score_test_edges(self, edges):
-        """Score edges using real (TSTR) features instead of self.features.
+        """Score edges against real (TSTR) features for the test path.
 
-        Mirrors _score_edges but materializes node features from
-        self.test_features so test-edge computation trees never read the
-        synthetic/quantized rows planted at train+val mask positions of
-        self.features. Uses a separate batch cache so the hybrid-features
-        batches for val edges can't collide with test-edge batches.
+        Mirrors _score_edges but gathers node features from self.test_feat_gpu
+        so test-edge computation trees never read the synthetic/quantized rows
+        planted at train+val mask positions of self.features. The node IDs are
+        identical to the train/val path (sampling is feature-independent); only
+        the gathered feature values differ, so a separate cache keeps the two
+        feature sources cleanly partitioned.
         """
-        if edges.shape[0] == 0:
-            return torch.empty(0, device=self.device)
-
-        cache_key = id(edges)
-        cached = self._test_eval_batch_cache.get(cache_key)
-        if cached is None:
-            loader = self._edge_loader(edges, features=self.test_features)
-            cached = [b.to(self.device) for b in loader]
-            self._test_eval_batch_cache[cache_key] = cached
-
-        scores = [self._score_batch_on_device(b) for b in cached]
-        return torch.cat(scores, dim=0)
+        return self._score_cached(
+            edges, self._test_eval_batch_cache, self.test_feat_gpu)
 
     def _train_step(self, edges, labels, ts=None):
         """Per-batch forward+backward with gradient accumulation.
@@ -213,12 +333,13 @@ class MergedCompGraphLinkPredictor(BaseDetector):
         if use_cuda:
             torch.cuda.synchronize()
         t_prev = time.time()
-        for batched in self._edge_loader(edges):
+        for node_ids_cpu in self._edge_loader(edges):
             t_after_next = time.time()
             if ts is not None:
                 ts['data_wait'] += t_after_next - t_prev
 
-            s = self._score_batch(batched)
+            node_ids = node_ids_cpu.to(self.device, non_blocking=True)
+            s = self._score_node_ids(node_ids, self.feat_gpu)
             n_b = s.shape[0]
             batch_labels = labels[offset:offset + n_b]
             batch_loss = F.binary_cross_entropy_with_logits(
@@ -235,37 +356,6 @@ class MergedCompGraphLinkPredictor(BaseDetector):
                 ts['n_batches'] += 1
             t_prev = t_after_gpu
         return loss_sum
-
-    def _filter_collisions(self, neg_edges):
-        src, dst = neg_edges[:, 0], neg_edges[:, 1]
-        N = self.num_nodes
-        for _ in range(10):
-            hashes = src.long() * N + dst.long()
-            collision = torch.isin(hashes, self.edge_set) | (src == dst)
-            if not collision.any():
-                break
-            n_bad = collision.sum().item()
-            dst[collision] = torch.randint(0, N, (n_bad,))
-        return neg_edges
-
-    def _sample_random_negatives(self, n):
-        neg = torch.stack([
-            torch.randint(0, self.num_nodes, (n,)),
-            torch.randint(0, self.num_nodes, (n,)),
-        ], dim=1)
-        return self._filter_collisions(neg).to(self.device)
-
-    def _sample_hard_negatives(self, pos_edges):
-        src = pos_edges[:, 0]
-        walk_nodes, _ = dgl.sampling.random_walk(
-            self.train_graph.cpu(), src.cpu(), metapath=[None, None])
-        hard_dst = walk_nodes[:, 2]
-        failed = hard_dst == -1
-        if failed.any():
-            hard_dst[failed] = torch.randint(
-                0, self.num_nodes, (int(failed.sum()),))
-        neg = torch.stack([src.cpu(), hard_dst], dim=1)
-        return self._filter_collisions(neg).to(self.device)
 
     def train(self):
         params = list(self.model.parameters())
@@ -387,7 +477,7 @@ class MergedCompGraphLinkPredictor(BaseDetector):
 CompGraphLinkPredictor = MergedCompGraphLinkPredictor
 
 
-class CGTXGBoostLinkPredictor(BaseDetector):
+class CGTXGBoostLinkPredictor(_MergedCGBatchMixin, BaseDetector):
     """XGBoost LP on merged comp graphs. Per edge: Hadamard of
     (h_u, h_v) at positions 0 and T of the merged tree. Base class
     uses raw root features (no GIN); subclass adds GIN_noparam
@@ -399,35 +489,10 @@ class CGTXGBoostLinkPredictor(BaseDetector):
         import xgboost as xgb
 
         self.device = train_config['device']
-        self.step_num = train_config.get('step_num', 2)
-        self.sample_num = train_config.get('sample_num', 5)
-        self.noise_num = train_config.get('noise_num', 0)
-        self.self_connection = train_config.get('self_connection', False)
-        self.batch_size = train_config.get('batch_size', 256)
 
-        self.train_adj_list = dgl_to_adj_list(data.train_graph)
-        self.features = data.graph.ndata['feature'].cpu().numpy().astype(
-            np.float32)
-
-        # TSTR test path: real features when train/val rows of self.features
-        # are synthetic/quantized cluster centers. See the MergedCompGraph
-        # variant above for rationale and the anomaly-benchmark mirror.
-        if test_features is not None:
-            self.test_features = np.ascontiguousarray(
-                test_features, dtype=np.float32)
-            if self.test_features.shape != self.features.shape:
-                raise ValueError(
-                    f"test_features shape {self.test_features.shape} != "
-                    f"features shape {self.features.shape}")
-        else:
-            self.test_features = None
-
-        merged_adj = compute_merged_tree_adj(
-            self.step_num, self.sample_num + self.noise_num,
-            self.self_connection)
-        self.template_src, self.template_dst, self.num_merged_nodes = \
-            compute_template_edges(merged_adj)
-        self.per_tree_num_nodes = self.num_merged_nodes // 2
+        # Static merged-CG state: CSR adjacency, resident device feature
+        # matrices, templates, and skeleton caches (see the mixin).
+        self._setup_merged_cg(data, test_features)
 
         eval_metric = (roc_auc_score if train_config['metric'] == 'AUROC'
                        else average_precision_score)
@@ -437,72 +502,30 @@ class CGTXGBoostLinkPredictor(BaseDetector):
 
         self.gin = None
 
-    def _edge_features(self, edges, features=None):
-        node_features = self.features if features is None else features
+    def _edge_features(self, edges, feat_gpu=None):
+        fg = self.feat_gpu if feat_gpu is None else feat_gpu
         if edges.shape[0] == 0:
-            feat_dim = node_features.shape[1]
+            feat_dim = self.feat_dim
             if self.gin is not None:
                 feat_dim *= self.model_config.get('num_layers', 2) + 1
             return np.zeros((0, feat_dim), dtype=np.float32)
 
-        edges_cpu = edges.cpu() if torch.is_tensor(edges) else edges
-        ds = MergedOriginalCompGraphDataset(
-            self.train_adj_list, node_features, edges_cpu,
-            self.step_num, self.sample_num,
-            self.noise_num, self.self_connection)
-        collate = make_merged_comp_graph_collate(
-            self.template_src, self.template_dst, self.num_merged_nodes)
-        loader = DataLoader(
-            ds, batch_size=self.batch_size, shuffle=False,
-            collate_fn=collate, num_workers=8)
-
         feats = []
         with torch.no_grad():
-            for batched in loader:
-                if self.gin is None:
-                    emb = batched.ndata['feature']
-                else:
-                    batched = batched.to(self.device)
-                    emb = self.gin(batched)
+            for node_ids_cpu in self._edge_loader(edges):
+                node_ids = node_ids_cpu.to(self.device)
+                g = self._assemble(node_ids, fg)
+                # Base XGBoost reads the raw root features; XGBGraph first runs
+                # GIN_noparam message passing over the merged tree.
+                emb = g.ndata['feature'] if self.gin is None else self.gin(g)
                 h_u, h_v = extract_edge_root_embeddings(
-                    batched, emb, self.per_tree_num_nodes)
+                    g, emb, self.per_tree_num_nodes)
                 feats.append((h_u * h_v).cpu().numpy())
         return np.vstack(feats)
 
     def _test_edge_features(self, edges):
         """Materialize edge features using real (TSTR) node features."""
-        return self._edge_features(edges, features=self.test_features)
-
-    def _filter_collisions(self, neg_edges):
-        src, dst = neg_edges[:, 0], neg_edges[:, 1]
-        N = self.num_nodes
-        for _ in range(10):
-            hashes = src.long() * N + dst.long()
-            collision = torch.isin(hashes, self.edge_set) | (src == dst)
-            if not collision.any():
-                break
-            n_bad = collision.sum().item()
-            dst[collision] = torch.randint(0, N, (n_bad,))
-        return neg_edges
-
-    def _sample_random_negatives(self, n):
-        neg = torch.stack([
-            torch.randint(0, self.num_nodes, (n,)),
-            torch.randint(0, self.num_nodes, (n,)),
-        ], dim=1)
-        return self._filter_collisions(neg).to(self.device)
-
-    def _sample_hard_negatives(self, pos_edges):
-        src = pos_edges[:, 0]
-        walk_nodes, _ = dgl.sampling.random_walk(
-            self.train_graph.cpu(), src.cpu(), metapath=[None, None])
-        hard_dst = walk_nodes[:, 2]
-        failed = hard_dst == -1
-        if failed.any():
-            hard_dst[failed] = torch.randint(
-                0, self.num_nodes, (int(failed.sum()),))
-        neg = torch.stack([src.cpu(), hard_dst], dim=1)
-        return self._filter_collisions(neg).to(self.device)
+        return self._edge_features(edges, feat_gpu=self.test_feat_gpu)
 
     def train(self):
         n_train = self.train_pos_edges.shape[0]

@@ -300,7 +300,6 @@ class GIN_noparam(nn.Module):
         for i in range(self.num_layers):
             h = self.gnn(graph, h)
             h_final = torch.cat([h_final, h], -1)
-        print(h_final)
         return h_final
 
 
