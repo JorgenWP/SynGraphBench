@@ -40,6 +40,25 @@ from bigg.extension.preprocessing import (
     NORMALIZATION_METHODS,
 )
 
+def _resolve_cluster_cache_dir(cache_root, dataset, task, trial_id,
+                               cluster_size, cluster_num):
+    """Cache leaf for (dataset, task, trial_id, cluster_size, cluster_num).
+
+    Mirrors the resolver documented in .claude/skills/Clustering-cache/SKILL.md.
+    hidden_links is trial-invariant (no t<trial_id> segment); hidden_labels
+    includes t<trial_id>. Anchors a relative cache_root to the project root
+    so the resolver works regardless of cwd (BiGG runs from bigg/).
+    """
+    if not os.path.isabs(cache_root):
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _proj_root = os.path.abspath(os.path.join(_here, '..', '..', '..'))
+        cache_root = os.path.join(_proj_root, cache_root)
+    leaf = f'k{cluster_size}_c{cluster_num}'
+    if task == 'hidden_links':
+        return os.path.join(cache_root, dataset, task, leaf)
+    return os.path.join(cache_root, dataset, task, f't{trial_id}', leaf)
+
+
 def compute_kl_beta(epoch, schedule, anneal_epochs=None,
                     cycle_epochs=None, ramp_ratio=0.5):
     """Return β ∈ [0, 1] for the current epoch.
@@ -218,6 +237,27 @@ def main():
                                       'at datasets/kanon/<dataset>/<stem>.dgl). When set, supersedes '
                                       'the default ../datasets/original/<dataset> lookup. -dataset '
                                       'is still used for save naming.')
+    # k-anonymity clustering cache (see .claude/skills/Clustering-cache/SKILL.md).
+    # When -cache_root is set, each node's feature is replaced by its cluster's
+    # raw_centers row BEFORE normalization runs — soft K-anonymity at input.
+    pipeline_parser.add_argument('-cache_root', type=str, default=None,
+                                 help='Root of the k-anonymity clustering cache '
+                                      '(e.g. cache/clustering). When set, requires '
+                                      '-cluster_size, -cluster_num, -trial_id, -task.')
+    pipeline_parser.add_argument('-cluster_size', type=int, default=None,
+                                 help='K-anonymity floor used to select the cache leaf.')
+    pipeline_parser.add_argument('-cluster_num', type=int, default=None,
+                                 help='Number of clusters in the selected cache leaf.')
+    pipeline_parser.add_argument('-trial_id', type=int, default=None,
+                                 help='Trial index for resolving the per-task cache subdir '
+                                      '(hidden_labels uses t<trial_id>; hidden_links is '
+                                      'trial-invariant).')
+    pipeline_parser.add_argument('-task', type=str, default='hidden_labels',
+                                 choices=['hidden_labels', 'hidden_links'],
+                                 help='Downstream task. Selects (a) the clustering-cache '
+                                      'subtree and (b) the subsample-pickle root '
+                                      '(hidden_links loads from datasets/bigg_subsamples/'
+                                      '<dataset>/hidden_links/<config>/).')
 
     pipeline_args, _ = pipeline_parser.parse_known_args()
 
@@ -273,6 +313,15 @@ def main():
         print(f'WARNING: -kl_cycle_epochs ({pipeline_args.kl_cycle_epochs}) > num_epochs '
               f'({cmd_args.num_epochs}); β will never reach 1.')
 
+    # Cluster-cache args travel together; either all unset (non-anonymized run)
+    # or all set (k-anonymized run). Fail loud on partial specification.
+    _cache_args = [pipeline_args.cache_root, pipeline_args.cluster_size,
+                   pipeline_args.cluster_num, pipeline_args.trial_id]
+    _cache_set = [a is not None for a in _cache_args]
+    if any(_cache_set) and not all(_cache_set):
+        raise ValueError('-cache_root requires -cluster_size, -cluster_num, '
+                         'and -trial_id (all four must be set together).')
+
     # --load_subsamples disables runtime sampling; the two modes are exclusive.
     if pipeline_args.load_subsamples and pipeline_args.subsample:
         raise ValueError('--load_subsamples and --subsample are mutually exclusive')
@@ -305,6 +354,43 @@ def main():
     #Get features and labels
     cont_feats = graph.ndata['feature']
     labels = graph.ndata['label']
+
+    # K-anonymity feature substitution: replace each node's feature with the
+    # raw_centers row of its assigned cluster BEFORE any normalization runs.
+    # See .claude/skills/Clustering-cache/SKILL.md (BiGG section) for rationale.
+    if pipeline_args.cache_root is not None:
+        cd = _resolve_cluster_cache_dir(pipeline_args.cache_root, DATASET,
+                                        pipeline_args.task, pipeline_args.trial_id,
+                                        pipeline_args.cluster_size,
+                                        pipeline_args.cluster_num)
+        done_path = os.path.join(cd, 'DONE')
+        if not os.path.isfile(done_path):
+            raise FileNotFoundError(
+                f'Missing clustering cache at {cd}. '
+                f'Run scripts/cluster/precompute_clusters.py for '
+                f'(dataset={DATASET}, task={pipeline_args.task}, '
+                f'trial={pipeline_args.trial_id}, '
+                f'k={pipeline_args.cluster_size}, c={pipeline_args.cluster_num}).')
+        with open(os.path.join(cd, 'meta.json')) as f:
+            cache_meta = json.load(f)
+        if cache_meta['feat_dim'] != cont_feats.shape[1]:
+            raise ValueError(
+                f'Cache feat_dim={cache_meta["feat_dim"]} != graph feat_dim='
+                f'{cont_feats.shape[1]} at {cd}.')
+        if cache_meta['cluster_size'] != pipeline_args.cluster_size:
+            raise ValueError(
+                f'Cache cluster_size={cache_meta["cluster_size"]} != requested '
+                f'{pipeline_args.cluster_size} at {cd}.')
+        if cache_meta['cluster_num'] != pipeline_args.cluster_num:
+            raise ValueError(
+                f'Cache cluster_num={cache_meta["cluster_num"]} != requested '
+                f'{pipeline_args.cluster_num} at {cd}.')
+        cluster_ids = torch.load(os.path.join(cd, 'cluster_ids.pt'))
+        raw_centers = torch.load(os.path.join(cd, 'raw_centers.pt'))
+        # raw_centers is (K, D); cluster_ids is (N,) with values in [0, K).
+        # Result lives in raw feature space (same shape, dtype as cont_feats).
+        cont_feats = raw_centers[cluster_ids.long()].to(cont_feats.dtype)
+        print(f'[BiGG] loaded cluster cache: {cd}')
 
     # Detect binary columns before normalization (binary features skip normalization)
     binary_idx = []
@@ -410,13 +496,24 @@ def main():
                   f'split_id={pipeline_args.split_id}')
             src = load_split_source(DATASET, pipeline_args.split_id, data_dir=data_dir_abs)
 
-            pkl_path = os.path.join(_proj_root, 'datasets', 'bigg_subsamples', DATASET,
-                                    pipeline_args.subsampling_config,
-                                    f'split{pipeline_args.split_id}.pkl')
+            # hidden_links task uses edge-pruned subsamples (held-out test edges
+            # removed) materialized once by scripts/preprocess/build_hidden_links_subsamples.py.
+            # hidden_labels reads the canonical subsamples directly.
+            if pipeline_args.task == 'hidden_links':
+                pkl_path = os.path.join(_proj_root, 'datasets', 'bigg_subsamples',
+                                        DATASET, 'hidden_links',
+                                        pipeline_args.subsampling_config,
+                                        f'split{pipeline_args.split_id}.pkl')
+            else:
+                pkl_path = os.path.join(_proj_root, 'datasets', 'bigg_subsamples',
+                                        DATASET, pipeline_args.subsampling_config,
+                                        f'split{pipeline_args.split_id}.pkl')
             if not os.path.exists(pkl_path):
                 raise FileNotFoundError(
                     f'Subsample pickle not found: {pkl_path}. '
-                    f'Generate it via experiments/subsample_search/run_grid.py first.')
+                    f'Generate it via experiments/subsample_search/run_grid.py first '
+                    f'(or scripts/preprocess/build_hidden_links_subsamples.py for '
+                    f'hidden_links).')
             with open(pkl_path, 'rb') as f:
                 payload = pickle.load(f)
             print(f'  Loaded {len(payload["partitions"])} partitions (meta={payload["meta"]})')
@@ -748,6 +845,24 @@ def main():
         os.makedirs(out_dir, exist_ok=True)
     else:
         out_dir = None
+
+    # hidden_links: copy the per-split held-out edges into the output dir so the
+    # link benchmark can read them directly from the synthetic location.
+    if (pipeline_args.task == 'hidden_links'
+            and pipeline_args.load_subsamples
+            and out_dir is not None):
+        _here = os.path.dirname(os.path.abspath(__file__))
+        _proj_root = os.path.abspath(os.path.join(_here, '..', '..', '..'))
+        held_src = os.path.join(_proj_root, 'datasets', 'bigg_subsamples',
+                                DATASET, 'hidden_links', 'held_out_edges',
+                                f'split{pipeline_args.split_id}.pt')
+        if not os.path.exists(held_src):
+            raise FileNotFoundError(
+                f'Missing held_out_edges sidecar: {held_src}. Generate it via '
+                f'scripts/preprocess/build_hidden_links_subsamples.py.')
+        import shutil as _shutil
+        _shutil.copyfile(held_src, os.path.join(out_dir, 'held_out_edges.pt'))
+        print(f'[BiGG] copied held_out_edges from {held_src}')
 
     train_t0 = time.perf_counter()
     try:

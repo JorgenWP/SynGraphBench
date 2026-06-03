@@ -7,7 +7,15 @@
 # training subgraph.
 #
 # Usage:
-#   bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor] [mdn_base] [kl_schedule] [kl_anneal_epochs] [kl_cycle_epochs] [kl_ramp_ratio] [load_subsamples] [subsampling_config] [split_id] [recal_momentum] [min_subgraph_nodes]
+#   bash scripts/train/train_bigg_subsample.sh [dataset] [blksize] [batch_size] [epochs] [lr] [embed_dim] [noise_std] [ss_max_prob] [ss_start_epoch] [bfs_preprocess] [normalize] [loss_weights] [hetero_feat] [mask_test_labels] [logvar_floor] [subsample_size] [burn_prob] [num_subgraphs] [binary_feat] [vae_feat] [vae_dim] [kl_weight] [cat_feat] [n_bins] [bin_sigma] [mdn_feat] [mdn_components] [mdn_logsigma_floor] [mdn_base] [kl_schedule] [kl_anneal_epochs] [kl_cycle_epochs] [kl_ramp_ratio] [load_subsamples] [subsampling_config] [split_id] [recal_momentum] [min_subgraph_nodes] [cache_root] [cluster_size] [cluster_num] [trial_id] [task]
+#
+# cache_root:       root of the k-anonymity clustering cache (e.g. cache/clustering). Empty disables anonymization.
+# cluster_size:     k-anonymity floor; required with cache_root.
+# cluster_num:      number of clusters; required with cache_root.
+# trial_id:         trial idx for resolving the per-task cache subdir; required with cache_root.
+# task:             downstream task ("hidden_labels" or "hidden_links"). hidden_links pulls subsamples from
+#                   datasets/bigg_subsamples/<dataset>/hidden_links/<config>/ and copies held_out_edges.pt
+#                   into the output dir (default: hidden_labels).
 #
 # normalize:        feature normalisation — one of "zscore", "minmax", "row", "quantile", or "none" (default: none)
 # loss_weights:     comma-separated cont,label weights relative to struct, applied after dynamic normalization (default: 1,1)
@@ -102,6 +110,11 @@ SUBSAMPLING_CONFIG="${35:-}"
 SPLIT_ID="${36:-0}"
 RECAL_MOMENTUM="${37:-1.0}"
 MIN_SUBGRAPH_NODES="${38:-0}"
+CACHE_ROOT="${39:-}"           # k-anonymity clustering cache root (empty = no anonymization)
+CLUSTER_SIZE="${40:-}"         # k-anonymity floor; required with CACHE_ROOT
+CLUSTER_NUM="${41:-}"          # number of clusters; required with CACHE_ROOT
+TRIAL_ID="${42:-}"             # trial idx for cache resolution; required with CACHE_ROOT
+TASK="${43:-hidden_labels}"    # downstream task; selects cache subtree + subsample root
 SAVE_MODEL="${SAVE_MODEL:-false}"
 SAVE_MODEL_EVERY="${SAVE_MODEL_EVERY:-0}"
 
@@ -147,6 +160,11 @@ echo "Split id:        $SPLIT_ID"
 echo "Recal momentum:  $RECAL_MOMENTUM"
 echo "Save model:      $SAVE_MODEL"
 echo "Save every:      $SAVE_MODEL_EVERY"
+echo "Cache root:      ${CACHE_ROOT:-(none)}"
+echo "Cluster size:    ${CLUSTER_SIZE:-(none)}"
+echo "Cluster num:     ${CLUSTER_NUM:-(none)}"
+echo "Trial id:        ${TRIAL_ID:-(none)}"
+echo "Task:            $TASK"
 echo ""
 
 NORM_FLAG=""
@@ -197,6 +215,16 @@ fi
 SAVE_MODEL_FLAG=""
 if [ "$SAVE_MODEL" = "true" ]; then
   SAVE_MODEL_FLAG="--save_model"
+fi
+
+# K-anonymity cluster cache: all-or-nothing. Pipeline asserts the same.
+CACHE_FLAGS=""
+if [ -n "$CACHE_ROOT" ]; then
+  if [ -z "$CLUSTER_SIZE" ] || [ -z "$CLUSTER_NUM" ] || [ -z "$TRIAL_ID" ]; then
+    echo "ERROR: CACHE_ROOT set but CLUSTER_SIZE/CLUSTER_NUM/TRIAL_ID missing." >&2
+    exit 1
+  fi
+  CACHE_FLAGS="-cache_root $CACHE_ROOT -cluster_size $CLUSTER_SIZE -cluster_num $CLUSTER_NUM -trial_id $TRIAL_ID"
 fi
 
 # Subsample source: runtime sampling (default) vs loading pre-computed partitions.
@@ -255,6 +283,8 @@ python -m bigg.extension.pipeline \
   -kl_ramp_ratio "$KL_RAMP_RATIO" \
   -recal_momentum "$RECAL_MOMENTUM" \
   -min_subgraph_nodes "$MIN_SUBGRAPH_NODES" \
+  $CACHE_FLAGS \
+  -task "$TASK" \
   $SAVE_MODEL_FLAG \
   -save_model_every "$SAVE_MODEL_EVERY" \
   -save_dir "checkpoints/bigg/${DATASET}_blk${BLKSIZE}_b${BSIZE}_lr${LR:0:8}_e${EPOCHS}_noise${NOISE_STD}_ss${SS_MAX_PROB}_norm${NORMALIZE}_bfs${BFS_PREPROCESS}_lw${LW_TRUNC}_${HETERO_FEAT}_lvf${LOGVAR_FLOOR}_bin${BINARY_FEAT}_vae${VAE_FEAT}_vd${VAE_DIM}_kl${KL_WEIGHT:0:8}_cat${CAT_FEAT}_nb${N_BINS}_mdn${MDN_FEAT}_k${MDN_COMPONENTS}_recalM${RECAL_MOMENTUM}_${SUBSAMPLE_TAG}"

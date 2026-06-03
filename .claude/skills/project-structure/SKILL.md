@@ -17,7 +17,12 @@ SynGraphBench/
 │   │   ├── train_bigg_structure.sh # Train BiGG (structure-only baseline)
 │   │   ├── train_bigg.slurm        # SLURM job template
 │   │   ├── train_bigg_structure.slurm
+│   │   ├── train_bigg_anonymized.slurm  # SLURM array (5 splits x 5 K-anon levels)
+│   │   ├── launch_anonymized_args.py    # Helper consumed by the anonymized SLURM
 │   │   └── train_cgt.sh            # Train CGT generative model
+│   ├── preprocess/         # Preprocessing jobs
+│   │   ├── build_hidden_links_subsamples.py    # Materialize edge-pruned subsamples
+│   │   └── build_hidden_links_subsamples.slurm
 │   ├── benchmark/
 │   │   ├── run_anomaly_benchmark.sh # Shell wrapper for anomaly detection benchmark
 │   │   ├── run_link_benchmark.sh   # Shell wrapper for link prediction benchmark
@@ -33,6 +38,12 @@ SynGraphBench/
 │   └── test/               # Quick test/example scripts
 ├── datasets/
 │   ├── original/           # Original DGL datasets (reddit, tolokers, amazon, …)
+│   ├── bigg_subsamples/    # Pre-generated BiGG training subsamples (load_subsamples=true)
+│   │   └── <dataset>/
+│   │       ├── <config>/split{0..4}.pkl                # canonical (hidden_labels) subsamples
+│   │       └── hidden_links/                            # produced by scripts/preprocess/
+│   │           ├── <config>/split{0..4}.pkl            # edge-pruned copies (test edges removed)
+│   │           └── held_out_edges/split{0..4}.pt        # sidecar: held-out edge tensors per split
 │   └── synthetic/
 │       ├── cgt/            # CGT outputs: .pt files with cluster centers + sequence indices
 │       │   └── <dataset>/
@@ -40,9 +51,14 @@ SynGraphBench/
 │       │           └── <variant>/          # Hyperparameter variant grouping trials
 │       │               └── <variant>_t<trial_id>.pt
 │       └── bigg/           # BiGG outputs: full DGL graph files
-│           └── <dataset>/
-│               └── <task>/
-│                   └── <variant_hyperparams>
+│           ├── <dataset>/
+│           │   └── <task>/
+│           │       └── <variant_hyperparams>
+│           └── anonymized/  # k-anonymized BiGG sweep outputs (Clustering-cache skill)
+│               └── <dataset>/<task>/<K>_anonymity/<variant_hyperparams>/
+│                   ├── subgraph_*.dgl, *_norm_stats.pt, *_binary_idx.pt, …
+│                   ├── metadata.json        # BO provenance + cluster cache pointer
+│                   └── held_out_edges.pt    # only for task=hidden_links
 ├── results/                # Evaluation outputs (CSVs, XLSX)
 ├── GADBench/               # Anomaly Detection + Link Prediction Sub-repo
 │   ├── benchmark.py
@@ -71,6 +87,7 @@ All synthetic outputs follow the structure `datasets/synthetic/<generative_model
 | `cgt` | `hidden_links` | Cluster centers + sequence indices (`.pt`) | `synthetic/cgt/reddit/hidden_links/reddit_e50_k512_c1_d2_f5_s5000/reddit_e50_k512_c1_d2_f5_s5000_t0.pt` |
 | `bigg` | `hidden_labels` | Full DGL graph — conditional (features + labels) | `synthetic/bigg/tolokers/hidden_labels/blksize_1024_b_1_lr_0.001_epochs_50` |
 | `bigg` | `hidden_labels` | Structure-only baseline | `synthetic/bigg/tolokers/hidden_labels/structure_blksize_128_lr_0.001_epochs_100` |
+| `bigg/anonymized` | `hidden_labels` / `hidden_links` | k-anonymized BiGG sweep (per split, per K) | `synthetic/bigg/anonymized/tolokers/hidden_labels/20_anonymity/<variant>/` |
 
 **Filename patterns:**
 - CGT: `{variant}/{variant}_t{trial_id}.pt` where variant = `{dataset}_e{epochs}_k{clusters}_c{cluster_size}_d{depth}_f{fanout}_s{cluster_sample_num}`. `cluster_sample_num` is the cap on nodes subsampled when fitting `KMeansConstrained` — it bounds `cluster_num × cluster_size` and affects the kmeans fit, so it's included in the variant to avoid silent collisions across runs with different sample budgets.
