@@ -118,20 +118,26 @@ class BaseGNNLinkPredictor(BaseDetector):
 
     def _sample_hard_negatives(self, pos_edges):
         """Sample hard negatives via 2-hop random walks, guaranteed non-edges."""
-        src = pos_edges[:, 0]
+        # train_graph and train_pos_edges are constant across epochs; cache the
+        # CPU copies that DGL's random_walk needs to avoid re-transferring them.
+        if not hasattr(self, '_train_graph_cpu'):
+            self._train_graph_cpu = self.train_graph.cpu()
+        if pos_edges is self.train_pos_edges:
+            if not hasattr(self, '_train_pos_src_cpu'):
+                self._train_pos_src_cpu = self.train_pos_edges[:, 0].cpu()
+            src_cpu = self._train_pos_src_cpu
+        else:
+            src_cpu = pos_edges[:, 0].cpu()
 
-        # 2-step random walk on the training graph (CPU for DGL compatibility)
         walk_nodes, _ = dgl.sampling.random_walk(
-            self.train_graph.cpu(), src.cpu(), metapath=[None, None])
-        # walk_nodes shape: [n, 3] — columns are: start, 1-hop, 2-hop
+            self._train_graph_cpu, src_cpu, metapath=[None, None])
         hard_dst = walk_nodes[:, 2]
 
-        # Replace failed walks (-1) with random nodes
         failed = hard_dst == -1
         if failed.any():
             hard_dst[failed] = torch.randint(0, self.num_nodes, (failed.sum(),))
 
-        neg_edges = torch.stack([src.cpu(), hard_dst], dim=1)
+        neg_edges = torch.stack([src_cpu, hard_dst], dim=1)
         return self._filter_collisions(neg_edges).to(self.train_config['device'])
 
     def train(self):
@@ -272,3 +278,26 @@ class XGBGraphLinkPredictor(BaseDetector):
         test_neg_probs = torch.tensor(test_probs[self.test_pos_edges.shape[0]:])
         test_score = self.eval(test_pos_probs, test_neg_probs)
         return test_score
+
+
+class XGBoostLinkPredictor(XGBGraphLinkPredictor):
+    """XGBoost link predictor on raw node features.
+
+    Identical to XGBGraphLinkPredictor but without the GIN_noparam
+    aggregation: edge features are the Hadamard product of the two
+    endpoints' raw input features rather than neighborhood embeddings.
+    Mirrors the AD pairing of XGBoost (raw features) vs XGBGraph
+    (GIN_noparam embeddings).
+    """
+
+    def __init__(self, train_config, model_config, data):
+        BaseDetector.__init__(self, train_config, model_config, data)
+        import xgboost as xgb
+
+        # Raw node features, no GIN aggregation
+        self.node_feats = self.train_graph.ndata['feature'].detach()
+
+        eval_metric = roc_auc_score if train_config['metric'] == "AUROC" else average_precision_score
+        cfg = {k: v for k, v in model_config.items() if k != 'model'}
+        self.model = xgb.XGBClassifier(
+            tree_method='hist', eval_metric=eval_metric, verbose=False, **cfg)

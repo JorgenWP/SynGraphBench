@@ -35,7 +35,8 @@ if _script_dir not in sys.path:
     sys.path.insert(0, _script_dir)
 
 from link_utils import LinkDataset, save_results
-from models.link_prediction.link_predictor import BaseGNNLinkPredictor, XGBGraphLinkPredictor
+from models.link_prediction.link_predictor import (
+    BaseGNNLinkPredictor, XGBGraphLinkPredictor, XGBoostLinkPredictor)
 from models.link_prediction.cgt_link_predictor import (
     CompGraphLinkPredictor, CGTXGBoostLinkPredictor, CGTXGBGraphLinkPredictor)
 from bench_utils import (
@@ -52,8 +53,8 @@ from models.cross_graph_link_predictor import (
 
 SEED_LIST = list(range(3407, 10000, 10))
 
-SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph']
-CGT_LP_SUPPORTED_MODELS = SUPPORTED_MODELS + ['XGBoost']
+SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBoost', 'XGBGraph']
+CGT_LP_SUPPORTED_MODELS = SUPPORTED_MODELS
 
 CGT_LP_TREE_MODELS = {
     'XGBoost': CGTXGBoostLinkPredictor,
@@ -81,10 +82,6 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
     results = []
 
     for model_name in models:
-        if model_name == 'XGBoost':
-            print(f"  NOTE: 'XGBoost' is CGT-only for link prediction. "
-                  f"Skipping full-graph eval.")
-            continue
         if model_name not in SUPPORTED_MODELS:
             print(f"  WARNING: '{model_name}' not supported for link prediction. Skipping.")
             continue
@@ -126,6 +123,8 @@ def evaluate_link_models(dataset_name, models, data_dir, data_source,
 
             if model_name == 'XGBGraph':
                 detector = XGBGraphLinkPredictor(train_config, model_config, data)
+            elif model_name == 'XGBoost':
+                detector = XGBoostLinkPredictor(train_config, model_config, data)
             else:
                 detector = BaseGNNLinkPredictor(train_config, model_config, data)
             st = time.time()

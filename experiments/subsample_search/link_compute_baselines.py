@@ -28,11 +28,11 @@ if _GADBENCH not in sys.path:
 
 from link_utils import LinkDataset  # noqa: E402
 from models.link_prediction.link_predictor import (  # noqa: E402
-    BaseGNNLinkPredictor, XGBGraphLinkPredictor,
+    BaseGNNLinkPredictor, XGBGraphLinkPredictor, XGBoostLinkPredictor,
 )
 
 
-MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph']
+MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBoost', 'XGBGraph']
 DEFAULT_DATASETS = ['tolokers', 'questions', 'weibo', 'reddit',
                     'amazon', 'tfinance', 'yelp']
 DEFAULT_SPLITS = [0, 1, 2, 3, 4]
@@ -58,7 +58,7 @@ def main() -> None:
     ap.add_argument('--splits', type=int, nargs='+', default=DEFAULT_SPLITS)
     ap.add_argument('--val_ratio', type=float, default=0.1)
     ap.add_argument('--test_ratio', type=float, default=0.1)
-    ap.add_argument('--epochs', type=int, default=200)
+    ap.add_argument('--epochs', type=int, default=100)
     ap.add_argument('--patience', type=int, default=50)
     ap.add_argument('--data_dir', default=None)
     ap.add_argument('--out_path', default=None)
@@ -126,6 +126,8 @@ def main() -> None:
 
                 if model_name == 'XGBGraph':
                     det = XGBGraphLinkPredictor(train_config, model_config, data)
+                elif model_name == 'XGBoost':
+                    det = XGBoostLinkPredictor(train_config, model_config, data)
                 else:
                     det = BaseGNNLinkPredictor(train_config, model_config, data)
 
