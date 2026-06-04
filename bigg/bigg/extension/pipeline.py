@@ -355,6 +355,16 @@ def main():
     cont_feats = graph.ndata['feature']
     labels = graph.ndata['label']
 
+    # Detect binary columns on the ORIGINAL features, before any k-anonymity
+    # centroid substitution turns 0/1 columns into fractions (the cluster mean
+    # of a binary column is a fraction, which detect_binary_columns would miss).
+    binary_idx = []
+    if pipeline_args.binary_feat:
+        binary_idx = detect_binary_columns(cont_feats)
+        print(f'Binary feature columns detected: {binary_idx} '
+              f'({len(binary_idx)} binary, '
+              f'{cont_feats.shape[1] - len(binary_idx)} continuous)')
+
     # K-anonymity feature substitution: replace each node's feature with the
     # raw_centers row of its assigned cluster BEFORE any normalization runs.
     # See .claude/skills/Clustering-cache/SKILL.md (BiGG section) for rationale.
@@ -390,14 +400,14 @@ def main():
         # raw_centers is (K, D); cluster_ids is (N,) with values in [0, K).
         # Result lives in raw feature space (same shape, dtype as cont_feats).
         cont_feats = raw_centers[cluster_ids.long()].to(cont_feats.dtype)
+        if binary_idx:
+            # Centroid means turned 0/1 cols into fractions; snap back to the
+            # nearest binary value (cluster-majority vote) so they stay on the
+            # binary BCE head rather than leaking into the MDN/continuous head.
+            cont_feats[:, binary_idx] = (
+                cont_feats[:, binary_idx] >= 0.5).to(cont_feats.dtype)
+            print(f'[BiGG] re-binarized {len(binary_idx)} clustered binary columns')
         print(f'[BiGG] loaded cluster cache: {cd}')
-
-    # Detect binary columns before normalization (binary features skip normalization)
-    binary_idx = []
-    if pipeline_args.binary_feat:
-        binary_idx = detect_binary_columns(cont_feats)
-        print(f'Binary feature columns detected: {binary_idx} '
-              f'({len(binary_idx)} binary, {cont_feats.shape[1] - len(binary_idx)} continuous)')
 
     # Optionally normalise features (only non-binary columns)
     norm_stats = None
