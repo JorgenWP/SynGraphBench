@@ -129,6 +129,19 @@ Key details: the cache stores `(N,)` ids and `(K,D)` `l2_centers`; the loader re
 
 **`original_cg` (full real-feature baseline) is intentionally NOT cache-substituted** — it is the richer-feature reference anchoring the ablation ladder (`original-cg → original-cg-quantized` = quantization cost; `original-cg-quantized → synthetic-cgt` = generation cost). The matched k-anonymity baseline is `original_cg_quantized`, which reads the cache. `eval_mode=original_cg`-only runs never touch the cache.
 
+### Privacy baseline (k-anonymity, no generator)
+
+**Status: implemented on `bo-tuning`** in the lightweight baseline scripts — separate from the `apply_cluster_cache` benchmark path above (that path lives on a different, unmerged branch). This baseline measures the utility cost of the **anonymization step alone** (no BiGG/CGT), giving the ablation rung `original → anonymized → synthetic`.
+
+The shared helper is `experiments/subsample_search/anonymize_utils.py::resolve_anonymized_features(cache_root, dataset, task, trial, k, original_feats)`: it globs the unique cache leaf `k{k}_c*`, fails loud on a missing `DONE`/leaf, validates `meta.json` (`feat_dim`, `cluster_size==k`, `num_nodes`), and returns `raw_centers[cluster_ids]` — i.e. **`raw_centers.pt`, not `l2_centers.pt`**, because GADBench detectors read raw `graph.ndata['feature']` with no normalization, so anonymized and real features stay in the same raw space.
+
+Two consumers (gated behind `--anonymity_k` + `--cache_root`; absent ⇒ legacy original baseline unchanged):
+
+- **AD — `experiments/subsample_search/compute_baselines.py`** (`task='hidden_labels'`, `trial=split_id`): replaces all node features with centroids **then restores real features on the test-mask nodes** (held-out query nodes a publisher would not anonymize). Swap inserted after `data.split(...)`. Output `artifacts/baselines_anonymized.csv` + `k_anonymity` column; resume key `(dataset, model, split_id, k_anonymity)`.
+- **LP — `experiments/subsample_search/link_compute_baselines.py`** (`task='hidden_links'`, `trial=None`): anonymizes **all** node features (LP splits edges, not nodes — every node feeds message passing for all edge splits). Swap inserted **before** `LinkDataset.split(...)` so the edge-removed `train_graph` inherits it. Output `artifacts/baselines_link_anonymized.csv` + `k_anonymity` column; resume key `(dataset, model, split_id, decoder, neg_sampling, k_anonymity)`.
+
+Hyperparams are byte-identical to the original baselines (same code path) so the anonymized↔original delta is a clean privacy-cost read. Sweep K ∈ {20,50,100,500,1000}.
+
 ## CLI conventions for adapted scripts
 
 When a train or benchmark script grows the ability to read the cache, the flags should be:
