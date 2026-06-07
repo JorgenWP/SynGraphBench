@@ -11,7 +11,7 @@ if _gadbench not in sys.path:
 
 from models.link_prediction.link_predictor import BaseDetector, MLPDecoder
 
-CROSS_GRAPH_LP_SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph']
+CROSS_GRAPH_LP_SUPPORTED_MODELS = ['GCN', 'GIN', 'GraphSAGE', 'XGBGraph', 'XGBoost']
 
 
 class CrossGraphLinkPredictor(BaseDetector):
@@ -304,3 +304,52 @@ class CrossGraphXGBGraphLinkPredictor(BaseDetector):
             torch.tensor(test_probs[:n_test_pos]),
             torch.tensor(test_probs[n_test_pos:]))
         return test_score
+
+
+class CrossGraphXGBoostLinkPredictor(CrossGraphXGBGraphLinkPredictor):
+    """Cross-graph XGBoost link predictor on raw node features.
+
+    Identical to CrossGraphXGBGraphLinkPredictor but without the GIN_noparam
+    aggregation: edge features are the Hadamard product of the two endpoints'
+    raw input features rather than neighborhood embeddings. Feature-only
+    baseline that ignores graph structure entirely. Mirrors the in-graph
+    pairing of XGBoost (raw features) vs XGBGraph (GIN_noparam embeddings).
+
+    Train:      synthetic graph train edges  (XGBoost fit)
+    Val:        synthetic graph val edges     (XGBoost eval_set)
+    Test:       original graph test edges     (final evaluation)
+    """
+
+    def __init__(self, train_config, model_config, syn_data, orig_data):
+        import xgboost as xgb
+        from sklearn.metrics import roc_auc_score, average_precision_score
+
+        device = train_config['device']
+        self.train_config = train_config
+        self.model_config = model_config
+
+        # --- Synthetic graph (train + val) ---
+        self.syn_train_graph = syn_data.train_graph.to(device)
+        self.syn_train_pos_edges = syn_data.train_pos_edges.to(device)
+        self.syn_val_pos_edges = syn_data.val_pos_edges.to(device)
+        self.syn_val_neg_edges = syn_data.val_neg_edges.to(device)
+        self.syn_num_nodes = syn_data.graph.num_nodes()
+        self.syn_edge_set = syn_data.edge_set
+
+        # --- Original graph (test only) ---
+        self.orig_train_graph = orig_data.train_graph.to(device)
+        self.test_pos_edges = orig_data.test_pos_edges.to(device)
+        self.test_neg_edges = orig_data.test_neg_edges.to(device)
+
+        # Raw node features on each graph independently (no GIN aggregation).
+        self.syn_feats = self.syn_train_graph.ndata['feature'].detach()
+        self.orig_feats = self.orig_train_graph.ndata['feature'].detach()
+
+        # XGBoost model
+        eval_metric = roc_auc_score if train_config['metric'] == "AUROC" else average_precision_score
+        cfg = {k: v for k, v in model_config.items() if k != 'model'}
+        self.model = xgb.XGBClassifier(
+            tree_method='hist', eval_metric=eval_metric, verbose=False, **cfg)
+
+        self.best_score = -1
+        self.patience_knt = 0

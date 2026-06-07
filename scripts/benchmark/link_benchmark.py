@@ -49,6 +49,7 @@ from bench_utils import (
 )
 from models.cross_graph_link_predictor import (
     CrossGraphLinkPredictor, CrossGraphXGBGraphLinkPredictor,
+    CrossGraphXGBoostLinkPredictor,
     CROSS_GRAPH_LP_SUPPORTED_MODELS,
 )
 
@@ -415,6 +416,8 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
 
             if model_name == 'XGBGraph':
                 detector = CrossGraphXGBGraphLinkPredictor(train_config, model_config, syn_data, orig_data)
+            elif model_name == 'XGBoost':
+                detector = CrossGraphXGBoostLinkPredictor(train_config, model_config, syn_data, orig_data)
             else:
                 detector = CrossGraphLinkPredictor(train_config, model_config, syn_data, orig_data)
 
@@ -558,6 +561,9 @@ def evaluate_link_models_cross_graph_bundle(
 
             if model_name == 'XGBGraph':
                 detector = CrossGraphXGBGraphLinkPredictor(
+                    train_config, model_config, syn_data, orig_data)
+            elif model_name == 'XGBoost':
+                detector = CrossGraphXGBoostLinkPredictor(
                     train_config, model_config, syn_data, orig_data)
             else:
                 detector = CrossGraphLinkPredictor(
