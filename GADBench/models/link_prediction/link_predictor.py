@@ -80,6 +80,11 @@ class BaseGNNLinkPredictor(BaseDetector):
         gnn = globals()[model_config['model']]
         self.model = gnn(**model_config).to(train_config['device'])
 
+        # Device copy of the (sorted, CPU-built) edge hash set so per-epoch
+        # negative sampling + collision filtering run on the GPU. BaseDetector's
+        # self.edge_set stays on CPU for the XGB/CGT subclasses that inherit it.
+        self.edge_set_dev = self.edge_set.to(train_config['device'])
+
         h_feats = model_config.get('h_feats', 32)
         decoder = train_config.get('decoder', 'dot')
         if decoder == 'mlp':
@@ -96,25 +101,31 @@ class BaseGNNLinkPredictor(BaseDetector):
         return (h[edges[:, 0]] * h[edges[:, 1]]).sum(dim=-1)
 
     def _filter_collisions(self, neg_edges):
-        """Replace negative edges that collide with real edges."""
+        """Replace negative edges that collide with real edges.
+
+        Runs on whatever device ``neg_edges`` is on; ``self.edge_set_dev`` is the
+        device copy of the sorted edge hashes, so the collision check stays on
+        the GPU.
+        """
         src, dst = neg_edges[:, 0], neg_edges[:, 1]
         N = self.num_nodes
         for attempt in range(10):
             hashes = src.long() * N + dst.long()
-            collision = torch.isin(hashes, self.edge_set) | (src == dst)
+            collision = torch.isin(hashes, self.edge_set_dev) | (src == dst)
             if not collision.any():
                 break
             n_bad = collision.sum().item()
-            dst[collision] = torch.randint(0, N, (n_bad,))
+            dst[collision] = torch.randint(0, N, (n_bad,), device=dst.device)
         return neg_edges
 
     def _sample_random_negatives(self, n):
-        """Sample random node pairs as guaranteed non-edges."""
+        """Sample random node pairs as guaranteed non-edges (on device)."""
+        device = self.train_config['device']
         neg_edges = torch.stack([
-            torch.randint(0, self.num_nodes, (n,)),
-            torch.randint(0, self.num_nodes, (n,))
+            torch.randint(0, self.num_nodes, (n,), device=device),
+            torch.randint(0, self.num_nodes, (n,), device=device)
         ], dim=1)
-        return self._filter_collisions(neg_edges).to(self.train_config['device'])
+        return self._filter_collisions(neg_edges)
 
     def _sample_hard_negatives(self, pos_edges):
         """Sample hard negatives via 2-hop random walks, guaranteed non-edges."""
@@ -137,8 +148,11 @@ class BaseGNNLinkPredictor(BaseDetector):
         if failed.any():
             hard_dst[failed] = torch.randint(0, self.num_nodes, (failed.sum(),))
 
-        neg_edges = torch.stack([src_cpu, hard_dst], dim=1)
-        return self._filter_collisions(neg_edges).to(self.train_config['device'])
+        # Random walk runs on the CPU graph; move to device before filtering so
+        # the collision check matches self.edge_set_dev.
+        neg_edges = torch.stack([src_cpu, hard_dst], dim=1).to(
+            self.train_config['device'])
+        return self._filter_collisions(neg_edges)
 
     def train(self):
         params = list(self.model.parameters())

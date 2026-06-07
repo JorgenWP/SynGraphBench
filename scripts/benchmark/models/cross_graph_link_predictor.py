@@ -36,7 +36,9 @@ class CrossGraphLinkPredictor(BaseDetector):
         self.syn_graph = syn_data.graph.to(device)
         self.syn_train_graph = syn_data.train_graph.to(device)
         self.syn_num_nodes = syn_data.graph.num_nodes()
-        self.syn_edge_set = syn_data.edge_set
+        # Device copies so per-epoch negative sampling + collision filtering run
+        # on the GPU (the CPU-built sorted hashes are unchanged, just relocated).
+        self.syn_edge_set = syn_data.edge_set.to(device)
 
         self.syn_train_pos_edges = syn_data.train_pos_edges.to(device)
         self.syn_val_pos_edges = syn_data.val_pos_edges.to(device)
@@ -45,7 +47,7 @@ class CrossGraphLinkPredictor(BaseDetector):
         # --- Original graph (test only) ---
         self.orig_train_graph = orig_data.train_graph.to(device)
         self.orig_num_nodes = orig_data.graph.num_nodes()
-        self.orig_edge_set = orig_data.edge_set
+        self.orig_edge_set = orig_data.edge_set.to(device)
 
         self.test_pos_edges = orig_data.test_pos_edges.to(device)
         self.test_neg_edges = orig_data.test_neg_edges.to(device)
@@ -78,6 +80,7 @@ class CrossGraphLinkPredictor(BaseDetector):
         return (h[edges[:, 0]] * h[edges[:, 1]]).sum(dim=-1)
 
     def _filter_collisions(self, neg_edges, num_nodes, edge_set):
+        """Runs on ``neg_edges``' device; ``edge_set`` is the device copy."""
         src, dst = neg_edges[:, 0], neg_edges[:, 1]
         for _ in range(10):
             hashes = src.long() * num_nodes + dst.long()
@@ -85,16 +88,16 @@ class CrossGraphLinkPredictor(BaseDetector):
             if not collision.any():
                 break
             n_bad = collision.sum().item()
-            dst[collision] = torch.randint(0, num_nodes, (n_bad,))
+            dst[collision] = torch.randint(0, num_nodes, (n_bad,), device=dst.device)
         return neg_edges
 
     def _sample_random_negatives(self, n, num_nodes, edge_set):
+        device = self.train_config['device']
         neg_edges = torch.stack([
-            torch.randint(0, num_nodes, (n,)),
-            torch.randint(0, num_nodes, (n,))
+            torch.randint(0, num_nodes, (n,), device=device),
+            torch.randint(0, num_nodes, (n,), device=device)
         ], dim=1)
-        return self._filter_collisions(neg_edges, num_nodes, edge_set).to(
-            self.train_config['device'])
+        return self._filter_collisions(neg_edges, num_nodes, edge_set)
 
     def _sample_hard_negatives(self, pos_edges, train_graph, num_nodes, edge_set):
         src = pos_edges[:, 0]
@@ -104,9 +107,11 @@ class CrossGraphLinkPredictor(BaseDetector):
         failed = hard_dst == -1
         if failed.any():
             hard_dst[failed] = torch.randint(0, num_nodes, (failed.sum(),))
-        neg_edges = torch.stack([src.cpu(), hard_dst], dim=1)
-        return self._filter_collisions(neg_edges, num_nodes, edge_set).to(
+        # Random walk runs on the CPU graph; move to device before filtering so
+        # the collision check matches the device edge_set.
+        neg_edges = torch.stack([src.cpu(), hard_dst], dim=1).to(
             self.train_config['device'])
+        return self._filter_collisions(neg_edges, num_nodes, edge_set)
 
     def eval(self, pos_scores, neg_scores):
         from sklearn.metrics import roc_auc_score, average_precision_score
