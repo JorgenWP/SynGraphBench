@@ -44,6 +44,7 @@ from bench_utils import (
     print_comparison, resolve_cgt_trial_paths,
     _assert_link_pt_alignment, build_synthetic_dgl_graph,
     apply_inferred_trial_id,
+    load_bigg_synthetic_graph, discover_bigg_split_bundle,
     format_duration,
 )
 from models.cross_graph_link_predictor import (
@@ -455,6 +456,164 @@ def evaluate_link_models_cross_graph(dataset_name, models, data_dir, dataset_dir
     return results
 
 
+def evaluate_link_models_cross_graph_bundle(
+        dataset_name, models, data_dir, variant_paths, split_ids,
+        trials, val_ratio, test_ratio, neg_sampling, decoder,
+        epochs, patience, lr, drop_rate, h_feats, num_layers,
+        cdf_invert='linear', seeds_per_split=1,
+        per_trial_records=None, source_label='synthetic-graph'):
+    """Cross-graph link prediction over a BiGG split bundle.
+
+    ``variant_paths[s]`` is the directory of ``subgraph_*`` files for the
+    variant trained on split ``split_ids[s]``. Each variant's subgraphs are
+    combined into one block-diagonal DGL graph (via ``load_bigg_synthetic_graph``,
+    which also inverts features back to raw space for lossless normalizations and
+    then returns ``norm_stats=None``). The model trains + validates on that
+    synthetic graph's edges and is tested on the original graph's held-out edges
+    for the same split — reproduced by ``LinkDataset.split(trial_id=split_id)``,
+    identical to the ``held_out_edges.pt`` sidecar (seed ``3407 + 10*split_id``).
+
+    Mirrors ``anomaly_benchmark.evaluate_models_cross_graph``: the same
+    ``SEED_LIST[:seeds_per_split]`` seeds are reused across every split so seed
+    and split variance are not conflated. Total runs = ``trials * seeds_per_split``.
+    """
+    if len(variant_paths) != trials or len(split_ids) != trials:
+        raise ValueError(
+            f"per-split lists length mismatch: trials={trials}, "
+            f"variant_paths={len(variant_paths)}, split_ids={len(split_ids)}")
+
+    # Combine each variant's subgraphs once and reuse across seeds.
+    combined_graphs, combined_norm_stats = [], []
+    for variant_path in variant_paths:
+        graph, norm_stats = load_bigg_synthetic_graph(variant_path, cdf_mode=cdf_invert)
+        combined_graphs.append(graph)
+        combined_norm_stats.append(norm_stats)
+
+    results = []
+
+    for model_name in models:
+        if model_name not in CROSS_GRAPH_LP_SUPPORTED_MODELS:
+            print(f"  NOTE: '{model_name}' skipped in cross-graph link prediction mode.")
+            continue
+
+        print(f"\n{'='*60}")
+        print(f"  {source_label.upper()} (CROSS) | {dataset_name} | {model_name}")
+        print(f"{'='*60}")
+
+        auc_list, pre_list, rec_list = [], [], []
+        time_list = []
+
+        runs = [(s, k) for s in range(trials) for k in range(seeds_per_split)]
+
+        for t, (s, k) in enumerate(runs):
+            torch.cuda.empty_cache()
+            seed = SEED_LIST[k]
+            set_seed(seed)
+
+            split_col = split_ids[s]
+            norm_stats = combined_norm_stats[s]
+
+            # Synthetic graph: train + val edges from the combined bundle variant.
+            syn_data = LinkDataset.from_graph(
+                combined_graphs[s], name=f'{dataset_name}_split{split_col}')
+            syn_data.split(val_ratio, test_ratio, split_col, neg_sampling)
+
+            # Original graph: held-out test edges for this split.
+            orig_data = LinkDataset(dataset_name, prefix=data_dir + '/original/')
+            orig_data.split(val_ratio, test_ratio, split_col, neg_sampling)
+
+            # Apply same normalization as synthetic generation. For lossless
+            # norms load_bigg_synthetic_graph already inverted to raw space and
+            # returned None, so this no-ops and both graphs stay in raw space.
+            if norm_stats is not None:
+                from bench_utils import apply_normalization
+                orig_data.graph.ndata['feature'] = apply_normalization(
+                    orig_data.graph.ndata['feature'], norm_stats)
+                orig_data.train_graph.ndata['feature'] = apply_normalization(
+                    orig_data.train_graph.ndata['feature'], norm_stats)
+
+            print(f"  Trial {t}, split={split_col}, seed={seed}")
+
+            if syn_data.val_pos_edges.shape[0] == 0:
+                print(f"  Skipping trial {t}: synthetic graph too sparse (0 val edges)")
+                del syn_data, orig_data
+                continue
+
+            train_config = {
+                'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+                'epochs': epochs,
+                'patience': patience,
+                'metric': 'AUPRC',
+                'neg_sampling': neg_sampling,
+                'decoder': decoder,
+                'seed': seed,
+            }
+            model_config = {
+                'model': model_name,
+                'lr': lr,
+                'drop_rate': drop_rate,
+                'h_feats': h_feats,
+                'num_layers': num_layers,
+            }
+
+            if model_name == 'XGBGraph':
+                detector = CrossGraphXGBGraphLinkPredictor(
+                    train_config, model_config, syn_data, orig_data)
+            else:
+                detector = CrossGraphLinkPredictor(
+                    train_config, model_config, syn_data, orig_data)
+
+            st = time.time()
+            test_score = detector.train()
+            dt = time.time() - st
+            time_list.append(dt)
+
+            auc_list.append(test_score['AUROC'])
+            pre_list.append(test_score['AUPRC'])
+            rec_list.append(test_score['RecK'])
+
+            if per_trial_records is not None:
+                per_trial_records.append({
+                    'source': source_label,
+                    'dataset': dataset_name,
+                    'model': model_name,
+                    'split_id': int(split_col),
+                    'seed': int(seed),
+                    'AUROC': float(test_score['AUROC']),
+                    'AUPRC': float(test_score['AUPRC']),
+                    'RecK':  float(test_score['RecK']),
+                    'time_sec': float(dt),
+                })
+
+            print(f"  -> AUROC={test_score['AUROC']:.4f}, "
+                  f"AUPRC={test_score['AUPRC']:.4f}, "
+                  f"RecK={test_score['RecK']:.4f}  [{dt:.1f}s]")
+            del detector, syn_data, orig_data
+
+        if time_list:
+            total = sum(time_list)
+            print(f"  [{model_name} on {dataset_name}] {len(time_list)} trials — "
+                  f"total {format_duration(total)}, "
+                  f"mean {format_duration(total / len(time_list))} "
+                  f"± {format_duration(float(np.std(time_list)))}")
+
+        if auc_list:
+            results.append({
+                'source': source_label,
+                'dataset': dataset_name,
+                'model': model_name,
+                'AUROC_mean': np.mean(auc_list),
+                'AUROC_std': np.std(auc_list),
+                'AUPRC_mean': np.mean(pre_list),
+                'AUPRC_std': np.std(pre_list),
+                'RecK_mean': np.mean(rec_list),
+                'RecK_std': np.std(rec_list),
+                'time_per_trial': sum(time_list) / len(time_list) if time_list else 0,
+            })
+
+    return results
+
+
 def main():
     args = parse_link_args()
     apply_inferred_trial_id(args)
@@ -466,7 +625,21 @@ def main():
     if args.synthetic_dir is None:
         args.synthetic_dir = os.path.join(_project_root, 'datasets', 'synthetic')
     if args.output_dir is None:
-        args.output_dir = os.path.join(_project_root, 'results', 'evaluate')
+        # Auto-derive: results/evaluate/{generator}/{task}/{dataset}/{stem}.
+        # The {task} segment keeps LP results parallel to AD's layout
+        # (.../hidden_links/... vs .../hidden_labels/...). Multi-dataset runs
+        # drop the dataset level. Falls back to the flat dir when no generator.
+        datasets_tmp = [d.strip() for d in args.datasets.split(',')]
+        stem_tmp = args.synthetic_name or 'original'
+        if args.generator:
+            parts = [_project_root, 'results', 'evaluate',
+                     args.generator, args.task]
+            if len(datasets_tmp) == 1:
+                parts.append(datasets_tmp[0])
+            parts.append(stem_tmp)
+            args.output_dir = os.path.join(*parts)
+        else:
+            args.output_dir = os.path.join(_project_root, 'results', 'evaluate')
 
     args.data_dir = os.path.abspath(args.data_dir)
     args.synthetic_dir = os.path.abspath(args.synthetic_dir)
@@ -491,10 +664,14 @@ def main():
 
     print("\nLink Prediction:")
     print(f"  Trials:         {args.trials}")
+    print(f"  Seeds/split:    {args.seeds_per_split}  (BiGG bundle mode only)")
+    print(f"  Skip original:  {args.skip_original}")
+    print(f"  Dump per-trial: {args.dump_per_trial}")
     print(f"  Val ratio:      {args.val_ratio}")
     print(f"  Test ratio:     {args.test_ratio}")
     print(f"  Neg sampling:   {args.neg_sampling}")
     print(f"  Decoder:        {args.decoder}")
+    print(f"  CDF invert:     {args.cdf_invert}")
     print(f"  Epochs:         {args.epochs}")
     print(f"  Patience:       {args.patience}")
     print(f"  Batch size:     {args.batch_size}  (CGT only)")
@@ -506,22 +683,64 @@ def main():
     print(f"  Num layers:     {args.num_layers}")
 
     all_results = []
+    all_per_trial_records = [] if args.dump_per_trial else None
+
+    # --- Pre-detect BiGG split bundles (graph type only) so --trials is
+    # overridden up front and Phase 1/2 agree on the split count. ---
+    bundle_map = {}
+    for dataset_name in datasets:
+        if args.synthetic_type != 'graph':
+            bundle_map[dataset_name] = None
+            continue
+        if args.graph_path is not None:
+            syn_path = args.graph_path
+        elif args.synthetic_name:
+            syn_path = os.path.join(args.synthetic_dir, args.generator,
+                                    dataset_name, args.task, args.synthetic_name)
+        else:
+            syn_path = None
+        bundle = discover_bigg_split_bundle(syn_path) if syn_path else None
+        if bundle is not None:
+            ids = [sid for sid, _ in bundle]
+            if args.trial_id != 0:
+                raise ValueError(
+                    f"--trial_id={args.trial_id} cannot be used with the BiGG "
+                    f"split bundle '{args.synthetic_name}'. Bundle mode iterates "
+                    f"through splits {ids} automatically.")
+            if args.trials != 1 and args.trials != len(bundle):
+                raise ValueError(
+                    f"--trials={args.trials} but bundle '{args.synthetic_name}' "
+                    f"contains {len(bundle)} per-split variants (splits {ids}). "
+                    f"Pass --trials {len(bundle)} or omit it (defaults to bundle "
+                    f"size).")
+            if args.trials != len(bundle):
+                print(f"  Bundle '{args.synthetic_name}' overrides --trials to "
+                      f"{len(bundle)} (was {args.trials}).")
+                args.trials = len(bundle)
+            print(f"  BiGG split bundle '{args.synthetic_name}': {len(bundle)} "
+                  f"variants — splits {ids}")
+        bundle_map[dataset_name] = bundle
 
     # --- Phase 1: Evaluate on original data ---
-    print("\n" + "#" * 80)
-    print("# PHASE 1: LINK PREDICTION ON ORIGINAL DATA")
-    print("#" * 80)
+    if args.skip_original:
+        print("\n" + "#" * 80)
+        print("# PHASE 1 SKIPPED (per --skip_original)")
+        print("#" * 80)
+    else:
+        print("\n" + "#" * 80)
+        print("# PHASE 1: LINK PREDICTION ON ORIGINAL DATA")
+        print("#" * 80)
 
-    for dataset_name in datasets:
-        results = evaluate_link_models(
-            dataset_name, models, args.data_dir,
-            'original', args.trials,
-            args.val_ratio, args.test_ratio,
-            args.neg_sampling, args.decoder,
-            args.epochs, args.patience,
-            args.lr, args.drop_rate, args.h_feats, args.num_layers,
-            trial_id=args.trial_id)
-        all_results.extend(results)
+        for dataset_name in datasets:
+            results = evaluate_link_models(
+                dataset_name, models, args.data_dir,
+                'original', args.trials,
+                args.val_ratio, args.test_ratio,
+                args.neg_sampling, args.decoder,
+                args.epochs, args.patience,
+                args.lr, args.drop_rate, args.h_feats, args.num_layers,
+                trial_id=args.trial_id)
+            all_results.extend(results)
 
     # --- Phase 2: Evaluate on synthetic data ---
     print("\n" + "#" * 80)
@@ -576,6 +795,20 @@ def main():
                 args.epochs, args.patience, trial_paths,
                 args.batch_size, args.lr, args.drop_rate,
                 args.h_feats, args.num_layers)
+        elif bundle_map.get(dataset_name) is not None:
+            # BiGG split bundle: one variant (dir of subgraph_* files) per split.
+            bundle = bundle_map[dataset_name]
+            variant_paths = [os.path.join(syn_path, sub) for _, sub in bundle]
+            split_ids = [sid for sid, _ in bundle]
+            results = evaluate_link_models_cross_graph_bundle(
+                dataset_name, models, args.data_dir, variant_paths, split_ids,
+                args.trials, args.val_ratio, args.test_ratio,
+                args.neg_sampling, args.decoder,
+                args.epochs, args.patience,
+                args.lr, args.drop_rate, args.h_feats, args.num_layers,
+                cdf_invert=args.cdf_invert,
+                seeds_per_split=args.seeds_per_split,
+                per_trial_records=all_per_trial_records)
         else:
             # Full graph (BiGG, etc.): train+val on synthetic, test on original.
             norm_stats_path = os.path.join(task_dir, stem + '_norm_stats.pt')
@@ -593,16 +826,22 @@ def main():
     if all_results:
         results_df = pd.DataFrame(all_results)
 
-        xlsx_path = os.path.join(args.output_dir, 'link_prediction_results.xlsx')
+        xlsx_path = os.path.join(args.output_dir, 'evaluation_results.xlsx')
         results_df.to_excel(xlsx_path, index=False)
 
-        csv_path = os.path.join(args.output_dir, 'link_prediction_results.csv')
+        csv_path = os.path.join(args.output_dir, 'evaluation_results.csv')
         results_df.to_csv(csv_path, index=False)
 
         print(f"\nResults saved to:\n  {xlsx_path}\n  {csv_path}")
         print_comparison(all_results, datasets, models)
     else:
         print("\nNo results to save.")
+
+    if all_per_trial_records is not None and all_per_trial_records:
+        per_trial_df = pd.DataFrame(all_per_trial_records)
+        per_trial_path = os.path.join(args.output_dir, 'per_trial_results.csv')
+        per_trial_df.to_csv(per_trial_path, index=False)
+        print(f"  Per-trial results saved to: {per_trial_path}")
 
     print(f"\n[Total] {format_duration(time.time() - script_start)}")
 

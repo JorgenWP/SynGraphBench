@@ -16,6 +16,20 @@ class LinkDataset:
         self.name = name
         self.graph = graph.long()
 
+    @classmethod
+    def from_graph(cls, graph, name='synthetic'):
+        """Build a LinkDataset around an already-loaded DGL graph.
+
+        Used for BiGG subsampled/bundle runs where the synthetic graph is a
+        directory of ``subgraph_*`` files combined in memory (via
+        ``bench_utils.load_bigg_synthetic_graph``) rather than a single file
+        that ``load_graphs`` can read directly.
+        """
+        obj = cls.__new__(cls)
+        obj.name = name
+        obj.graph = graph.long()
+        return obj
+
     def split(self, val_ratio=0.05, test_ratio=0.1, trial_id=0,
               neg_sampling='random'):
         torch.manual_seed(3407 + trial_id * 10)

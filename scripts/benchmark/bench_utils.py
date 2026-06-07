@@ -181,6 +181,22 @@ def parse_link_args():
     train_group.add_argument('--patience', type=int, default=50)
     train_group.add_argument('--batch_size', type=int, default=256,
                              help='Batch size (CGT comp-graph mode only)')
+    train_group.add_argument('--seeds_per_split', type=int, default=3,
+                             help='BiGG split-bundle mode only: repeat each '
+                                  'split with the same SEED_LIST[:seeds_per_split] '
+                                  'seeds so seed and split variance are not '
+                                  'conflated. Total runs = #splits * seeds_per_split.')
+    train_group.add_argument('--skip_original', action='store_true',
+                             help='Skip Phase 1 (original-data baseline). Use when '
+                                  'the baseline was already computed elsewhere.')
+    train_group.add_argument('--dump_per_trial', action='store_true',
+                             help='Write per_trial_results.csv with one raw row per '
+                                  '(source, dataset, model, split_id, seed) alongside '
+                                  'the aggregated evaluation_results.csv.')
+    train_group.add_argument('--cdf_invert', type=str, default='linear',
+                             choices=['linear', 'nearest'],
+                             help='cdf-normalized inversion strategy when combining '
+                                  'BiGG subgraphs (see invert_normalization).')
 
     model_group = parser.add_argument_group('Model architecture')
     model_group.add_argument('--lr', type=float, default=0.01)
