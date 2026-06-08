@@ -25,6 +25,10 @@
 #                   (Phase 1) — use when the baseline was already computed.
 #   cdf_invert      cdf inversion strategy when combining subgraphs (default: linear)
 #                   Supported: linear, nearest
+#   eval_real_subsampled "true"/"false" (default: false). BiGG bundle mode only: also
+#                   evaluate the real training-subsample graph (train on the real
+#                   subsamples BiGG trained on, test on the original held-out edges),
+#                   emitting real-subsampled-graph rows alongside synthetic-graph.
 #
 # BiGG split bundles: if synthetic_name points to a directory whose immediate
 # children are per-split BiGG variant dirs (each containing subgraph_* files and
@@ -61,6 +65,7 @@ SEEDS_PER_SPLIT="${9:-3}"
 DUMP_PER_TRIAL="${10:-false}"
 SKIP_ORIGINAL="${11:-false}"
 CDF_INVERT="${12:-linear}"
+EVAL_REAL_SUBSAMPLED="${13:-false}"
 
 # Map generator to its synthetic type (evaluation mode)
 case "$GENERATOR" in
@@ -85,6 +90,7 @@ echo "Decoder:          $DECODER"
 echo "Seeds/split:      $SEEDS_PER_SPLIT  (BiGG bundle mode only)"
 echo "Skip original:    $SKIP_ORIGINAL"
 echo "CDF invert:       $CDF_INVERT"
+echo "Real-subsampled:  $EVAL_REAL_SUBSAMPLED"
 echo ""
 
 EXTRA_ARGS=""
@@ -96,6 +102,9 @@ if [ "$DUMP_PER_TRIAL" = "true" ]; then
 fi
 if [ "$SKIP_ORIGINAL" = "true" ]; then
     EXTRA_ARGS="$EXTRA_ARGS --skip_original"
+fi
+if [ "$EVAL_REAL_SUBSAMPLED" = "true" ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --eval_real_subsampled"
 fi
 
 python -u scripts/benchmark/link_benchmark.py \

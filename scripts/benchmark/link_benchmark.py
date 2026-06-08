@@ -44,7 +44,8 @@ from bench_utils import (
     print_comparison, resolve_cgt_trial_paths,
     _assert_link_pt_alignment, build_synthetic_dgl_graph,
     apply_inferred_trial_id,
-    load_bigg_synthetic_graph, discover_bigg_split_bundle,
+    load_bigg_synthetic_graph, load_bigg_real_subsampled_graph,
+    discover_bigg_split_bundle,
     format_duration,
 )
 from models.cross_graph_link_predictor import (
@@ -464,7 +465,8 @@ def evaluate_link_models_cross_graph_bundle(
         trials, val_ratio, test_ratio, neg_sampling, decoder,
         epochs, patience, lr, drop_rate, h_feats, num_layers,
         cdf_invert='linear', seeds_per_split=1,
-        per_trial_records=None, source_label='synthetic-graph'):
+        per_trial_records=None, source_label='synthetic-graph',
+        real_subsampled=False):
     """Cross-graph link prediction over a BiGG split bundle.
 
     ``variant_paths[s]`` is the directory of ``subgraph_*`` files for the
@@ -476,6 +478,14 @@ def evaluate_link_models_cross_graph_bundle(
     for the same split — reproduced by ``LinkDataset.split(trial_id=split_id)``,
     identical to the ``held_out_edges.pt`` sidecar (seed ``3407 + 10*split_id``).
 
+    When ``real_subsampled`` is True, the bundle is loaded from each variant's
+    ``training_subsamples/`` (the real, pruned partitions BiGG trained on) via
+    ``load_bigg_real_subsampled_graph`` instead of the synthetic ``subgraph_*``.
+    Everything else is identical, so this yields the real-subsampled-graph LP
+    baseline (train on the real subsamples, test on the original held-out edges) —
+    the LP analog of the AD real-subsampled source. Caller passes
+    ``source_label='real-subsampled-graph'``.
+
     Mirrors ``anomaly_benchmark.evaluate_models_cross_graph``: the same
     ``SEED_LIST[:seeds_per_split]`` seeds are reused across every split so seed
     and split variance are not conflated. Total runs = ``trials * seeds_per_split``.
@@ -486,9 +496,26 @@ def evaluate_link_models_cross_graph_bundle(
             f"variant_paths={len(variant_paths)}, split_ids={len(split_ids)}")
 
     # Combine each variant's subgraphs once and reuse across seeds.
+    # real_subsampled loads the real training partitions; load_bigg_real_subsampled_graph
+    # needs the original graph (for its node-mask lookup, unused by LP but required),
+    # so fetch it once.
+    orig_for_masks = None
+    if real_subsampled:
+        orig_for_masks = LinkDataset(
+            dataset_name, prefix=data_dir + '/original/').graph
+
     combined_graphs, combined_norm_stats = [], []
     for variant_path in variant_paths:
-        graph, norm_stats = load_bigg_synthetic_graph(variant_path, cdf_mode=cdf_invert)
+        if real_subsampled:
+            graph, norm_stats = load_bigg_real_subsampled_graph(
+                variant_path, orig_for_masks, cdf_mode=cdf_invert)
+            if graph is None:
+                raise FileNotFoundError(
+                    f"--eval_real_subsampled: no training_subsamples/ under "
+                    f"'{variant_path}'. Regenerate the bundle with the BiGG "
+                    f"pipeline (it saves the real partitions there).")
+        else:
+            graph, norm_stats = load_bigg_synthetic_graph(variant_path, cdf_mode=cdf_invert)
         combined_graphs.append(graph)
         combined_norm_stats.append(norm_stats)
 
@@ -672,6 +699,7 @@ def main():
     print(f"  Trials:         {args.trials}")
     print(f"  Seeds/split:    {args.seeds_per_split}  (BiGG bundle mode only)")
     print(f"  Skip original:  {args.skip_original}")
+    print(f"  Real-subsampled:{args.eval_real_subsampled}  (BiGG bundle mode only)")
     print(f"  Dump per-trial: {args.dump_per_trial}")
     print(f"  Val ratio:      {args.val_ratio}")
     print(f"  Test ratio:     {args.test_ratio}")
@@ -815,6 +843,20 @@ def main():
                 cdf_invert=args.cdf_invert,
                 seeds_per_split=args.seeds_per_split,
                 per_trial_records=all_per_trial_records)
+            if args.eval_real_subsampled:
+                # Real-subsampled-graph baseline: same bundle/splits, but train on
+                # the real training_subsamples instead of the synthetic subgraphs.
+                results += evaluate_link_models_cross_graph_bundle(
+                    dataset_name, models, args.data_dir, variant_paths, split_ids,
+                    args.trials, args.val_ratio, args.test_ratio,
+                    args.neg_sampling, args.decoder,
+                    args.epochs, args.patience,
+                    args.lr, args.drop_rate, args.h_feats, args.num_layers,
+                    cdf_invert=args.cdf_invert,
+                    seeds_per_split=args.seeds_per_split,
+                    per_trial_records=all_per_trial_records,
+                    source_label='real-subsampled-graph',
+                    real_subsampled=True)
         else:
             # Full graph (BiGG, etc.): train+val on synthetic, test on original.
             norm_stats_path = os.path.join(task_dir, stem + '_norm_stats.pt')

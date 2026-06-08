@@ -189,6 +189,13 @@ def parse_link_args():
     train_group.add_argument('--skip_original', action='store_true',
                              help='Skip Phase 1 (original-data baseline). Use when '
                                   'the baseline was already computed elsewhere.')
+    train_group.add_argument('--eval_real_subsampled', action='store_true',
+                             help='BiGG split-bundle mode only: also evaluate the real '
+                                  'training-subsample graph (train on the real subsamples '
+                                  'BiGG trained on, test on the original held-out edges), '
+                                  'emitting real-subsampled-graph rows alongside '
+                                  'synthetic-graph. Requires training_subsamples/ in each '
+                                  'per-split variant dir.')
     train_group.add_argument('--dump_per_trial', action='store_true',
                              help='Write per_trial_results.csv with one raw row per '
                                   '(source, dataset, model, split_id, seed) alongside '

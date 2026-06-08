@@ -25,9 +25,11 @@
 #
 # Config matches the anonymized LP benchmark (neg_sampling=hard, decoder=mlp,
 # 5 models incl. XGBoost, seeds_per_split=1) so Delta_syn is apples-to-apples.
-# skip_original=true: the full real-graph baseline (Delta_real reference) already
-# exists at experiments/subsample_search/artifacts/baselines_link.csv under the
-# same mlp/hard config.
+# skip_original=true: the full real-graph baseline already exists at
+# experiments/subsample_search/artifacts/baselines_link.csv under the same mlp/hard config.
+# eval_real_subsampled=true: also emit real-subsampled-graph rows (train on the real
+# pruned training_subsamples, test on the original held-out edges) — the Delta reference
+# for the per-model synthetic LP table (LP analog of the AD tab:synthetic-auprc Delta).
 
 WORKDIR=${SLURM_SUBMIT_DIR}
 cd ${WORKDIR}
@@ -65,7 +67,7 @@ echo " ${DATASET} | non-anonymized synthetic | link prediction"
 echo "============================================================"
 
 # Args: datasets models trials generator synthetic_name neg_sampling decoder
-#       task seeds_per_split dump_per_trial skip_original cdf_invert
+#       task seeds_per_split dump_per_trial skip_original cdf_invert eval_real_subsampled
 # trials is overridden to the bundle size automatically.
 bash scripts/benchmark/run_link_benchmark.sh \
     "$DATASET" \
@@ -79,4 +81,5 @@ bash scripts/benchmark/run_link_benchmark.sh \
     "$SEEDS_PER_SPLIT" \
     true \
     true \
-    linear
+    linear \
+    true
