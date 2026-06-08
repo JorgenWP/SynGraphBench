@@ -117,7 +117,11 @@ def main() -> None:
     p.add_argument('--dataset', required=True)
     p.add_argument('--task', required=True, choices=['hidden_labels', 'hidden_links'])
     p.add_argument('--split', type=int, required=True)
-    p.add_argument('--K', type=int, required=True, choices=K_LEVELS)
+    p.add_argument('--K', type=int, required=False, default=None,
+                   choices=K_LEVELS,
+                   help='k-anonymity floor. Omit for the non-anonymized '
+                        'synthetic baseline (no clustering cache; the only '
+                        'difference vs an anonymized run of the same split).')
     args = p.parse_args()
 
     fixed = _load_fixed_hp(args.dataset)
@@ -135,25 +139,43 @@ def main() -> None:
         args.dataset, fixed['subsampling_config'],
         fixed['n_splits'], fixed.get('min_subgraph_nodes', 0))
 
-    cache_dir, cluster_num = _resolve_cache_leaf(
-        args.dataset, args.task, args.split, args.K)
-
-    # Positions 1..38 — reuse the BO coordinator's exact mapping.
+    # Positions 1..38 — reuse the BO coordinator's exact mapping. Identical
+    # whether or not we anonymize, so the only difference between the
+    # non-anon baseline and an anonymized run of the same split is the
+    # clustering (positions 39..42).
     train_args = _positional_args(fixed, params, args.split)
 
-    # Positions 39..43 — cache + task.
-    cache_root_rel = str(_PROJECT_ROOT / 'cache' / 'clustering')
-    train_args += [
-        cache_root_rel,             # 39 cache_root
-        str(args.K),                # 40 cluster_size
-        str(cluster_num),           # 41 cluster_num
-        str(args.split),            # 42 trial_id (== split_id for hidden_labels)
-        args.task,                  # 43 task
-    ]
+    if args.K is None:
+        # Non-anonymized synthetic baseline: empty cache block (anonymization
+        # off in train_bigg_subsample.sh) + task. All 5 splits share one
+        # bundle dir under the canonical (non-anonymized) resolver location.
+        cache_dir = ''
+        train_args += [
+            '',                     # 39 cache_root (empty = no anonymization)
+            '',                     # 40 cluster_size
+            '',                     # 41 cluster_num
+            '',                     # 42 trial_id
+            args.task,              # 43 task
+        ]
+        save_root = str(_PROJECT_ROOT / 'datasets' / 'synthetic' / 'bigg'
+                        / args.dataset / args.task / 'synthetic_baseline')
+    else:
+        cache_dir, cluster_num = _resolve_cache_leaf(
+            args.dataset, args.task, args.split, args.K)
 
-    save_root = str(_PROJECT_ROOT / 'datasets' / 'synthetic' / 'bigg'
-                    / 'anonymized' / args.dataset / args.task
-                    / f'{args.K}_anonymity')
+        # Positions 39..43 — cache + task.
+        cache_root_rel = str(_PROJECT_ROOT / 'cache' / 'clustering')
+        train_args += [
+            cache_root_rel,             # 39 cache_root
+            str(args.K),                # 40 cluster_size
+            str(cluster_num),           # 41 cluster_num
+            str(args.split),            # 42 trial_id (== split_id for hidden_labels)
+            args.task,                  # 43 task
+        ]
+
+        save_root = str(_PROJECT_ROOT / 'datasets' / 'synthetic' / 'bigg'
+                        / 'anonymized' / args.dataset / args.task
+                        / f'{args.K}_anonymity')
 
     payload = {
         'SAVE_ROOT':         save_root,
