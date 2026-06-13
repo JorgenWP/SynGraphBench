@@ -21,10 +21,10 @@
 #   sbatch --array=0-4 experiments/bo_tuning/slurm/bo_final_report.slurm     # per_split
 #   sbatch              experiments/bo_tuning/slurm/bo_final_report.slurm     # shared
 
-# ----- edit these before sbatch -----
-DATASET=
-MODE=
-STUDY_VERSION=
+# ----- edit these before sbatch, or pass via --export=ALL,DATASET=...,MODE=...,STUDY_VERSION=... -----
+DATASET="${DATASET:-}"
+MODE="${MODE:-}"
+STUDY_VERSION="${STUDY_VERSION:-v1}"
 # ------------------------------------
 
 set -e
